@@ -1,0 +1,88 @@
+# Two kinds of job, and the second is the one that matters.
+#
+# `tests` runs the suite, which needs no display: every path this package
+# drives is probed at runtime and stands in as a fake under test, including
+# the XRecord decoder, which is fed synthetic `Xlib.protocol.event` structs.
+#
+# `live` records a real application on a real X server. That distinction is
+# not academic here. The first time it ran it found that the RECORD context
+# was created on one display connection and enabled on the other -- which the
+# server refuses, so capture had never worked at all, with a green suite and a
+# clean type check. The second time it found window context coming from the
+# compositor rather than the recorded display. Neither is reachable from a
+# unit test, which is why this job exists rather than being left to whoever
+# happens to run the script by hand.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      # pyguitest is a hard dependency: the generator asks the installed
+      # Session which methods exist before it will emit a call to one, and
+      # `validate()` checks the finished file against it. Without it those
+      # checks pass vacuously, which is worse than failing.
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[x11,dev]'
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install -e '.[x11,dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+
+  live:
+    name: live capture on a real X server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # Xvfb is the X server; zenity is something to record; the at-spi
+      # packages are what let a widget be named rather than pointed at. A
+      # runner has no session bus, so the check starts its own -- see
+      # `reexec_on_a_private_bus` -- and borrowing one would be wrong anyway.
+      - name: Install an X server and an application to record
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb zenity dbus-x11 at-spi2-core libatk-adaptor
+
+      - run: pip install -e '.[x11,dev]'
+
+      - name: Record a real application and check what came out
+        run: ./scripts/live-capture-check.py

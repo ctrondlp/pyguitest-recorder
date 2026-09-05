@@ -1,0 +1,51 @@
+# pyguitest-recorder configuration.
+#
+# Copy to $XDG_CONFIG_HOME/pyguitest-recorder/config.toml (which is
+# ~/.config/pyguitest-recorder/config.toml unless XDG_CONFIG_HOME is set),
+# or to ~/.pyguitest-recorder.toml.
+#
+# Precedence is built-in defaults, then this file, then command-line flags.
+# Every key below shows its default; delete what you do not want to change.
+
+[capture]
+# display = ":0"          # unset means $DISPLAY
+screen = 0
+backend = "auto"          # "auto" or "xrecord"
+stop_key = "Pause"        # keysym that ends a recording
+window_context = true     # open a pyguitest session to identify windows
+element_context = true    # resolve clicks to AT-SPI elements
+
+[analyzer]
+motion_threshold = 8        # pixels; below this a press/release is a click
+click_interval = 0.5        # seconds a button may be held and still be a click
+double_click_interval = 0.4 # seconds within which clicks merge
+text_idle = 1.5             # seconds of silence that end a run of typed text
+pause_threshold = 1.0       # seconds of inactivity that become a Pause event
+record_motion = false       # emit pointer motion in its own right
+
+# Synchronization inference: work out what each pause was waiting for, and
+# emit that instead of a sleep. A window that opened becomes wait_for_window,
+# an element that appeared becomes wait_for_element, and a pause with nothing
+# observable behind it becomes wait_for_idle on the window's process.
+sync_inference = true
+# The idle rule alone needs WINDOW_PID, which not every desktop offers, so it
+# can be declined without giving up the other two.
+infer_idle = true
+
+[generator]
+locators = "element"        # "element", "relative" or "absolute"
+comments = true
+capability_preamble = true  # emit gui.require(...) naming what the script uses
+default_timeout = 10.0
+format_output = true        # run ruff format over the generated file
+function_name = "main"
+
+[privacy]
+sensitive = false           # treat all typed text as secret
+redact_sensitive = true     # password-field text becomes an environment lookup
+record_raw = false          # keep the raw event stream (includes keystrokes)
+
+[output]
+# output = "recorded.py"
+# session_file = "recording.json"
+debug = false

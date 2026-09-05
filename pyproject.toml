@@ -1,0 +1,118 @@
+[build-system]
+# license = "..." below is the PEP 639 SPDX-string form, which setuptools only
+# understands from 77 onward; an older setuptools either fails or silently
+# drops the license metadata. pyguitest pins the same floor for the same
+# reason.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyguitest-recorder"
+# The version lives in src/pyguitest_recorder/__init__.py and is read from
+# there, so the wheel, `--version` and `__version__` cannot disagree.
+dynamic = ["version"]
+description = "Record desktop GUI activity and generate pyguitest scripts"
+readme = "README.md"
+requires-python = ">=3.10"
+# GPL-2.0-or-later, matching pyguitest. Not only for consistency: the
+# recorder imports pyguitest at run time and its whole output is pyguitest
+# source, so a permissive license here would be claiming more than it can.
+license = "GPL-2.0-or-later"
+authors = [{ name = "Dennis K. Paulsen" }]
+keywords = ["gui", "testing", "recorder", "automation", "x11", "pyguitest"]
+
+# pyguitest is not optional: the recorder's output is pyguitest source, and
+# the generator validates what it emits against the installed public API.
+dependencies = [
+    # Floor is the version the generator's output is verified against, not
+    # the oldest that might work: `validate()` checks every emitted call
+    # against the installed Session, so an older pyguitest would not fail
+    # loudly, it would quietly accept a script naming methods it lacks.
+    "pyguitest>=0.3.0",
+    # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
+    'tomli>=2.0; python_version < "3.11"',
+]
+
+[project.optional-dependencies]
+# XRecord capture. python-xlib speaks the wire protocol in pure Python, which
+# is the same reason pyguitest's X11 backend uses it.
+x11 = ["python-xlib>=0.33"]
+# Element resolution at record time; the reason a recording can name a widget
+# instead of a coordinate.
+atspi = ["pyguitest[atspi]>=0.3.0"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[project.urls]
+homepage = "https://github.com/ctrondlp/pyguitest-recorder"
+repository = "https://github.com/ctrondlp/pyguitest-recorder"
+issues = "https://github.com/ctrondlp/pyguitest-recorder/issues"
+
+[project.scripts]
+pyguitest-recorder = "pyguitest_recorder.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "pyguitest_recorder.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "D",        # pydocstyle
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "C4",       # comprehensions
+    "SIM",      # simplification
+    "RET",      # return consistency
+    "ARG",      # unused arguments
+    "C901",     # cyclomatic complexity
+]
+ignore = [
+    "D203",    # incompatible with D211; keep no blank line before class docstring
+    "D213",    # incompatible with D212; keep the summary on the first line
+    "D401",    # properties read better as noun phrases than imperatives
+    "D105",    # __enter__/__exit__ and friends document themselves
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+# The capture interface exists to be overridden: its stubs necessarily accept
+# arguments they do not use.
+"src/pyguitest_recorder/backends/base.py" = ["ARG002"]
+"src/pyguitest_recorder/backends/*.py" = ["ARG002", "ARG005"]
+# The generator dispatches on event type through one uniform handler
+# signature; handlers for events with no fields ignore the event.
+"src/pyguitest_recorder/generator/python.py" = ["ARG002"]
+"tests/*" = [
+    "ARG001", "ARG002", "ARG003", "ARG005",
+    "B018",
+    "D100", "D101", "D102", "D103", "D104", "D107",
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+strict = true
+
+[[tool.mypy.overrides]]
+# python-xlib, pyguitest and PyGObject ship no stubs; gi is only reachable
+# through the optional element resolver.
+module = ["Xlib.*", "pyguitest.*", "gi.*", "gi.repository.*", "tomli"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
