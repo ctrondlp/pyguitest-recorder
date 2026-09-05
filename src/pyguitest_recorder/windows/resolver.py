@@ -4,14 +4,13 @@ This is what makes a recording outlive the coordinates it was made at, and it
 is the reason the recorder can generate `gui.button("Save").click()` instead
 of `gui.move_mouse(180, 90); gui.click()`.
 
-The element half talks to AT-SPI directly rather than through pyguitest.
-pyguitest's `Element` deliberately exposes no extents and no hit-testing --
-its whole argument is that elements replace coordinates, so asking "which
-element is at this point" is a question its API does not have -- but that is
-exactly the question a recorder must answer, because a coordinate is all the
-input backend gives it. `Atspi.Component.get_accessible_at_point` answers it,
-and behaves identically under X11 and Wayland, which is the one part of this
-recorder that is not X11-bound.
+Both halves go through one pyguitest session: `window_at` for the toplevel,
+`element_at` for the accessible under the same point. The element side used
+to talk to `Atspi.Component` through `gi` directly, because pyguitest had no
+way to ask what was at a point -- its whole argument is that elements replace
+coordinates. `Capability.ELEMENT_GEOMETRY` closed that gap, and this asks the
+question through the public API now, which is also how the recorder inherits
+pyguitest's own honesty about when screen coordinates mean anything.
 
 Everything degrades. No AT-SPI means coordinates with window context; no
 window backend means bare coordinates; and a recording made either way still
@@ -30,6 +29,14 @@ __all__ = ["ContextResolver", "NullResolver", "DesktopResolver"]
 
 MAX_DEPTH = 24
 """Descent limit, so a malformed accessible tree cannot spin forever."""
+
+WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+"""Accessible roles that are a toplevel rather than something to click.
+
+The same three pyguitest's `Role.WINDOW_ROLES` counts as windows, spelled
+out here because they arrive as plain role strings from a recording that
+may have been made on another machine.
+"""
 
 EXTENTS_SLACK = 8
 """Pixels an element may lie outside its window before it is disbelieved.
@@ -78,16 +85,49 @@ class DesktopResolver:
     ignore_pids: set[int] = field(default_factory=set)
 
     _titles: dict[str, set[str]] = field(default_factory=dict, init=False)
-    _atspi: Any = field(default=None, init=False)
+    _resolves_elements: bool = field(default=False, init=False)
     _warned: list[str] = field(default_factory=list, init=False)
     _scaled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        """Add this process to the ignore set and open AT-SPI if wanted."""
+        """Add this process to the ignore set and settle what can be asked."""
         self.ignore_pids.add(os.getpid())
         self._scaled = self._any_screen_scaled()
-        if self.elements:
-            self._atspi = _open_atspi(self._warned)
+        self._resolves_elements = self.elements and self._can_resolve_elements()
+
+    def _can_resolve_elements(self) -> bool:
+        """Whether this session can name what is under a point, and say so.
+
+        Two questions, both of which have been answered wrongly here before.
+        The capability is the version check as well as the feature check: a
+        pyguitest without ELEMENT_GEOMETRY does not declare it, so an older
+        one degrades to coordinates rather than raising AttributeError at
+        the first click.
+
+        The second is liveness. An accessibility bus can be reachable while
+        its registry is dead, and every call then answers emptily rather
+        than failing -- so this reads the tree once before believing it. A
+        childless desktop is *not* a failure: applications register when
+        they start, which may well be after a recording begins.
+        """
+        if self.session is None:
+            self._warn(
+                "element resolution off: no pyguitest session to ask; clicks "
+                "carry coordinates and no element"
+            )
+            return False
+        if "ELEMENT_GEOMETRY" not in {c.name for c in self.session.capabilities}:
+            self._warn(
+                "element resolution off: this session does not provide "
+                "ELEMENT_GEOMETRY, so nothing can say what is under a point"
+            )
+            return False
+        try:
+            len(self.session.root_element().children)
+        except Exception as exc:  # noqa: BLE001 - any failure is the same answer
+            self._warn(f"element resolution off: the accessible tree ({exc})")
+            return False
+        return True
 
     def _any_screen_scaled(self) -> bool:
         """Whether any screen is scaled, which makes extents incomparable."""
@@ -115,12 +155,35 @@ class DesktopResolver:
         resolving its clicks onto the editor the recorder was written in.
         """
         window = self._window(x, y, screen)
-        element = self._element(x, y) if self._atspi is not None else None
+        element = self._element(x, y) if self._resolves_elements else None
+        if element is not None and not self._is_widget(element):
+            return Target(x=x, y=y, screen=screen, window=window)
         if element is not None and not self._covers(element, x, y):
             return Target(x=x, y=y, screen=screen, window=window)
         if element is not None and not self._belongs(element, window):
             return Target(x=x, y=y, screen=screen, window=window)
         return Target(x=x, y=y, screen=screen, window=window, element=element)
+
+    def _is_widget(self, element: ElementRef) -> bool:
+        """Whether the answer is something a script could sensibly click.
+
+        A hit test that bottoms out at the *toplevel* has not found a widget
+        -- it has found the only thing in that application whose rectangle
+        could be checked. That is what a toolkit reporting its widgets in
+        window coordinates looks like from outside: the frame is placed, so
+        it passes, and every widget inside it claims points elsewhere on the
+        screen, so none of them do. `gui.element(role=Role.FRAME, ...)` is
+        never the click that was recorded, and the window is already carried
+        separately, so this falls back to a coordinate instead.
+        """
+        if element.role not in WINDOW_ROLES:
+            return True
+        self._warn(
+            f"ignored accessible answers that bottomed out at the window "
+            f"itself ({element.role!r} {element.name!r}); this toolkit does "
+            "not place its widgets in screen coordinates"
+        )
+        return False
 
     def _covers(self, element: ElementRef, x: int, y: int) -> bool:
         """Whether the element AT-SPI named actually contains the point asked about.
@@ -328,88 +391,41 @@ class DesktopResolver:
     # -- elements ------------------------------------------------------------
 
     def _element(self, x: int, y: int) -> ElementRef | None:
-        """Descend the accessible tree to the deepest element at this point."""
-        atspi = self._atspi
+        """Snapshot the accessible element under this point, if there is one.
+
+        Every read is inside the guard, not just the lookup: the tree can go
+        stale between naming an element and describing it -- a menu closing
+        under the pointer is enough -- and a half-read element is worth less
+        than the coordinate it would replace.
+        """
         try:
-            node = self._deepest(x, y)
-        except Exception:  # noqa: BLE001 - AT-SPI raises freely on stale nodes
-            return None
-        if node is None:
-            return None
-        try:
+            element = self.session.element_at(x, y)
+            if element is None:
+                return None
             return ElementRef(
-                role=node.get_role_name(),
-                name=node.get_name() or "",
-                description=node.get_description() or "",
-                path=_ancestry(node),
-                extents=_extents(atspi, node),
-                pid=_process_id(node),
+                role=element.role,
+                name=element.name or "",
+                description=element.description or "",
+                path=_ancestry(element),
+                extents=self._extents(element),
+                pid=element.pid,
             )
+        except Exception:  # noqa: BLE001 - a stale tree raises freely
+            return None
+
+    def _extents(self, element: Any) -> tuple[int, int, int, int] | None:
+        """The element's screen rectangle, where the session serves one."""
+        try:
+            rect = self.session.extents(element)
         except Exception:  # noqa: BLE001
             return None
-
-    def _deepest(self, x: int, y: int) -> Any:
-        """Walk applications, then descend the first frame containing the point."""
-        atspi = self._atspi
-        desktop = atspi.get_desktop(0)
-        for index in range(desktop.get_child_count()):
-            app = desktop.get_child_at_index(index)
-            if app is None:
-                continue
-            node = self._descend_app(app, x, y)
-            if node is not None:
-                return node
-        return None
-
-    def _descend_app(self, app: Any, x: int, y: int) -> Any:
-        """Descend one application's frames to the element at the point."""
-        atspi = self._atspi
-        for index in range(app.get_child_count()):
-            frame = app.get_child_at_index(index)
-            if frame is None:
-                continue
-            hit = atspi.Component.get_accessible_at_point(
-                frame, x, y, atspi.CoordType.SCREEN
-            )
-            if hit is None:
-                continue
-            return _descend(atspi, hit, x, y)
-        return None
+        if not rect:
+            return None
+        x, y, width, height = (int(v) for v in rect)
+        return (x, y, width, height)
 
 
-def _descend(atspi: Any, node: Any, x: int, y: int) -> Any:
-    """Follow get_accessible_at_point down to the deepest hit."""
-    for _ in range(MAX_DEPTH):
-        child = atspi.Component.get_accessible_at_point(
-            node, x, y, atspi.CoordType.SCREEN
-        )
-        if child is None:
-            return node
-        node = child
-    return node
-
-
-def _process_id(node: Any) -> int | None:
-    """The process an accessible belongs to, where the bridge publishes one."""
-    try:
-        pid = int(node.get_process_id())
-    except Exception:  # noqa: BLE001 - not every bridge answers this
-        return None
-    return pid or None
-
-
-def _extents(atspi: Any, node: Any) -> tuple[int, int, int, int] | None:
-    """Read an element's screen rectangle, which Wayland may not answer."""
-    try:
-        rect = atspi.Component.get_extents(node, atspi.CoordType.SCREEN)
-    except Exception:  # noqa: BLE001
-        return None
-    if rect is None or rect.width <= 0 or rect.height <= 0:
-        return None
-    return (rect.x, rect.y, rect.width, rect.height)
-
-
-def _ancestry(node: Any) -> tuple[tuple[str, str], ...]:
+def _ancestry(element: Any) -> tuple[tuple[str, str], ...]:
     """The (role, name) chain from the application root down to this element.
 
     Kept so an ambiguous name can be disambiguated by where it sits rather
@@ -417,41 +433,14 @@ def _ancestry(node: Any) -> tuple[tuple[str, str], ...]:
     gains a button.
     """
     path: list[tuple[str, str]] = []
-    current = node
+    current = element
     for _ in range(MAX_DEPTH):
         try:
-            parent = current.get_parent()
-        except Exception:  # noqa: BLE001
-            break
-        if parent is None:
-            break
-        try:
-            path.append((parent.get_role_name(), parent.get_name() or ""))
+            parent = current.parent
+            if parent is None:
+                break
+            path.append((parent.role, parent.name or ""))
         except Exception:  # noqa: BLE001
             break
         current = parent
     return tuple(reversed(path))
-
-
-def _open_atspi(warnings: list[str]) -> Any:
-    """Import AT-SPI, or record why element resolution is unavailable."""
-    try:
-        import gi
-
-        gi.require_version("Atspi", "2.0")
-        from gi.repository import Atspi
-    except (ImportError, ValueError) as exc:
-        warnings.append(f"element resolution off: AT-SPI unavailable ({exc})")
-        return None
-    # `get_desktop` alone is not a probe: it hands back a desktop object
-    # without contacting anything, so it succeeds against a bus whose registry
-    # is dead and element resolution is then switched on for a tree that can
-    # never answer. Counting the children is the first call that actually
-    # talks to `org.a11y.atspi.Registry`. A count of zero is not a failure --
-    # applications register when they start, which may be after this runs.
-    try:
-        Atspi.get_desktop(0).get_child_count()
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"element resolution off: no accessibility bus ({exc})")
-        return None
-    return Atspi

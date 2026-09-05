@@ -104,10 +104,24 @@ def test_preamble_can_be_turned_off(window):
     assert "gui.require" not in source
 
 
-def test_double_click_emits_two_clicks_with_an_explanation(window):
+def test_double_click_at_a_coordinate_emits_double_click(window):
     source = render(Click(target=Target(x=5, y=5, window=window), count=2))
-    assert source.count("gui.click()") == 2
-    assert "no double_click" in source
+    assert "gui.double_click()" in source
+    assert "gui.click()" not in source
+
+
+def test_triple_click_emits_three_clicks_with_an_explanation(window):
+    source = render(Click(target=Target(x=5, y=5, window=window), count=3))
+    assert source.count("gui.click()") == 3
+    assert "no primitive past double_click" in source
+
+
+def test_double_click_on_a_named_element_still_degrades(window, save_button):
+    source = render(
+        Click(target=Target(x=5, y=5, window=window, element=save_button), count=2)
+    )
+    assert source.count(".click()") == 2
+    assert "Element has no double_click" in source
 
 
 def test_text_into_a_named_field_sets_it_directly():
@@ -193,8 +207,8 @@ def test_window_variable_is_named_from_the_app_id_tail():
 
 
 def test_validate_rejects_a_call_pyguitest_does_not_have():
-    problems = validate("def f(gui):\n    gui.double_click()\n")
-    assert problems == ["pyguitest.Session has no method 'double_click'"]
+    problems = validate("def f(gui):\n    gui.telepathy()\n")
+    assert problems == ["pyguitest.Session has no method 'telepathy'"]
 
 
 def test_validate_rejects_a_capability_and_a_role_pyguitest_does_not_have():

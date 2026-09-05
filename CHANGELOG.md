@@ -18,6 +18,18 @@ source.
 - Window and element resolution: a click becomes `gui.button("Save").click()`
   where AT-SPI can name what was under it, a window-relative coordinate where
   it cannot, and an absolute one only as a last resort.
+- Element resolution now goes through pyguitest's own
+  `Capability.ELEMENT_GEOMETRY` — `element_at()`, `extents()` and
+  `Element.pid`, added upstream for this and released in pyguitest 0.4.0 —
+  instead of calling
+  `Atspi.Component` through `gi` directly. The recorder opens one session
+  composing `x11` (windows, scoped to the recorded display) with `atspi`
+  (elements), and the capability doubles as the version check: a pyguitest
+  without it degrades the recording to coordinates rather than failing.
+- A double click at a coordinate now emits pyguitest's own `gui.double_click()`,
+  added to pyguitest after this project first shipped with no way to express
+  one, and released in 0.4.0. A double click on a *named* element still emits
+  two `Element.click()` calls, since `Element` itself has no `double_click`.
 - **Synchronization inference.** Each recorded pause is asked what it was
   waiting for and answered from what the events themselves saw: a window that
   had never been seen becomes `wait_for_window`, a new element in an open

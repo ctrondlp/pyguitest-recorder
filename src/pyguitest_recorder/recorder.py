@@ -218,12 +218,12 @@ class Recorder:
     # -- setup ---------------------------------------------------------------
 
     def _open_session(self, display: str, notes: list[str]) -> Any:
-        """Open a pyguitest session for window context, if it was asked for.
+        """Open the pyguitest session the resolver asks its questions of.
 
-        Named `x11` rather than left to selection, because it is the only
-        backend that is scoped to a display at all. A compositor backend
-        answers over D-Bus and knows nothing about which X server is being
-        recorded, so on a Wayland desktop a plain `connect()` returns the
+        The backends are named rather than left to selection. `x11` is the
+        only one scoped to a display at all: a compositor backend answers
+        over D-Bus and knows nothing about which X server is being recorded,
+        so on a Wayland desktop a plain `connect()` returns the
         *compositor's* window list -- observed here, recording a private Xvfb
         and resolving every click onto the editor this was written in. The
         failure is silent and total: every coordinate comes out relative to
@@ -234,32 +234,69 @@ class Recorder:
         lists native Wayland toplevels that can never appear in a recording,
         and reports geometry in scaled logical coordinates that do not match
         the root coordinates XRecord reports.
-        """
-        if not self.settings.window_context:
-            return None
-        try:
-            import pyguitest
 
-            scoped = scoped_environment(display)
-            # The display goes through the environment rather than
-            # `backend_options`: pyguitest's x11 factory takes only the
-            # environment, so `display_name` -- which `X11Backend.__init__`
-            # does accept -- is a TypeError from `connect`. The backend opens
-            # `$DISPLAY`, so setting it around the call is what reaches it.
-            with _environment(scoped):
-                return pyguitest.connect(
-                    backend="x11", environment=pyguitest.detect(scoped)
-                )
-        except Exception as exc:  # noqa: BLE001 - context is optional
+        `atspi` joins it for elements, second so that x11 keeps every window
+        capability. Composing the two is what lets one session answer both
+        halves of a click; naming a backend that cannot build raises rather
+        than being skipped, which is why the shorter lists are tried after.
+        """
+        wanted = []
+        if self.settings.window_context:
+            wanted.append("x11")
+        if self.settings.element_context:
+            wanted.append("atspi")
+        if not wanted:
+            return None
+        scoped = scoped_environment(display)
+        session, failure = self._connect(wanted, scoped)
+        if session is None:
             notes.append(
-                f"window context off: no pyguitest session on {display or '$DISPLAY'}"
-                f" ({exc}); clicks will carry coordinates and no window"
+                f"window and element context off: no pyguitest session on "
+                f"{display or '$DISPLAY'} ({failure}); clicks will carry bare "
+                "coordinates"
             )
             return None
+        if self.settings.window_context and not _lists_windows(session):
+            notes.append(
+                "window context off: the session that opened lists no windows; "
+                "clicks will carry absolute coordinates and no window"
+            )
+        return session
+
+    def _connect(
+        self, wanted: list[str], scoped: dict[str, str]
+    ) -> tuple[Any, Exception | None]:
+        """Compose `wanted`, then each name alone, returning the first session.
+
+        A recording is worth making with whichever half opened: element
+        resolution without window context still names buttons, and window
+        context without elements still gives window-relative coordinates.
+        The resolver says in the recording's notes which one it lost.
+        """
+        import pyguitest
+
+        failure: Exception | None = None
+        # The display goes through the environment rather than
+        # `backend_options`: pyguitest's x11 factory takes only the
+        # environment, so `display_name` -- which `X11Backend.__init__` does
+        # accept -- is a TypeError from `connect`. The backends open
+        # `$DISPLAY`, so setting it around the call is what reaches them.
+        with _environment(scoped):
+            for names in ([wanted] if len(wanted) > 1 else []) + [[n] for n in wanted]:
+                try:
+                    return (
+                        pyguitest.connect(
+                            backend=names, environment=pyguitest.detect(scoped)
+                        ),
+                        None,
+                    )
+                except Exception as exc:  # noqa: BLE001 - context is optional
+                    failure = exc
+        return (None, failure)
 
     def _open_resolver(self) -> ContextResolver:
         """Build the resolver matching the settings and what actually opened."""
-        if self._session is None and not self.settings.element_context:
+        if self._session is None:
             return NullResolver()
         return DesktopResolver(
             session=self._session, elements=self.settings.element_context
@@ -276,6 +313,14 @@ class Recorder:
             record_motion=self.settings.record_motion,
             sensitive=self.settings.sensitive,
         )
+
+
+def _lists_windows(session: Any) -> bool:
+    """Whether this session can say which window a point is in."""
+    try:
+        return "WINDOW_LIST" in {c.name for c in session.capabilities}
+    except Exception:  # noqa: BLE001 - anything unreadable is a no
+        return False
 
 
 @contextlib.contextmanager

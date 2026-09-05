@@ -112,7 +112,7 @@ def leak_resolver(element_pid, window_pid):
     """A resolver whose window and element deliberately may not agree."""
     session = FakeSession(window=FakeWindow(title="Target", pid=window_pid))
     made = DesktopResolver(session=session, elements=False)
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
         role="push button", name="Save", pid=element_pid
     )
@@ -162,7 +162,7 @@ def test_an_element_with_no_window_to_corroborate_it_is_refused():
     # same point came from some other session's applications.
     made = DesktopResolver(session=FakeSession(window=None), elements=False)
     made.session.window = None
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(role="panel", name="", pid=4242)
     target = made.resolve(100, 100)
     assert target.window is None
@@ -173,7 +173,7 @@ def test_an_element_with_no_window_to_corroborate_it_is_refused():
 def test_without_window_context_at_all_the_element_is_kept():
     # Nothing to verify against, and one display is the normal case.
     made = DesktopResolver(session=None, elements=False)
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(role="push button", name="Save")
     assert made.resolve(100, 100).element is not None
 
@@ -185,7 +185,7 @@ def fitting_resolver(extents, geometry=(0, 0, 310, 263), scale=1.0):
     )
     session.screens = lambda: [type("S", (), {"scale": scale})()]
     made = DesktopResolver(session=session, elements=False)
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(role="panel", name="", extents=extents)
     return made
 
@@ -220,7 +220,7 @@ def test_the_fit_check_is_skipped_on_a_scaled_screen():
 def test_a_matching_pid_settles_it_without_consulting_geometry():
     session = FakeSession(window=FakeWindow(title="Target", pid=77))
     made = DesktopResolver(session=session, elements=False)
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
         role="panel", name="", pid=77, extents=(0, 0, 9999, 9999)
     )
@@ -232,7 +232,7 @@ def hit_resolver(extents, scale=1.0):
     session = FakeSession(window=FakeWindow(title="Target", pid=77))
     session.screens = lambda: [type("S", (), {"scale": scale})()]
     made = DesktopResolver(session=session, elements=False)
-    made._atspi = object()
+    made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
         role="label", name="Recorder Check", pid=77, extents=extents
     )
@@ -309,3 +309,133 @@ def test_a_hit_test_answer_is_not_second_guessed():
     )
     target = DesktopResolver(session=session, elements=False).resolve(760, 500)
     assert target.window is not None
+
+
+# -- elements, now asked of the session --------------------------------------
+
+
+class FakeCapability:
+    """Stands in for one member of pyguitest's Capability enum."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeElement:
+    def __init__(self, role, name, description="", pid=None, parent=None, children=()):
+        self.role = role
+        self.name = name
+        self.description = description
+        self.pid = pid
+        self.parent = parent
+        self.children = list(children)
+
+
+class ElementSession(FakeSession):
+    """A session that answers about elements as well as windows."""
+
+    def __init__(
+        self,
+        element=None,
+        capabilities=("WINDOW_LIST", "ELEMENT_GEOMETRY"),
+        extents=(120, 120, 60, 24),
+        tree_error=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        frame = FakeElement("frame", "Target")
+        self.element = element or FakeElement(
+            "push button", "Save", description="Save the file", pid=77, parent=frame
+        )
+        self._capabilities = capabilities
+        self._extents = extents
+        self._tree_error = tree_error
+
+    @property
+    def capabilities(self):
+        return {FakeCapability(name) for name in self._capabilities}
+
+    def root_element(self):
+        if self._tree_error is not None:
+            raise self._tree_error
+        return FakeElement("desktop frame", "main")
+
+    def element_at(self, x, y):
+        if "element_at" in self.fail:
+            raise RuntimeError("the tree went stale")
+        return self.element
+
+    def extents(self, element):
+        if "extents" in self.fail:
+            raise RuntimeError("no rectangle")
+        return self._extents
+
+
+def element_resolver(**kwargs):
+    session = ElementSession(window=FakeWindow(title="Target", pid=77), **kwargs)
+    return DesktopResolver(session=session, elements=True)
+
+
+def test_an_element_is_described_from_what_the_session_says():
+    target = element_resolver().resolve(130, 130)
+    assert target.element.role == "push button"
+    assert target.element.name == "Save"
+    assert target.element.description == "Save the file"
+    assert target.element.pid == 77
+    assert target.element.extents == (120, 120, 60, 24)
+
+
+def test_the_ancestry_walks_the_elements_own_parents():
+    target = element_resolver().resolve(130, 130)
+    assert target.element.path == (("frame", "Target"),)
+
+
+def test_a_pyguitest_without_element_geometry_degrades_to_coordinates():
+    # The capability is the version check too: an older pyguitest declares
+    # none, so this must degrade rather than call a method it lacks.
+    made = element_resolver(capabilities=("WINDOW_LIST",))
+    assert made.resolve(130, 130).element is None
+    assert any("ELEMENT_GEOMETRY" in warning for warning in made.warnings)
+
+
+def test_a_dead_accessible_tree_is_noticed_before_it_is_believed():
+    # A reachable bus whose registry is dead answers every question emptily
+    # rather than failing, so element resolution would switch on against a
+    # tree that can never name anything.
+    made = element_resolver(tree_error=RuntimeError("registry is not running"))
+    assert made.resolve(130, 130).element is None
+    assert any("accessible tree" in warning for warning in made.warnings)
+
+
+def test_no_session_leaves_element_resolution_off_and_says_so():
+    made = DesktopResolver(session=None, elements=True)
+    assert made.resolve(130, 130).element is None
+    assert any("no pyguitest session" in warning for warning in made.warnings)
+
+
+def test_a_lookup_that_raises_mid_recording_falls_back_to_the_coordinate():
+    made = element_resolver(fail=["element_at"])
+    target = made.resolve(130, 130)
+    assert target.element is None
+    assert target.window is not None
+
+
+def test_an_unreadable_rectangle_leaves_the_element_without_one():
+    # The element is still worth naming; only the corroboration checks that
+    # need a rectangle are skipped.
+    target = element_resolver(fail=["extents"]).resolve(130, 130)
+    assert target.element is not None
+    assert target.element.extents is None
+
+
+def test_a_hit_that_bottoms_out_at_the_window_is_not_a_widget():
+    # What a toolkit reporting widgets in window coordinates looks like from
+    # outside: the frame's own rectangle checks out, every widget inside it
+    # claims points elsewhere, so the walk stops at the frame. Clicking that
+    # is never the click that was recorded.
+    frame = FakeElement("frame", "Recorder Check", pid=77)
+    made = element_resolver(element=frame, extents=(100, 50, 310, 263))
+    target = made.resolve(130, 130)
+    assert target.element is None
+    assert target.window is not None
+    assert any("bottomed out at the window" in w for w in made.warnings)

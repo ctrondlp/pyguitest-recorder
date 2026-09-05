@@ -66,7 +66,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.3"
+PROFILE = "pyguitest-0.4"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -273,14 +273,17 @@ class PythonGenerator:
             if call is not None:
                 state.lines.extend([call] * event.count)
                 state.pointer = None
-                self._note_repeat(event, state)
+                self._note_element_repeat(event, state)
                 return
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON"})
         self._move(event.target, state)
         self._note_button_fallback(event, state)
         button = "" if event.button == 1 else str(event.button)
-        state.lines.extend([f"gui.click({button})"] * event.count)
-        self._note_repeat(event, state)
+        if event.count == 2:
+            state.lines.append(f"gui.double_click({button})")
+        else:
+            state.lines.extend([f"gui.click({button})"] * event.count)
+            self._note_repeat(event, state)
 
     def _note_button_fallback(self, event: Click, state: _State) -> None:
         """Explain a coordinate click on an element that could have been named."""
@@ -300,12 +303,35 @@ class PythonGenerator:
         state.lines.append(f"# so this {button} click has to stay a coordinate")
 
     def _note_repeat(self, event: Click, state: _State) -> None:
-        """Explain a repeated click, since pyguitest has no double_click."""
+        """Explain a repeated click beyond a double.
+
+        pyguitest has no primitive past double_click.
+        """
+        if event.count > 1 and self.options.comments:
+            state.lines.insert(
+                len(state.lines) - event.count,
+                f"# recorded as a {event.count}x click; pyguitest has no"
+                " primitive past double_click,",
+            )
+            state.lines.insert(
+                len(state.lines) - event.count,
+                "# so this is consecutive clicks and depends on the"
+                " toolkit's click interval",
+            )
+
+    def _note_element_repeat(self, event: Click, state: _State) -> None:
+        """Explain a repeated click on a named element.
+
+        `Session.double_click` exists, but it clicks wherever the pointer
+        is, not a named element -- `Element` has no double_click of its own.
+        So a double click on a named element still degrades to two
+        `Element.click()` calls, unlike the coordinate path.
+        """
         if event.count > 1 and self.options.comments:
             word = "double" if event.count == 2 else f"{event.count}x"
             state.lines.insert(
                 len(state.lines) - event.count,
-                f"# recorded as a {word} click; pyguitest has no double_click,"
+                f"# recorded as a {word} click; Element has no double_click,"
                 " so this is",
             )
             state.lines.insert(

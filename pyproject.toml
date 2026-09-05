@@ -28,7 +28,7 @@ dependencies = [
     # the oldest that might work: `validate()` checks every emitted call
     # against the installed Session, so an older pyguitest would not fail
     # loudly, it would quietly accept a script naming methods it lacks.
-    "pyguitest>=0.3.0",
+    "pyguitest>=0.4.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
@@ -39,7 +39,7 @@ dependencies = [
 x11 = ["python-xlib>=0.33"]
 # Element resolution at record time; the reason a recording can name a widget
 # instead of a coordinate.
-atspi = ["pyguitest[atspi]>=0.3.0"]
+atspi = ["pyguitest[atspi]>=0.4.0"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]
