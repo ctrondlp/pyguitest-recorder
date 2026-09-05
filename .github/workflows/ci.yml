@@ -73,14 +73,19 @@ jobs:
           python-version: "3.13"
 
       # Xvfb is the X server; zenity is something to record; the at-spi
-      # packages are what let a widget be named rather than pointed at. A
-      # runner has no session bus, so the check starts its own -- see
+      # packages are what let a widget be named rather than pointed at; and
+      # PyGObject is for the second window, without which the check cannot
+      # cover moving between two windows -- a bare server has no window
+      # manager, so two dialogs land exactly on top of each other and
+      # "which window is under this point" stops being answerable. A runner
+      # has no session bus, so the check starts its own -- see
       # `reexec_on_a_private_bus` -- and borrowing one would be wrong anyway.
       - name: Install an X server and an application to record
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb zenity dbus-x11 at-spi2-core libatk-adaptor
+            xvfb zenity dbus-x11 at-spi2-core libatk-adaptor \
+            python3-gi gir1.2-gtk-3.0
 
       - run: pip install -e '.[x11,dev]'
 

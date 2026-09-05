@@ -40,7 +40,7 @@ exist when it is next rendered, and running it twice cannot compound.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..model import (
     Click,
@@ -70,6 +70,15 @@ class SyncOptions:
 
     windows: bool = True
     elements: bool = True
+
+    activation: bool = True
+    """Raise a window the recording went back to before acting in it.
+
+    Separate from `windows` because it answers a different question. That rule
+    is about a window that did not exist yet; this one is about one that did,
+    and that the user brought forward by clicking on it -- which replay has to
+    do deliberately, since injected input goes wherever focus already is.
+    """
 
     idle: bool = True
     """Turn an unexplained pause into `wait_for_idle` on the window's process.
@@ -101,24 +110,80 @@ def infer_synchronization(
 
 
 @dataclass
+class _Walk:
+    """What the walk has to remember from one event to the next."""
+
+    window: str | None = None
+    """Identity of the window the last pointer action happened in."""
+
+    visited: set[str] = field(default_factory=set)
+    """Windows a pointer action has already happened in.
+
+    Deliberately not the `windows` set the other rules share. That one also
+    counts a window merely *named* by an inferred wait, and a window the
+    recording has never acted in is not one it can have come back to.
+    """
+
+
+@dataclass
 class _Inferencer:
     """One inference pass, carrying what the recording has seen so far."""
 
     options: SyncOptions
 
     def run(self, events: list[Event]) -> list[Event]:
-        """Walk the events, rewriting pauses and announcing new windows."""
+        """Walk the events, rewriting pauses and announcing window changes."""
         windows: set[str] = set()
         elements: set[tuple[str, str, str]] = set()
+        state = _Walk()
         out: list[Event] = []
         for index, event in enumerate(events):
             if isinstance(event, Pause):
                 out.append(self._resolve(event, events[index + 1 :], windows, elements))
                 continue
             out.extend(self._announce(event, windows))
+            out.extend(self._activation(event, state))
             _observe(event, windows, elements)
             out.append(event)
         return out
+
+    def _activation(self, event: Event, state: _Walk) -> list[Event]:
+        """Raise a window the recording came back to, before acting in it.
+
+        Clicking a window that is already open both raises it and acts in it,
+        and only the second half of that gets recorded. Replay does neither:
+        `move_mouse` and `click` go to a coordinate whatever is in front of it,
+        so a recording that moves between two open windows replays entirely
+        into whichever one happened to have focus.
+
+        A window seen for the *first* time is deliberately not this. It has
+        just appeared, so it already has focus, and `_announce` has put a
+        `wait_for_window` there instead -- raising it as well would be noise on
+        the common path of a dialog opening.
+        """
+        if not self.options.activation or not isinstance(event, _POINTER_EVENTS):
+            return []
+        target = _target_of(event)
+        window = target.window if target is not None else None
+        key = _window_key(window)
+        if not key or key == state.window:
+            return []
+        seen = key in state.visited
+        state.window = key
+        state.visited.add(key)
+        if window is None or not window.addressable or not seen:
+            # First time acting in this window: it has just been reached, so
+            # whatever put it in front is already done, and `_announce` or the
+            # pause rule has put a `wait_for_window` there instead.
+            return []
+        return [
+            WindowActivate(
+                timestamp=event.timestamp,
+                window=window,
+                origin=Origin.INFERRED,
+                note=f"the recording moved back to {key!r} here",
+            )
+        ]
 
     # -- rules ---------------------------------------------------------------
 

@@ -11,11 +11,13 @@ from pyguitest_recorder.model import (
     ElementRef,
     KeyStroke,
     Pause,
+    Recording,
     Target,
     TextInput,
     WaitForElement,
     WaitForIdle,
     WaitForWindow,
+    WindowActivate,
     WindowRef,
 )
 
@@ -168,3 +170,98 @@ def test_disabled_returns_the_recording_unchanged():
     assert kinds(infer_synchronization(events, SyncOptions(enabled=False))) == kinds(
         events
     )
+
+
+# -- window activation -------------------------------------------------------
+# Nothing in the recorder ever built a WindowActivate: the model defined it,
+# this analyzer read it and the generator rendered it, and no code path
+# produced one. A recording spanning two windows replayed into whichever one
+# happened to have focus.
+
+
+def test_going_back_to_an_open_window_raises_it():
+    events = [
+        click(1.0, window=MAIN),
+        click(2.0, window=DIALOG),
+        click(3.0, window=MAIN),
+    ]
+    out = infer_synchronization(events)
+    raised = [e for e in out if isinstance(e, WindowActivate)]
+    assert [e.window.app_id for e in raised] == ["org.x.Editor"]
+    # Before the click that needed it, not after.
+    assert out.index(raised[0]) < out.index(events[2])
+
+
+def test_a_window_seen_for_the_first_time_is_waited_for_not_raised():
+    # It has just appeared, so it already has focus; raising it as well is
+    # noise on the commonest path there is, a dialog opening.
+    out = infer_synchronization([click(1.0, window=MAIN), click(2.0, window=DIALOG)])
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+    assert len([e for e in out if isinstance(e, WaitForWindow)]) == 2
+
+
+def test_staying_in_one_window_raises_nothing():
+    out = infer_synchronization([click(1.0), click(2.0), click(3.0)])
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_activation_can_be_declined():
+    events = [click(1.0, MAIN), click(2.0, DIALOG), click(3.0, MAIN)]
+    out = infer_synchronization(events, SyncOptions(activation=False))
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_a_window_with_no_identity_is_never_raised():
+    bare = WindowRef()
+    events = [click(1.0, MAIN), click(2.0, bare), click(3.0, MAIN)]
+    out = infer_synchronization(events)
+    assert all(e.window.addressable for e in out if isinstance(e, WindowActivate))
+
+
+def test_typing_does_not_count_as_switching_windows():
+    # A text run is anchored to the last clicked field, so believing its target
+    # is a window change would raise a window the user never went back to.
+    events = [
+        click(1.0, window=MAIN),
+        click(2.0, window=DIALOG),
+        TextInput(timestamp=3.0, text="hi", target=Target(x=1, y=1, window=MAIN)),
+        click(4.0, window=DIALOG),
+    ]
+    out = infer_synchronization(events)
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_the_raise_survives_into_the_generated_script():
+    from pyguitest_recorder.generator import generate, validate
+
+    events = [click(1.0, MAIN), click(2.0, DIALOG), click(3.0, MAIN)]
+    recording = Recording(events=infer_synchronization(events))
+    source = generate(recording)
+    assert "gui.activate_window(" in source
+    assert validate(source) == []
+
+
+def test_a_pause_before_a_new_window_does_not_also_raise_it():
+    # The pause rule marks the window seen so the announcement rule does not
+    # duplicate its wait. Activation must not read that as "came back to":
+    # the recording has not acted in that window yet.
+    events = [
+        click(1.0, window=MAIN),
+        Pause(timestamp=1.1, seconds=2.0),
+        click(4.0, window=DIALOG),
+    ]
+    out = infer_synchronization(events)
+    assert [type(e).__name__ for e in out].count("WindowActivate") == 0
+    assert any(isinstance(e, WaitForWindow) for e in out)
+
+
+def test_going_back_after_a_pause_still_raises():
+    events = [
+        click(1.0, window=MAIN),
+        Pause(timestamp=1.1, seconds=2.0),
+        click(4.0, window=DIALOG),
+        click(5.0, window=MAIN),
+    ]
+    out = infer_synchronization(events)
+    raised = [e for e in out if isinstance(e, WindowActivate)]
+    assert [e.window.app_id for e in raised] == ["org.x.Editor"]

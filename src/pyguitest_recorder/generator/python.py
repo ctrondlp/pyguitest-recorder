@@ -166,6 +166,7 @@ class _State:
     roles: set[str] = field(default_factory=set)
     windows: dict[str, str] = field(default_factory=dict)
     geometry_for: str | None = None
+    geometry_origin: tuple[int, int] | None = None
     pointer: str | None = None
     helpers: set[str] = field(default_factory=set)
     secrets: list[str] = field(default_factory=list)
@@ -393,6 +394,7 @@ class PythonGenerator:
         # Raising a window can move it, so both the cached origin and the
         # pointer position stop being trustworthy here.
         state.geometry_for = None
+        state.geometry_origin = None
         state.pointer = None
 
     def _emit_waitforwindow(self, event: WaitForWindow, state: _State) -> None:
@@ -483,21 +485,39 @@ class PythonGenerator:
         if relative is None or target.window is None or not target.window.addressable:
             return f"{target.x}, {target.y}"
         name = self._window_var(target.window, state)
-        self._ensure_geometry(name, state)
+        geometry = target.window.geometry
+        origin = (geometry[0], geometry[1]) if geometry else None
+        self._ensure_geometry(name, state, origin)
         dx, dy = relative
         return f"{name}_x + {dx}, {name}_y + {dy}"
 
-    def _ensure_geometry(self, name: str, state: _State) -> None:
-        """Read a window's origin once, and again whenever the window changes."""
-        if state.geometry_for == name:
+    def _ensure_geometry(
+        self, name: str, state: _State, origin: tuple[int, int] | None
+    ) -> None:
+        """Read a window's origin, again whenever it could have gone stale.
+
+        Re-read when the window *moved during the recording*, not only when a
+        different window is addressed. Every offset below is relative to where
+        the window was at the moment that event was captured, so one geometry
+        read shared across a move puts every later coordinate out by however
+        far it travelled. Seen live: a drag inside a window dragged the window,
+        and its origin went from (0, 0) to (-160, 0) halfway through.
+        """
+        if state.geometry_for == name and state.geometry_origin == origin:
             return
         state.capabilities.add("WINDOW_GEOMETRY")
         if self.options.comments and state.geometry_for is None:
             state.lines.append(
                 "# coordinates below are relative to this window's origin"
             )
+        elif self.options.comments and state.geometry_for == name:
+            state.lines.append("# the window moved, so its origin is read again")
         state.lines.append(f"{name}_x, {name}_y, _, _ = gui.geometry({name})")
         state.geometry_for = name
+        state.geometry_origin = origin
+        # The pointer expression is written in terms of that origin, so it
+        # means something different now.
+        state.pointer = None
 
     def _window_var(
         self, window: WindowRef, state: _State, timeout: float | None = None

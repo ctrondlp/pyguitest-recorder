@@ -418,3 +418,31 @@ def test_the_profile_names_the_pyguitest_the_output_was_checked_against():
     major_minor = ".".join(pyguitest.__version__.split(".")[:2])
     expected = f"pyguitest-{major_minor}"
     assert expected == PROFILE
+
+
+def test_a_window_that_moved_has_its_origin_read_again():
+    # Every offset is relative to where the window was when that event was
+    # captured, so one geometry read shared across a move puts every later
+    # coordinate out by however far it travelled. Seen live: a drag inside a
+    # window dragged the window, origin (0, 0) -> (-160, 0) mid-recording.
+    before = WindowRef(title="W", app_id="org.x.W", geometry=(0, 0, 300, 200))
+    after = WindowRef(title="W", app_id="org.x.W", geometry=(-160, 0, 300, 200))
+    source = render(
+        Click(target=Target(x=50, y=60, window=before)),
+        Click(target=Target(x=50, y=60, window=after)),
+    )
+    assert source.count("gui.geometry(w)") == 2
+    assert "the window moved" in source
+    # The offsets differ, because the same screen point is a different place
+    # in a window that has moved.
+    assert "gui.move_mouse(w_x + 50, w_y + 60)" in source
+    assert "gui.move_mouse(w_x + 210, w_y + 60)" in source
+    assert validate(source) == []
+
+
+def test_a_window_that_stayed_put_is_read_once(window):
+    source = render(
+        Click(target=Target(x=180, y=90, window=window)),
+        Click(target=Target(x=200, y=95, window=window)),
+    )
+    assert source.count("gui.geometry(app)") == 1

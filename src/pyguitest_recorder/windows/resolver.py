@@ -239,15 +239,45 @@ class DesktopResolver:
     # -- windows -------------------------------------------------------------
 
     def _window(self, x: int, y: int, screen: int) -> WindowRef | None:
-        """Find the toplevel under the point, falling back to the active one."""
+        """Find the toplevel under the point, falling back to the active one.
+
+        The fallback is a guess and is checked before it is believed. When the
+        hit test comes back empty the click landed on the root, on a window the
+        backend cannot see, or on one that has just moved -- and the *focused*
+        window is only sometimes the right answer to that. Seen live: a click
+        at (760, 500) in a second window resolved, through this fallback, to a
+        window occupying (-160, 0, 310, 263), which does not contain the point
+        by 610 pixels. Every coordinate under it then came out relative to the
+        wrong origin, in a script that validated clean.
+        """
         if self.session is None:
             return None
-        window = self._window_at(x, y, screen) or self._active_window()
+        window = self._window_at(x, y, screen)
+        if window is None:
+            window = self._plausible_active(x, y)
         if window is None:
             return None
         if window.pid in self.ignore_pids:
             return None
         return self._describe(window)
+
+    def _plausible_active(self, x: int, y: int) -> Any:
+        """The focused window, but only if it could be the one under the point."""
+        window = self._active_window()
+        if window is None:
+            return None
+        geometry = self._geometry(window)
+        if geometry is None:
+            # Nothing to check it against; the guess is all there is.
+            return window
+        wx, wy, width, height = geometry
+        if wx <= x < wx + width and wy <= y < wy + height:
+            return window
+        self._warn(
+            "ignored the focused window as a stand-in for points it does not "
+            "cover; those clicks carry absolute coordinates instead"
+        )
+        return None
 
     def _window_at(self, x: int, y: int, screen: int) -> Any:
         """Hit-test the point, where the backend supports it."""

@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,7 +39,7 @@ from pyguitest_recorder.analyzer import infer_synchronization
 from pyguitest_recorder.backends.x11 import unavailable_reason
 from pyguitest_recorder.config import Settings
 from pyguitest_recorder.generator import generate, validate
-from pyguitest_recorder.model import Origin
+from pyguitest_recorder.model import Origin, Recording
 from pyguitest_recorder.recorder import Recorder
 
 GEOMETRY = "1280x800x24"
@@ -46,6 +47,12 @@ GEOMETRY = "1280x800x24"
 
 APP_TITLE = "Recorder Check"
 """Title the test application is given, and waited for by."""
+
+SECOND_TITLE = "Recorder Check Two"
+"""A second window, somewhere else, so switching between windows is covered."""
+
+SECOND_AT = (600, 400)
+SECOND_SIZE = (320, 200)
 
 A11Y_DIRECTORIES = ("/usr/libexec", "/usr/lib/at-spi2-core", "/usr/lib")
 """Where the accessibility daemons live, which is not the same on every
@@ -204,6 +211,8 @@ def app_rectangle(display: str, title: str) -> tuple[int, int, int, int]:
                 except Exception:  # noqa: BLE001 - windows come and go
                     continue
                 seen.append(f"{name!r} {box.width}x{box.height}")
+                if name != title:
+                    continue
                 if box.width >= MIN_APP_SIZE and box.height >= MIN_APP_SIZE:
                     return (box.x, box.y, box.width, box.height)
             time.sleep(0.25)
@@ -216,11 +225,46 @@ def app_rectangle(display: str, title: str) -> tuple[int, int, int, int]:
     )
 
 
-def send_input(display: str, rectangle: tuple[int, int, int, int]) -> None:
+def start_second_window(display: str) -> subprocess.Popen[bytes] | None:
+    """Open a window somewhere else, or report that we cannot.
+
+    Needs PyGObject. Without it the check still runs and says which part of the
+    scenario went uncovered, rather than passing as though it had not.
+    """
+    script = Path(__file__).resolve().parent / "check_app.py"
+    environment = {**os.environ, "DISPLAY": display, "GDK_BACKEND": "x11"}
+    environment.pop("WAYLAND_DISPLAY", None)
+    app = subprocess.Popen(
+        [
+            sys.executable,
+            str(script),
+            "--title",
+            SECOND_TITLE,
+            "--at",
+            str(SECOND_AT[0]),
+            str(SECOND_AT[1]),
+            "--size",
+            str(SECOND_SIZE[0]),
+            str(SECOND_SIZE[1]),
+        ],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(3)
+    return app if app.poll() is None else None
+
+
+def send_input(
+    display: str,
+    rectangle: tuple[int, int, int, int],
+    second: tuple[int, int, int, int] | None,
+) -> None:
     """Synthesize the interaction the recorder is supposed to see.
 
-    A click, a word typed, a pause worth synchronizing on, a second click and
-    a wheel notch -- one of each kind the normalizer groups differently.
+    One of each kind the normalizer groups differently: a click, a word typed,
+    a hotkey, a drag, a pause worth synchronizing on, a move to another window
+    and back, a right click and a wheel notch.
     """
     from Xlib import XK, X
     from Xlib import display as xdisplay
@@ -250,6 +294,19 @@ def send_input(display: str, rectangle: tuple[int, int, int, int]) -> None:
         connection.sync()
         time.sleep(0.3)
 
+    def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+        point(from_x, from_y)
+        xtest.fake_input(connection, X.ButtonPress, 1)
+        connection.sync()
+        for step in range(1, 6):
+            point(
+                from_x + (to_x - from_x) * step // 5,
+                from_y + (to_y - from_y) * step // 5,
+            )
+        xtest.fake_input(connection, X.ButtonRelease, 1)
+        connection.sync()
+        time.sleep(0.3)
+
     x, y, width, height = rectangle
     point(x + width // 2, y + height // 2)
     click()
@@ -257,9 +314,21 @@ def send_input(display: str, rectangle: tuple[int, int, int, int]) -> None:
         tap(key(char)) if char.islower() else tap(key("Shift_L"), key(char.lower()))
     tap(key("Control_L"), key("s"))
     time.sleep(2.0)  # long enough to become a Pause, and then a wait
+    if second is not None:
+        sx, sy, swidth, sheight = second
+        point(sx + swidth // 2, sy + sheight // 2)
+        click()
+        # ...and back, which is the case a recording cannot replay without an
+        # explicit raise: injected input goes wherever focus already is.
+        point(x + width // 2, y + height // 2)
+        click()
     point(x + width // 2, y + height - 20)
     click()
     click(3)
+    # The drag comes last on purpose. Dragging a blank part of a window with
+    # no window manager drags the *window*, and a scenario that moves the
+    # thing it is clicking on invalidates every coordinate after it.
+    drag(x + 40, y + 60, x + 200, y + 60)
     xtest.fake_input(connection, X.ButtonPress, 4)
     xtest.fake_input(connection, X.ButtonRelease, 4)
     connection.sync()
@@ -285,6 +354,7 @@ def check(display: str) -> int:
         raise Failure(reason)
 
     app = start_app(display)
+    second_app = start_second_window(display)
     settings = Settings(display=display, record_raw=True, stop_key="Pause")
     recorder = Recorder(settings=settings)
     recorder.start()
@@ -299,7 +369,18 @@ def check(display: str) -> int:
     time.sleep(0.5)
     rectangle = app_rectangle(display, APP_TITLE)
     print(f"application at: {rectangle}")
-    sender = threading.Thread(target=send_input, args=(display, rectangle), daemon=True)
+    second = None
+    if second_app is None:
+        print("no second window (PyGObject missing); window switching uncovered")
+    else:
+        try:
+            second = app_rectangle(display, SECOND_TITLE)
+            print(f"second window at:  {second}")
+        except Failure as exc:
+            print(f"second window unusable, switching uncovered: {exc}")
+    sender = threading.Thread(
+        target=send_input, args=(display, rectangle, second), daemon=True
+    )
     watchdog = threading.Timer(30.0, recorder.stop)
     sender.start()
     watchdog.start()
@@ -308,7 +389,9 @@ def check(display: str) -> int:
     finally:
         watchdog.cancel()
         recorder.stop()
-        app.terminate()
+        for process in (app, second_app):
+            if process is not None:
+                process.terminate()
 
     print(f"\ncaptured {len(recording.raw)} raw events")
     for event in recording.raw[:40]:
@@ -369,7 +452,31 @@ def check(display: str) -> int:
     print("\n" + source)
     problems = validate(source)
     print("validate:", problems or "clean")
+    problems += round_trip(recording, source)
     return 1 if problems else 0
+
+
+def round_trip(recording: Recording, source: str) -> list[str]:
+    """Save the recording, read it back, and check it renders the same.
+
+    The claim `--regenerate` rests on: a recording is the durable artefact and
+    the script is derived from it, so a saved one has to render to the same
+    thing on a later run. Only ever checked against events built in a test
+    before this; here it is a real capture, with real windows, elements,
+    timings and environment in it.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        path = Recording(
+            events=recording.events,
+            environment=recording.environment,
+            started_at=recording.started_at,
+        ).save(Path(directory) / "recording.json")
+        again = generate(Recording.load(path))
+    if again == source:
+        print("round trip:", f"{path.name} re-rendered identically")
+        return []
+    print("round trip: FAILED, the saved recording renders differently")
+    return ["a saved recording did not re-render to the same script"]
 
 
 def main() -> int:

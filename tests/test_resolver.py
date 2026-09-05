@@ -53,7 +53,9 @@ def test_window_and_geometry_are_captured():
 
 
 def test_hit_test_failure_falls_back_to_the_active_window():
-    target = resolver(FakeSession(fail={"window_at"})).resolve(1, 2)
+    # A point the focused window actually covers; the geometry is
+    # (100, 50, 800, 600), and a point outside it is a different test below.
+    target = resolver(FakeSession(fail={"window_at"})).resolve(150, 100)
     assert target.window is not None
     assert target.window.title == "Example"
 
@@ -263,3 +265,47 @@ def test_the_cover_check_is_skipped_on_a_scaled_screen():
 def test_an_element_with_no_extents_is_still_trusted():
     made = hit_resolver(extents=None)
     assert made.resolve(155, 131).element is not None
+
+
+def test_the_active_window_fallback_must_contain_the_point():
+    # A click that misses every window resolved, through this fallback, to the
+    # focused one -- and every coordinate under it came out relative to the
+    # wrong origin. Seen live at (760, 500) against a window at (-160, 0).
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7),
+        geometry=(-160, 0, 310, 263),
+        fail=["window_at"],
+    )
+    made = DesktopResolver(session=session, elements=False)
+    target = made.resolve(760, 500)
+    assert target.window is None
+    assert any("does not cover" in warning for warning in made.warnings)
+
+
+def test_the_active_window_fallback_is_kept_where_it_does_contain_the_point():
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7),
+        geometry=(0, 0, 800, 600),
+        fail=["window_at"],
+    )
+    target = DesktopResolver(session=session, elements=False).resolve(100, 100)
+    assert target.window is not None
+    assert target.window.title == "Focused"
+
+
+def test_the_fallback_is_trusted_when_there_is_no_geometry_to_check_it():
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7), fail=["window_at", "geometry"]
+    )
+    target = DesktopResolver(session=session, elements=False).resolve(760, 500)
+    assert target.window is not None
+
+
+def test_a_hit_test_answer_is_not_second_guessed():
+    # window_at is a hit test; by construction it contains the point, and
+    # doubting it would cost the one authoritative answer available.
+    session = FakeSession(
+        window=FakeWindow(title="Hit", pid=7), geometry=(-160, 0, 310, 263)
+    )
+    target = DesktopResolver(session=session, elements=False).resolve(760, 500)
+    assert target.window is not None

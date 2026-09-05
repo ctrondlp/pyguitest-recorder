@@ -22,7 +22,7 @@ and how:
 
 | Part | State |
 |------|-------|
-| Canonical event model, JSON round-trip | tested (155 tests), on CI |
+| Canonical event model, JSON round-trip | tested (171 tests), on CI |
 | Semantic analyzer (clicks, drags, text, hotkeys, pauses) | tested |
 | Synchronization inference | tested |
 | Script generator + API validation | tested against the installed pyguitest |
@@ -32,6 +32,7 @@ and how:
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
 | XRecord capture of a real application | run live against a real X server |
 | AT-SPI element resolution | run live against a real accessibility bus |
+| Drag, window switching, save/regenerate | run live |
 
 `scripts/live-capture-check.py` is what closed the last two rows. It starts a
 private Xvfb and a private accessibility bus, puts an application on them,
@@ -229,8 +230,11 @@ See [config.example.toml](config.example.toml).
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
 - **No recording has yet been made of a real desktop application.** The live
-  check records a GTK dialog on a private server; nothing has been recorded of
-  a full application being used the way a person would use one.
+  check records two GTK windows on a private server; nothing has been recorded
+  of a full application being used the way a person would use one.
+- **The CI `live` job has never run on a GitHub runner.** It is written and
+  passes here; the Ubuntu package names and daemon paths are reasoned, not
+  observed.
 - **pyguitest has no `double_click`**, so a recorded double click emits two
   consecutive `gui.click()` calls and depends on the toolkit's own interval.
 - **pyguitest's `Element` exposes no extents and no hit-testing**, so this
@@ -239,10 +243,9 @@ See [config.example.toml](config.example.toml).
 - **pyguitest cannot look a window up by application id**, only by title
   regex, so a recording whose title drifted carries a small helper function
   into the generated file to do it.
-- **pyguitest's X11 backend cannot be pointed at a display by argument.**
-  `X11Backend` accepts `display_name`, but the factory `connect()` goes
-  through does not forward it, so the recorder sets `DISPLAY` around the call
-  instead.
+- **pyguitest's X11 backend could not be pointed at a display by argument.**
+  Fixed upstream; the recorder still sets `DISPLAY` around the call, which
+  works on any version.
 - **GTK4 applications cannot be located by AT-SPI hit-testing** on the
   versions tested here, so their clicks come out as coordinates. See above;
   the recorder detects it rather than guessing.
