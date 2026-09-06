@@ -7,6 +7,7 @@ machine is fast and broken when it is slow.
 
 from pyguitest_recorder.analyzer import SyncOptions, infer_synchronization
 from pyguitest_recorder.model import (
+    Assertion,
     Click,
     ElementRef,
     KeyStroke,
@@ -265,3 +266,43 @@ def test_going_back_after_a_pause_still_raises():
     out = infer_synchronization(events)
     raised = [e for e in out if isinstance(e, WindowActivate)]
     assert [e.window.app_id for e in raised] == ["org.x.Editor"]
+
+
+# -- checks as evidence ------------------------------------------------------
+
+
+def assertion(t, window=MAIN, element=None, check="showing", x=10, y=10):
+    return Assertion(
+        timestamp=t,
+        check=check,
+        target=Target(x=x, y=y, window=window, element=element),
+    )
+
+
+def test_a_pause_before_a_check_waits_for_what_is_being_checked():
+    # "Click Save, wait for the dialog, verify what it says" is the shape a
+    # check is most often recorded in, and a sleep there is exactly the
+    # flakiness the inference exists to remove.
+    events = [
+        click(1.0, element=SAVE),
+        Pause(timestamp=1.1, seconds=2.4),
+        assertion(3.5, window=DIALOG, element=OK),
+    ]
+    out = infer_synchronization(events)
+    waits = [e for e in out if isinstance(e, WaitForWindow)]
+    assert [w.window.app_id for w in waits] == ["org.x.Editor", "org.x.Editor.Dialog"]
+    assert not [e for e in out if isinstance(e, Pause)]
+
+
+def test_a_check_in_a_background_window_does_not_raise_it():
+    # Verifying something in a window the recording is not acting in is a
+    # reasonable thing to record, and raising it would change what the
+    # replayed application is looking at.
+    events = [
+        click(1.0, window=MAIN, element=SAVE),
+        click(2.0, window=DIALOG, element=OK),
+        assertion(3.0, window=MAIN),
+    ]
+    out = infer_synchronization(events)
+    raised = [e for e in out if isinstance(e, WindowActivate)]
+    assert [w.window.app_id for w in raised] == []

@@ -42,6 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="key that ends the recording (default: Pause)",
     )
     capture.add_argument(
+        "--check-key",
+        metavar="KEYSYM",
+        help="key that records a check on whatever the pointer is over (default: F9)",
+    )
+    capture.add_argument(
+        "--no-checks",
+        dest="check_key",
+        action="store_const",
+        const="",
+        help="record no checks; the check key types into the application instead",
+    )
+    capture.add_argument(
         "--no-window-context",
         dest="window_context",
         action="store_false",
@@ -161,6 +173,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "display",
         "screen",
         "stop_key",
+        "check_key",
         "window_context",
         "element_context",
         "output",
@@ -211,6 +224,11 @@ def _record(settings: Settings) -> int:
         return 1
     stop = settings.stop_key or "Ctrl-C"
     print(f"Recording. Press {stop} to stop.", file=sys.stderr)
+    if settings.check_key:
+        print(
+            f"Point at something and press {settings.check_key} to check it.",
+            file=sys.stderr,
+        )
     print(
         "Everything you type is captured, including from other windows.",
         file=sys.stderr,

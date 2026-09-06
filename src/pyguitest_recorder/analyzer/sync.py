@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..model import (
+    Assertion,
     Click,
     Drag,
     Event,
@@ -275,6 +276,17 @@ class _Inferencer:
 
 _POINTER_EVENTS = (Click, Drag, MouseMove, Scroll)
 
+_AIMED_EVENTS = (*_POINTER_EVENTS, Assertion)
+"""Events whose target the user chose, for "what was this pause waiting for".
+
+A check is the one keyboard event that carries a deliberate target: the
+pointer was put over the thing being verified before the key was pressed,
+which is exactly the evidence `_next_target` wants. It is kept out of
+`_POINTER_EVENTS` because it must not *raise* a window -- checking something
+in a background window is a reasonable thing to record and does not mean the
+recording moved into it.
+"""
+
 
 def _target_of(event: Event) -> Target | None:
     """The target an event acted on, whatever field the event keeps it in."""
@@ -292,13 +304,15 @@ def _activated(event: Event) -> WindowRef | None:
 def _next_target(rest: list[Event]) -> Target | None:
     """The target of the next event that acted on something.
 
-    Pointer events only. A keystroke's target is wherever the pointer happened
-    to be resting, which says nothing about what the user was waiting for, and
-    treating it as evidence is how an inferred wait ends up naming a window
-    nobody was looking at.
+    Aimed events only. An ordinary keystroke's target is wherever the pointer
+    happened to be resting, which says nothing about what the user was waiting
+    for, and treating it as evidence is how an inferred wait ends up naming a
+    window nobody was looking at. A check is the exception: its target was
+    pointed at on purpose, and "waited, then verified" is the shape a pause
+    before a check almost always has.
     """
     for event in rest:
-        if isinstance(event, _POINTER_EVENTS):
+        if isinstance(event, _AIMED_EVENTS):
             return _target_of(event)
         if isinstance(event, WindowActivate):
             return Target(x=0, y=0, window=event.window)

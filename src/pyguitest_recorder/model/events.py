@@ -38,6 +38,8 @@ __all__ = [
     "KeyStroke",
     "TextInput",
     "HotKey",
+    "Assertion",
+    "CHECKS",
     "WindowActivate",
     "WaitForWindow",
     "WaitForElement",
@@ -243,6 +245,40 @@ class HotKey(Event):
     target: Target | None = None
 
 
+CHECKS = ("text", "checked", "showing", "window", "nothing")
+"""What an `Assertion` can check, decided by what was under the pointer.
+
+`text` and `checked` compare against a value read at record time; `showing`
+only requires the element to be there, which is all that can be asked of a
+button. `window` is the fallback when no element could be named but a window
+could, and `nothing` records that a check was asked for at a point nothing
+could be identified at -- kept rather than dropped, because a check the
+recorder silently discarded is worse than one it admits it could not make.
+"""
+
+
+@dataclass(kw_only=True)
+class Assertion(Event):
+    """A check the person recording asked for, on what was under the pointer.
+
+    This is the one event type the user creates deliberately rather than by
+    interacting with the application, and it is what separates a replayable
+    script from a test: a recording of actions alone passes as long as nothing
+    raises, whatever the application actually did.
+
+    `expected` is what the element read at the moment the check was recorded,
+    which is the value the generated script will require. `sensitive` marks a
+    password field, whose contents are redacted exactly as typed input is.
+    """
+
+    kind: ClassVar[str] = "assertion"
+
+    check: str
+    target: Target
+    expected: str | bool | None = None
+    sensitive: bool = False
+
+
 @dataclass(kw_only=True)
 class WindowActivate(Event):
     """Focus moved to another toplevel."""
@@ -331,6 +367,7 @@ EVENT_TYPES: dict[str, type[Event]] = {
         KeyStroke,
         TextInput,
         HotKey,
+        Assertion,
         WindowActivate,
         WaitForWindow,
         WaitForElement,

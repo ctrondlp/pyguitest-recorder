@@ -25,7 +25,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..model import ElementRef, Target, WindowRef
 
-__all__ = ["ContextResolver", "NullResolver", "DesktopResolver"]
+__all__ = ["ContextResolver", "NullResolver", "DesktopResolver", "Observation"]
 
 MAX_DEPTH = 24
 """Descent limit, so a malformed accessible tree cannot spin forever."""
@@ -47,12 +47,32 @@ not, and that is what this catches.
 """
 
 
+@dataclass(frozen=True)
+class Observation:
+    """What was under a point, and what it read at that moment.
+
+    Separate from `Target` because the state here is only ever wanted when a
+    check is being recorded. Reading an element's text costs a round trip to
+    the application over the accessibility bus, and doing that on every click
+    -- for a value nothing would use -- would put that cost in the path of
+    every event the recorder sees.
+    """
+
+    target: Target
+    text: str | None = None
+    checked: bool | None = None
+    checkable: bool = False
+
+
 @runtime_checkable
 class ContextResolver(Protocol):
     """Answers what a screen coordinate points at."""
 
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the target at this point, with whatever context is available."""
+
+    def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
+        """Return the target at this point along with what it currently reads."""
 
     def close(self) -> None:
         """Release anything held open."""
@@ -65,6 +85,10 @@ class NullResolver:
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the point with no context attached."""
         return Target(x=x, y=y, screen=screen)
+
+    def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
+        """Return the bare point; there is nothing here to read a state off."""
+        return Observation(target=self.resolve(x, y, screen))
 
     def close(self) -> None:
         """Nothing is held open."""
@@ -164,6 +188,46 @@ class DesktopResolver:
             return Target(x=x, y=y, screen=screen, window=window)
         return Target(x=x, y=y, screen=screen, window=window, element=element)
 
+    def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
+        """Resolve this point and read the state of whatever is under it.
+
+        The element is looked up a second time rather than kept live from
+        `resolve`: what that returns is a snapshot with no handle behind it,
+        deliberately, so a recording can be written to a file. The second
+        lookup is only reached when a check is being recorded, and it is
+        checked against the first -- a tree that changed between the two
+        answers is a tree whose reading cannot be attributed to the element
+        the check was aimed at, so the state is dropped and the check
+        degrades to "this is showing".
+        """
+        target = self.resolve(x, y, screen)
+        if target.element is None:
+            return Observation(target=target)
+        return self._state(x, y, target)
+
+    def _state(self, x: int, y: int, target: Target) -> Observation:
+        """Read text and checked state off the live element under this point."""
+        expected = target.element
+        try:
+            element = self.session.element_at(x, y)
+            if element is None or expected is None:
+                return Observation(target=target)
+            if element.role != expected.role or (element.name or "") != expected.name:
+                self._warn(
+                    "recorded a check against an element that changed between "
+                    "being named and being read; the check only requires it to "
+                    "be showing"
+                )
+                return Observation(target=target)
+            return Observation(
+                target=target,
+                text=element.text,
+                checked=element.checked,
+                checkable=bool(element.checkable),
+            )
+        except Exception:  # noqa: BLE001 - an unreadable state is no state
+            return Observation(target=target)
+
     def _is_widget(self, element: ElementRef) -> bool:
         """Whether the answer is something a script could sensibly click.
 
@@ -245,8 +309,6 @@ class DesktopResolver:
 
     def _same_process(self, element: ElementRef, window: WindowRef) -> bool:
         """Whether the element's process is the window's."""
-        if element.pid == window.pid:
-            return True
         if element.pid == window.pid:
             return True
         self._warn(

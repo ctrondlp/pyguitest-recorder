@@ -393,6 +393,30 @@ def check(display: str) -> int:
             if process is not None:
                 process.terminate()
 
+    report(recording)
+
+    recording.events = infer_synchronization(recording.events)
+    print("inferred:  ", [type(e).__name__ for e in recording.events])
+    added = [e for e in recording.events if e.origin is Origin.INFERRED]
+    print(f"synchronization added: {len(added)}")
+
+    source = generate(recording)
+    print("\n" + source)
+    problems = validate(source)
+    print("validate:", problems or "clean")
+    problems += round_trip(recording, source)
+    return 1 if problems else 0
+
+
+def report(recording: Recording) -> None:
+    """Print what the capture actually saw, before anything is inferred from it.
+
+    Kept apart from `check` because the two answer different questions. This
+    one is the diagnostic a failing run is read for -- which events arrived,
+    which of them resolved to a window and an element, and what the resolver
+    warned about -- and it is the half that grows every time a live run
+    surprises us.
+    """
     print(f"\ncaptured {len(recording.raw)} raw events")
     for event in recording.raw[:40]:
         button = f"button {event['button']}" if event["button"] else ""
@@ -442,18 +466,6 @@ def check(display: str) -> int:
     print("screens:", recording.environment.screens)
     for note in recording.environment.notes:
         print(f"    note: {note}")
-
-    recording.events = infer_synchronization(recording.events)
-    print("inferred:  ", [type(e).__name__ for e in recording.events])
-    added = [e for e in recording.events if e.origin is Origin.INFERRED]
-    print(f"synchronization added: {len(added)}")
-
-    source = generate(recording)
-    print("\n" + source)
-    problems = validate(source)
-    print("validate:", problems or "clean")
-    problems += round_trip(recording, source)
-    return 1 if problems else 0
 
 
 def round_trip(recording: Recording, source: str) -> list[str]:

@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..model import (
+    Assertion,
     Click,
     Comment,
     Drag,
@@ -130,6 +131,21 @@ _SENDKEYS_SPECIAL = frozenset("^%+~#&(){}")
 
 _APP_ID_HELPER = "_window_by_app_id"
 """Name of the emitted lookup that finds a window by application id."""
+
+_ELEMENT_HELPER = "_expect_element"
+"""Name of the lookup the `expect_` helpers share."""
+
+_HELPER_NEEDS = {
+    "expect_text": {_ELEMENT_HELPER},
+    "expect_checked": {_ELEMENT_HELPER},
+    "expect_showing": {_ELEMENT_HELPER},
+}
+"""Helpers that call other helpers, so requesting one emits both.
+
+One level deep, and deliberately not a general dependency graph: the moment
+a generated file needs one of those, the thing to do is stop generating
+these and put them in a library the script imports.
+"""
 
 _MODULE_DUNDERS = frozenset({"__name__", "__file__", "__doc__", "__spec__"})
 """Names every module is given without assigning them, for the unbound check."""
@@ -340,6 +356,102 @@ class PythonGenerator:
                 " double-click interval",
             )
 
+    # -- checks --------------------------------------------------------------
+
+    def _emit_assertion(self, event: Assertion, state: _State) -> None:
+        """Render a check the person recording asked for.
+
+        Dispatched by name the same way events are, so an unknown check from a
+        recording made by a later version degrades to a comment rather than
+        being dropped without trace.
+        """
+        renderer = getattr(self, f"_check_{event.check}", None)
+        if renderer is None:
+            state.warnings.append(f"unknown check {event.check!r} was not generated")
+            return
+        renderer(event, state)
+
+    def _check_text(self, event: Assertion, state: _State) -> None:
+        """Render a check that an element still reads what it read when recorded."""
+        element = event.target.element
+        if element is None:
+            state.warnings.append("a text check had no element to make it against")
+            return
+        if event.sensitive and self.options.redact_sensitive:
+            expected = self._secret_name(state)
+            self._check_comment(f"{element.name!r} matches the recorded value", state)
+        else:
+            expected = _literal(str(event.expected))
+            self._check_comment(f"{element.name!r} reads {event.expected!r}", state)
+        self._expect("expect_text", element, state, f"equals={expected}")
+
+    def _check_checked(self, event: Assertion, state: _State) -> None:
+        """Render a check on a checkbox, radio button or toggle."""
+        element = event.target.element
+        if element is None:
+            state.warnings.append("a checked check had no element to make it against")
+            return
+        word = "is checked" if event.expected else "is not checked"
+        self._check_comment(f"{element.name!r} {word}", state)
+        self._expect(
+            "expect_checked", element, state, f"checked={bool(event.expected)}"
+        )
+
+    def _check_showing(self, event: Assertion, state: _State) -> None:
+        """Render a check that an element is on screen.
+
+        The floor: all that can be asked of a button, whose text is its own
+        name and whose state says nothing about whether the application did
+        what it was told.
+        """
+        element = event.target.element
+        if element is None:
+            state.warnings.append("a showing check had no element to make it against")
+            return
+        self._check_comment(f"{element.name!r} is showing", state)
+        self._expect("expect_showing", element, state)
+
+    def _check_window(self, event: Assertion, state: _State) -> None:
+        """Render a check that a window is open, where no element could be named."""
+        window = event.target.window
+        if window is None or not window.title:
+            state.warnings.append("a window check had no window to make it against")
+            return
+        self._check_comment(f"the {window.title!r} window is open", state)
+        state.capabilities.add("WINDOW_LIST")
+        state.helpers.add("expect_window")
+        state.lines.append(f"expect_window(gui, {_title_pattern(window.title)})")
+
+    def _check_nothing(self, event: Assertion, state: _State) -> None:
+        """Record that a check was asked for where nothing could be identified.
+
+        A warning rather than a comment, so it reaches the header even with
+        comments switched off. A check the recorder quietly dropped is worse
+        than one it admits it could not make: the script would otherwise look
+        like it verifies something it never does.
+        """
+        state.warnings.append(
+            f"a check was recorded at ({event.target.x}, {event.target.y}), where "
+            "neither an element nor a window could be identified; nothing was "
+            "generated for it"
+        )
+
+    def _expect(
+        self, helper: str, element: ElementRef, state: _State, extra: str = ""
+    ) -> None:
+        """Emit one `expect_` call against a named element."""
+        state.capabilities.add("ELEMENT_TREE")
+        state.helpers.add(helper)
+        args = self._role_arg(element, state)
+        tail = f", {extra}" if extra else ""
+        state.lines.append(
+            f"{helper}(gui, {args}, name={_literal(element.name)}{tail})"
+        )
+
+    def _check_comment(self, what: str, state: _State) -> None:
+        """Label a check in the words of the person who will read it."""
+        self._comment(f"Check: {what}", state)
+
     def _emit_drag(self, event: Drag, state: _State) -> None:
         """Render a drag as pyguitest's own drag primitive."""
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON", "TIMING"})
@@ -389,6 +501,10 @@ class PythonGenerator:
         """Render sensitive input as an environment lookup, never as a literal."""
         if not self.options.redact_sensitive:
             return _literal(event.text)
+        return self._secret_name(state)
+
+    def _secret_name(self, state: _State) -> str:
+        """Bind the next environment variable standing in for a redacted value."""
         name = f"SECRET_{len(state.secrets) + 1}"
         state.secrets.append(name)
         return name
@@ -609,7 +725,7 @@ class PythonGenerator:
         out.append("")
         out.extend(_secret_bindings(state))
         out.append("")
-        for helper in sorted(state.helpers):
+        for helper in _helpers_needed(state.helpers):
             out.extend(_HELPER_SOURCE[helper].splitlines())
             out.append("")
         out.append(f"def {self.options.function_name}() -> None:")
@@ -626,6 +742,14 @@ class PythonGenerator:
         out.append('if __name__ == "__main__":')
         out.append(f"    {self.options.function_name}()")
         return "\n".join(out) + "\n"
+
+
+def _helpers_needed(requested: set[str]) -> list[str]:
+    """Every helper the file needs, including the ones helpers call themselves."""
+    needed = set(requested)
+    for helper in requested:
+        needed |= _HELPER_NEEDS.get(helper, set())
+    return sorted(needed)
 
 
 _BINDING = re.compile(
@@ -693,8 +817,8 @@ def _secret_bindings(state: _State) -> list[str]:
     if not state.secrets:
         return []
     lines = [
-        "# Recorded in sensitive mode: the text typed here was never written to",
-        "# the recording. Supply it through the environment before replaying.",
+        "# Redacted: these values were not written into this script. Supply",
+        "# them through the environment before replaying.",
     ]
     lines.extend(f'{name} = os.environ["{name}"]' for name in state.secrets)
     return lines
@@ -745,8 +869,68 @@ _HELPER_SOURCE = {
             raise LookupError(f"no window with app_id {app_id!r} appeared")
         gui.wait(0.25)
 ''',
+    _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout):
+    """Return the named element, or fail saying it never appeared."""
+    element = gui.wait_for_element(role=role, name=name, timeout=timeout)
+    if element is None:
+        raise AssertionError(
+            f"expected an element named {name!r} with role {role!r} to be "
+            f"showing, but none appeared within {timeout:g}s"
+        )
+    return element
+''',
+    "expect_text": '''def expect_text(gui, role, name, equals, timeout=5.0):
+    """Fail unless the named element reads `equals`.
+
+    Re-read until `timeout` rather than checked once. A check recorded right
+    after the action it verifies would otherwise race the application, which
+    has not necessarily finished redrawing by the time the click returns.
+    """
+    element = _expect_element(gui, role, name, timeout)
+    if gui.wait_until(lambda: element.text == equals, timeout=timeout):
+        return
+    raise AssertionError(
+        f"expected {name!r} to read {equals!r}, but it reads {element.text!r}"
+    )
+''',
+    "expect_checked": '''def expect_checked(gui, role, name, checked, timeout=5.0):
+    """Fail unless the named checkbox, radio button or toggle is in `checked`."""
+    element = _expect_element(gui, role, name, timeout)
+    if gui.wait_until(lambda: element.checked == checked, timeout=timeout):
+        return
+    wanted = "checked" if checked else "unchecked"
+    actual = "checked" if element.checked else "unchecked"
+    raise AssertionError(f"expected {name!r} to be {wanted}, but it is {actual}")
+''',
+    "expect_showing": '''def expect_showing(gui, role, name, timeout=5.0):
+    """Fail unless the named element is present and visible."""
+    element = _expect_element(gui, role, name, timeout)
+    if gui.wait_until(lambda: element.visible, timeout=timeout):
+        return
+    raise AssertionError(f"expected {name!r} to be showing, but it is not visible")
+''',
+    "expect_window": '''def expect_window(gui, title, timeout=5.0):
+    """Fail unless a window whose title matches `title` is open.
+
+    `title` is a regular expression, the same as `wait_for_window` takes.
+    """
+    if gui.wait_for_window(title, timeout=timeout) is not None:
+        return
+    raise AssertionError(
+        f"expected a window matching {title!r} to be open, but none "
+        f"appeared within {timeout:g}s"
+    )
+''',
 }
-"""Functions the generated module carries when it needs them."""
+"""Functions the generated module carries when it needs them.
+
+The `expect_` family is what makes a recorded check readable to whoever
+inherits the script. `assert gui.element(...).text == "Saved"` says nothing
+when it fails -- an `AssertionError` and a line number -- where these name
+the element, what it was supposed to read and what it actually reads. The
+retry is the other half: a check is written the instant the action returns,
+which is earlier than the application finishes responding to it.
+"""
 
 
 def _title_pattern(title: str) -> str:

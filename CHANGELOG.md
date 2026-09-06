@@ -30,6 +30,19 @@ source.
   added to pyguitest after this project first shipped with no way to express
   one, and released in 0.4.0. A double click on a *named* element still emits
   two `Element.click()` calls, since `Element` itself has no `double_click`.
+- **Checks, which are what make a recording a test.** Pressing F9 over
+  something records a check on it, and the generated script verifies it: a
+  checkbox against its state, a field or a label against what it read, any
+  other named element against being on screen, and a window against being
+  open. Without them a generated script asserts nothing and passes as long as
+  it does not raise — clicking Save and never looking at the result passes
+  against a build where saving silently fails. The `expect_` functions are
+  written into the generated file rather than imported, so its only dependency
+  is still pyguitest; they name the element, the wanted value and the actual
+  one when they fail, and retry until their timeout, because a check recorded
+  the instant an action returns races an application that has not redrawn.
+  Password fields are redacted as typed input is, and a check that resolved to
+  nothing is reported in the script's header rather than dropped.
 - **Synchronization inference.** Each recorded pause is asked what it was
   waiting for and answered from what the events themselves saw: a window that
   had never been seen becomes `wait_for_window`, a new element in an open
@@ -42,6 +55,11 @@ source.
   without binding is reported.
 - `scripts/live-capture-check.py`, which records a real application on a
   private X server and runs the whole pipeline over the result. CI runs it.
+- Lint and type settings matched against pyguitest's, taking the stricter of
+  the two throughout: `max-complexity` ratcheted from 15 to 11 (nothing under
+  `src/` or `tests/` exceeds 8), mypy's `sqlite_cache = false` carried over so
+  the type checker runs on a Python built without `_sqlite3`, and `strict`
+  kept, which already implies the three flags pyguitest sets by hand.
 
 ### Fixed before anyone could hit them
 

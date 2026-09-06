@@ -1,6 +1,7 @@
 import pytest
 
 from pyguitest_recorder.model import (
+    Assertion,
     Click,
     ElementRef,
     Environment,
@@ -77,3 +78,27 @@ def test_future_format_is_refused():
 def test_element_addressable_requires_a_name():
     assert ElementRef(role="push button", name="Save").addressable
     assert not ElementRef(role="push button").addressable
+
+
+def test_a_check_round_trips(window, save_button):
+    check = Assertion(
+        timestamp=3.5,
+        check="text",
+        target=Target(x=1, y=2, window=window, element=save_button),
+        expected="Saved",
+        sensitive=True,
+    )
+    rebuilt = event_from_dict(check.to_dict())
+    assert rebuilt.check == "text"
+    assert rebuilt.expected == "Saved"
+    assert rebuilt.sensitive is True
+    assert rebuilt.target.element.name == "Save"
+
+
+def test_a_boolean_expectation_survives_the_json_form():
+    # `checked` is the one check whose expected value is not a string, and
+    # a recording is JSON on disk.
+    rebuilt = event_from_dict(
+        Assertion(check="checked", target=Target(x=0, y=0), expected=False).to_dict()
+    )
+    assert rebuilt.expected is False

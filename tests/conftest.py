@@ -2,14 +2,17 @@ import pytest
 
 from pyguitest_recorder.backends.base import RawEvent
 from pyguitest_recorder.model import ElementRef, Target, WindowRef
+from pyguitest_recorder.windows import Observation
 
 
 class FakeResolver:
     """Resolves every point to a fixed window, and elements by rectangle."""
 
-    def __init__(self, window=None, elements=()):
+    def __init__(self, window=None, elements=(), text=None, checked=None):
         self.window = window
         self.elements = list(elements)
+        self.text = text
+        self.checked = checked
 
     def resolve(self, x, y, screen=0):
         element = None
@@ -19,6 +22,14 @@ class FakeResolver:
                 element = ref
                 break
         return Target(x=x, y=y, screen=screen, window=self.window, element=element)
+
+    def inspect(self, x, y, screen=0):
+        return Observation(
+            target=self.resolve(x, y, screen),
+            text=self.text,
+            checked=self.checked,
+            checkable=self.checked is not None,
+        )
 
     def close(self):
         pass

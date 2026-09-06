@@ -83,7 +83,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 15
+# A ceiling on what gets added, not a claim the tree is already under it.
+# pyguitest sets 15; this is lower because this tree can afford it. 11 clears
+# everything, and the only function anywhere near it is the live check's
+# `send_input` (11), whose count is nested closures rather than branching --
+# hoisting those to module level would cost readability to please the lint.
+# Nothing under src/ or tests/ exceeds 8. Ratchet down as that stays true.
+max-complexity = 11
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
@@ -105,7 +111,14 @@ convention = "pep257"
 [tool.mypy]
 python_version = "3.10"
 files = ["src"]
+# strict already implies pyguitest's warn_unused_configs, warn_redundant_casts
+# and check_untyped_defs, so this stays the stricter of the two settings.
 strict = true
+# mypy defaults this to true and imports sqlite3 unconditionally to honor it --
+# a crash, not a fallback, on a Python built without it. Confirmed against
+# pyguitest on FreeBSD 15, whose python3.11 port has no _sqlite3; harmless
+# where the module is present, since the cache becomes one file per module.
+sqlite_cache = false
 
 [[tool.mypy.overrides]]
 # python-xlib, pyguitest and PyGObject ship no stubs; gi is only reachable

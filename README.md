@@ -22,9 +22,10 @@ and how:
 
 | Part | State |
 |------|-------|
-| Canonical event model, JSON round-trip | tested (171 tests), on CI |
+| Canonical event model, JSON round-trip | tested (217 tests), on CI |
 | Semantic analyzer (clicks, drags, text, hotkeys, pauses) | tested |
 | Synchronization inference | tested |
+| Checks (the F9 key, and what they generate) | tested; not yet run live |
 | Script generator + API validation | tested against the installed pyguitest |
 | Configuration (TOML, XDG, precedence) | tested |
 | CLI (`--doctor`, `--regenerate`) | tested |
@@ -100,7 +101,8 @@ pyguitest-recorder --regenerate rec.json -o out.py   # re-render, no recording
 
 Recording stops on the **Pause** key (`--stop-key`), not only Ctrl-C — a
 recorder you can only stop from its own terminal is one you cannot stop while
-driving a full-screen application.
+driving a full-screen application. **F9** (`--check-key`) records a check on
+whatever the pointer is over; see [Checks](#checks-what-makes-it-a-test).
 
 ### What comes out
 
@@ -194,6 +196,55 @@ that emits a plausible script naming a function the library does not have is
 worse than no recorder — and a script that compiles and then raises
 `NameError` on its first run is not much better.
 
+### Checks: what makes it a test
+
+A recording of actions alone is not a test. It passes as long as nothing
+raises, whatever the application actually did — click Save, and a script that
+never looks at the result passes just as happily against a build where saving
+silently fails.
+
+Point at what should have changed and press **F9**. The recorder reads what is
+under the pointer *and what it currently says*, and generates a check against
+that value:
+
+```python
+gui.button("Save").click()
+# the recording waited 2.4s here for 'Save As' to open
+saveas = gui.wait_for_window("Save As", timeout=10)
+
+# Check: 'Status' reads 'Saved'
+expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")
+# Check: 'Read only' is checked
+expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)
+# Check: 'Undo' is showing
+expect_showing(gui, role=Role.PUSH_BUTTON, name="Undo")
+```
+
+What gets checked depends on what was under the pointer, most specific first,
+because the value of a check is exactly how much it would notice:
+
+| What the pointer was over | What comes out |
+|---------------------------|----------------|
+| A checkbox, radio button or toggle | `expect_checked(...)`, against its state |
+| A text field, or a label with something to say | `expect_text(...)`, against what it read |
+| Any other named element | `expect_showing(...)` — the floor |
+| No element, but a window | `expect_window(...)` |
+| Neither | nothing, and the script's header says so |
+
+**The `expect_` functions are written into the generated file**, not imported
+from this package: a generated script is plain pyguitest source and depends on
+nothing but pyguitest. They exist rather than bare `assert` statements for two
+reasons. A failing `assert gui.element(...).text == "Saved"` reports an
+`AssertionError` and a line number, where these say which element was wrong,
+what it should have read and what it actually reads. And each one retries
+until its timeout — a check recorded the instant an action returns would
+otherwise race an application that has not finished redrawing.
+
+Text from a password field is redacted exactly as typed input is, and a check
+that could not be resolved to anything is reported in the header rather than
+dropped, so a script never looks like it verifies something it does not.
+`--no-checks` turns the key off and lets it through to the application.
+
 ### Waits, not sleeps
 
 The difference between a recorder and a macro player is what happens to the
@@ -231,8 +282,9 @@ cannot compound.
 Keyboard capture through XRecord sees **every application's keystrokes**, not
 only the one you are recording — including your password manager.
 
-- Text typed into an AT-SPI password field is detected and never written to
-  disk; the script gets `os.environ["SECRET_1"]` instead.
+- Text typed into an AT-SPI password field is detected and never written into
+  the generated script; it gets `os.environ["SECRET_1"]` instead. A check
+  recorded against a password field is redacted the same way.
 - `--sensitive` treats *all* text that way.
 - Raw event logs are off unless `--record-raw` is passed.
 - A saved recording is a credential-bearing artifact. Treat it like one.

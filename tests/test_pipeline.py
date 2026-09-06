@@ -88,3 +88,69 @@ def test_a_recording_survives_being_saved_and_re_rendered(tmp_path):
     after = generate(Recording.load(path))
     assert before == after
     assert validate(after) == []
+
+
+def test_a_recorded_check_becomes_an_assertion_in_the_script():
+    """Press the check key over a label and the script verifies what it read.
+
+    The whole pipeline, because that is where this has to work: raw key ->
+    resolved observation -> Assertion -> generated call -> validated source.
+    A recording of actions alone passes as long as nothing raises.
+    """
+    window = WindowRef(
+        title="Text Editor", app_id="org.gnome.TextEditor", geometry=(0, 0, 800, 600)
+    )
+    resolver = FakeResolver(
+        window=window,
+        elements=[
+            ((400, 100, 80, 30), ElementRef(role="push button", name="Save")),
+            ((0, 500, 300, 20), ElementRef(role="label", name="Status")),
+        ],
+        text="Saved",
+    )
+    normalizer = Normalizer(resolver=resolver, started=0.0)
+    stream = [
+        RawEvent(kind="button_press", timestamp=1.0, x=430, y=115, button=1),
+        RawEvent(kind="button_release", timestamp=1.05, x=430, y=115, button=1),
+        RawEvent(kind="key_press", timestamp=3.5, keysym="F9", x=100, y=505),
+    ]
+
+    recording = Recording(environment=Environment(session_type="x11"))
+    for raw in stream:
+        for event in normalizer.feed(raw):
+            recording.add(event)
+    for event in normalizer.flush():
+        recording.add(event)
+
+    source = generate(recording)
+    assert validate(source) == []
+    compile(source, "<pipeline>", "exec")
+
+    assert 'gui.button("Save").click()' in source
+    assert 'expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")' in source
+    # The check key itself is not part of the interaction being replayed.
+    assert "F9" not in source
+
+
+def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
+    # A recording outlives the script generated from it, and the check is the
+    # part a reader would most notice going missing.
+    resolver = FakeResolver(
+        window=WindowRef(title="App", app_id="org.example.App"),
+        elements=[((0, 0, 500, 500), ElementRef(role="check box", name="Read only"))],
+        checked=True,
+    )
+    normalizer = Normalizer(resolver=resolver, started=0.0)
+    recording = Recording()
+    for event in normalizer.feed(
+        RawEvent(kind="key_press", timestamp=1.0, keysym="F9", x=10, y=10)
+    ):
+        recording.add(event)
+
+    path = tmp_path / "rec.json"
+    recording.save(path)
+    source = generate(Recording.load(path))
+    assert (
+        'expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)'
+        in source
+    )

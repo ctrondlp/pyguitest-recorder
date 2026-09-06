@@ -70,3 +70,10 @@ def test_command_line_overrides_the_file():
 def test_none_overrides_are_ignored():
     settings = Settings(display=":1")
     assert settings.merged(display=None).display == ":1"
+
+
+def test_the_check_key_is_configurable(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[analyzer]\ncheck_key = "F10"\n')
+    settings, _ = load_settings(path)
+    assert settings.check_key == "F10"

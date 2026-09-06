@@ -3,6 +3,7 @@ import re
 
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.model import (
+    Assertion,
     Click,
     Drag,
     ElementRef,
@@ -460,3 +461,135 @@ def test_a_window_that_stayed_put_is_read_once(window):
         Click(target=Target(x=200, y=95, window=window)),
     )
     assert source.count("gui.geometry(app)") == 1
+
+
+# -- checks ------------------------------------------------------------------
+
+
+def check(kind, role=None, name="", expected=None, window=None, sensitive=False):
+    element = ElementRef(role=role, name=name) if role else None
+    return Assertion(
+        check=kind,
+        target=Target(x=10, y=20, window=window, element=element),
+        expected=expected,
+        sensitive=sensitive,
+    )
+
+
+def test_a_text_check_names_the_element_and_what_it_read():
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert 'expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")' in source
+    assert "# Check: 'Status' reads 'Saved'" in source
+    assert validate(source) == []
+
+
+def test_a_checked_check_renders_the_recorded_state():
+    source = render(check("checked", "check box", "Read only", expected=True))
+    assert (
+        'expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)'
+        in source
+    )
+    assert validate(source) == []
+
+
+def test_a_showing_check_is_the_floor_for_a_button():
+    source = render(check("showing", "push button", "Undo"))
+    assert 'expect_showing(gui, role=Role.PUSH_BUTTON, name="Undo")' in source
+    assert validate(source) == []
+
+
+def expect_window_pattern(source):
+    """The regex the generated check will actually search titles with."""
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "expect_window"
+        ):
+            return node.args[1].value
+    raise AssertionError("no expect_window call in the generated source")
+
+
+def test_a_window_check_escapes_the_title_it_matches_on():
+    # `expect_window` searches with a regex, the same trap the window lookups
+    # had: "Document (1)" is otherwise a pattern matching "Document 1".
+    window = WindowRef(title="Document (1)", app_id="org.example.App")
+    source = render(check("window", window=window))
+    pattern = expect_window_pattern(source)
+    assert re.search(pattern, "Document (1)")
+    assert not re.search(pattern, "Document 1")
+    assert validate(source) == []
+
+
+def test_the_helpers_a_check_calls_are_emitted_with_it():
+    # `expect_text` calls `_expect_element`; emitting one without the other
+    # is a NameError on the first failing check.
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert "def expect_text(" in source
+    assert "def _expect_element(" in source
+    assert "def expect_checked(" not in source
+
+
+def test_a_check_fails_with_a_message_naming_the_element():
+    # The whole reason these are helpers rather than bare asserts: an
+    # AssertionError and a line number does not tell a test engineer which
+    # element was wrong, what it should have read, or what it actually reads.
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert "expected {name!r} to read {equals!r}, but it reads {element.text!r}" in (
+        source
+    )
+
+
+def test_a_check_retries_rather_than_reading_once():
+    # A check recorded immediately after the action it verifies races the
+    # application, which has not necessarily finished redrawing.
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert "gui.wait_until(" in source
+    assert "timeout=5.0" in source
+
+
+def test_a_password_check_is_redacted_like_typed_input_is():
+    source = render(
+        check("text", "password text", "Password", expected="hunter2", sensitive=True)
+    )
+    assert "hunter2" not in source
+    assert "equals=SECRET_1" in source
+    assert 'SECRET_1 = os.environ["SECRET_1"]' in source
+
+
+def test_a_password_check_can_be_written_out_when_redaction_is_off():
+    source = render(
+        check("text", "password text", "Password", expected="hunter2", sensitive=True),
+        redact_sensitive=False,
+    )
+    assert 'equals="hunter2"' in source
+
+
+def test_a_check_that_resolved_to_nothing_is_reported_not_dropped():
+    # With comments off there is no line to hang it on, so it goes in the
+    # header instead: a script that looks like it checks something it does
+    # not is the failure this whole feature exists to avoid.
+    recording = Recording(events=[check("nothing")])
+    source = generate(recording, GeneratorOptions(comments=False))
+    assert "expect_" not in source
+    assert "neither an element nor a window could be identified" in source
+
+
+def test_an_unknown_check_from_a_later_recorder_is_reported():
+    recording = Recording(events=[check("colour")])
+    source = generate(recording, GeneratorOptions())
+    assert "unknown check 'colour'" in source
+
+
+def test_checks_still_generate_with_comments_switched_off():
+    source = render(check("showing", "push button", "Undo"), comments=False)
+    assert "expect_showing(" in source
+    assert "# Check" not in source
+
+
+def test_a_check_requires_the_capabilities_it_uses():
+    source = generate(
+        Recording(events=[check("text", "label", "Status", expected="Saved")]),
+        GeneratorOptions(include_header=False),
+    )
+    assert "Capability.ELEMENT_TREE" in source

@@ -12,6 +12,8 @@
 screen = 0
 backend = "auto"          # "auto" or "xrecord"
 stop_key = "Pause"        # keysym that ends a recording
+check_key = "F9"          # keysym that records a check on what is under the
+                          # pointer; "" records none and lets the key through
 window_context = true     # open a pyguitest session to identify windows
 element_context = true    # resolve clicks to AT-SPI elements
 

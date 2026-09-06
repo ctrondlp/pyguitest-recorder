@@ -52,6 +52,14 @@ class Settings:
     stop_key: str = "Pause"
     """Keysym that ends the recording, so stopping never needs the terminal."""
 
+    check_key: str = "F9"
+    """Keysym that records a check on whatever the pointer is over.
+
+    This is what makes a recording a test rather than a replay: without it a
+    generated script asserts nothing and passes as long as it does not raise.
+    Empty records no checks and lets the key through to the application.
+    """
+
     sync_inference: bool = True
     """Work out what each pause was waiting for, instead of sleeping for it."""
 

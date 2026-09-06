@@ -312,6 +312,7 @@ class Recorder:
             pause_threshold=self.settings.pause_threshold,
             record_motion=self.settings.record_motion,
             sensitive=self.settings.sensitive,
+            check_key=self.settings.check_key,
         )
 
 

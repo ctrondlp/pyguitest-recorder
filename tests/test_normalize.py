@@ -241,3 +241,91 @@ def test_hesitation_inside_a_word_is_not_a_pause(key):
     out.extend(normalizer.flush())
     assert [type(e).__name__ for e in out] == ["TextInput"]
     assert out[0].text == "hi"
+
+
+# -- checks ------------------------------------------------------------------
+
+
+def observed(role, name, text=None, checked=None, window=None):
+    """A resolver whose one element covers everywhere, in a known state."""
+    return FakeResolver(
+        window=window,
+        elements=[((0, 0, 10000, 10000), ElementRef(role=role, name=name))],
+        text=text,
+        checked=checked,
+    )
+
+
+def test_the_check_key_records_a_check_instead_of_a_keystroke(key):
+    resolver = observed("label", "Status", text="Saved")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert [type(e).__name__ for e in events] == ["Assertion"]
+    assert events[0].check == "text"
+    assert events[0].expected == "Saved"
+
+
+def test_the_check_key_can_be_switched_off(key):
+    # With no check key the key belongs to the application again, and has to
+    # record as the keystroke it is rather than disappearing.
+    normalizer = Normalizer(options=NormalizerOptions(check_key=""))
+    events = drain(normalizer, [key(1.0, "F9")])
+    assert [type(e).__name__ for e in events] == ["KeyStroke"]
+    assert events[0].key == "F9"
+
+
+def test_a_check_lands_after_the_typing_it_verifies(key):
+    # The shape this is used in: type a value, point at what should have
+    # changed, press the key. A check emitted before the pending text would
+    # replay as a check of the state before the typing happened.
+    resolver = observed("entry", "Filename", text="report.txt")
+    events = drain(
+        Normalizer(resolver=resolver),
+        [key(1.0, "h", "h"), key(1.1, "i", "i"), key(1.2, "F9")],
+    )
+    assert [type(e).__name__ for e in events] == ["TextInput", "Assertion"]
+
+
+def test_a_password_field_check_is_marked_sensitive(key):
+    resolver = observed("password text", "Password", text="hunter2")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert events[0].sensitive is True
+
+
+def test_a_checkbox_is_checked_rather_than_read(key):
+    resolver = observed("check box", "Read only", text="", checked=True)
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert (events[0].check, events[0].expected) == ("checked", True)
+
+
+def test_a_button_can_only_be_checked_for_being_there(key):
+    resolver = observed("push button", "Save", text="Save")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert events[0].check == "showing"
+
+
+def test_an_empty_label_is_not_asserted_on(key):
+    # A toolkit that publishes no text reports the empty string, and "this
+    # label is empty" passes against an application that stopped drawing.
+    resolver = observed("label", "Status", text="")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert events[0].check == "showing"
+
+
+def test_an_empty_entry_is_asserted_on(key):
+    # The opposite case: clearing a field is a real state worth verifying.
+    resolver = observed("entry", "Filename", text="")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert (events[0].check, events[0].expected) == ("text", "")
+
+
+def test_a_check_with_no_element_falls_back_to_the_window(key, window):
+    resolver = FakeResolver(window=window)
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    assert (events[0].check, events[0].expected) == ("window", "Example")
+
+
+def test_a_check_on_nothing_is_recorded_rather_than_dropped(key):
+    # Silently discarding it would leave a script that looks like it verifies
+    # something; the generator turns this into a warning in the header.
+    events = drain(Normalizer(resolver=FakeResolver()), [key(1.0, "F9")])
+    assert events[0].check == "nothing"

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from ..backends.base import RawEvent
 from ..model import (
+    Assertion,
     Click,
     Drag,
     Event,
@@ -30,9 +31,9 @@ from ..model import (
     Target,
     TextInput,
 )
-from ..windows.resolver import ContextResolver, NullResolver
+from ..windows.resolver import ContextResolver, NullResolver, Observation
 
-__all__ = ["NormalizerOptions", "Normalizer", "MODIFIERS"]
+__all__ = ["NormalizerOptions", "Normalizer", "MODIFIERS", "check_for"]
 
 MODIFIERS = {
     "Control_L": "ctrl",
@@ -56,6 +57,19 @@ _TEXT_SAFE = frozenset({"shift", "altgr"})
 # AT-SPI roles that receive typed text. Used to decide which element a run of
 # typing belongs to.
 _TEXT_ROLES = frozenset({"entry", "text", "password text"})
+
+# Roles whose text is a reading rather than an input. Checked against a
+# non-empty value only: a toolkit that publishes no text for these reports the
+# empty string rather than nothing, and "this label is empty" is a check that
+# passes against an application that has stopped drawing altogether.
+_READING_ROLES = frozenset(
+    {"label", "static", "heading", "table cell", "list item", "tree item"}
+)
+
+# Roles whose checked state is the thing worth asserting about them.
+_CHECKABLE_ROLES = frozenset(
+    {"check box", "radio button", "toggle button", "check menu item", "radio menu item"}
+)
 
 
 @dataclass
@@ -82,6 +96,15 @@ class NormalizerOptions:
 
     sensitive: bool = False
     """Treat all typed text as sensitive, whatever the focused element is."""
+
+    check_key: str = "F9"
+    """Keysym that records a check on whatever the pointer is over.
+
+    Swallowed like the stop key is, so an application that binds this key
+    cannot be recorded pressing it. That is the price of a key that works
+    while another application is full screen, which is the only time one is
+    needed. Empty disables checks entirely and the key records normally.
+    """
 
 
 @dataclass
@@ -260,7 +283,9 @@ class Normalizer:
     # -- keyboard ------------------------------------------------------------
 
     def _on_key_press(self, raw: RawEvent) -> list[Event]:
-        """Accumulate text, or emit a hotkey or a named key."""
+        """Record a check, accumulate text, or emit a hotkey or a named key."""
+        if self.options.check_key and raw.keysym == self.options.check_key:
+            return self._check(raw)
         modifier = MODIFIERS.get(raw.keysym)
         if modifier is not None:
             self._mods.add(modifier)
@@ -285,6 +310,28 @@ class Normalizer:
                 timestamp=self._at(raw),
                 key=raw.keysym,
                 target=self._target(raw),
+            )
+        )
+        return out
+
+    def _check(self, raw: RawEvent) -> list[Event]:
+        """Record a check on whatever the pointer is over, and swallow the key.
+
+        Pending text is flushed first so the check lands *after* the typing it
+        was made to verify, which is the shape it is nearly always used in:
+        type a value, point at what should have changed, press the key.
+        """
+        out = self._flush_text()
+        observed = self.resolver.inspect(raw.x, raw.y, raw.screen)
+        check, expected = check_for(observed)
+        element = observed.target.element
+        out.append(
+            Assertion(
+                timestamp=self._at(raw),
+                check=check,
+                target=observed.target,
+                expected=expected,
+                sensitive=element is not None and element.role == "password text",
             )
         )
         return out
@@ -389,6 +436,37 @@ class Normalizer:
         and an editor that reorders events has to recompute it anyway.
         """
         return max(0.0, raw.timestamp - self.started)
+
+
+def check_for(observed: Observation) -> tuple[str, str | bool | None]:
+    """Decide what a check on this point should assert, and against what.
+
+    The ladder runs most specific first, because the value of a generated
+    check is exactly how much it would notice. "This checkbox is ticked" and
+    "this field reads 'report'" fail when the application misbehaves; "this
+    button is showing" mostly does not, and is the floor rather than the aim.
+
+    A reading role -- a label, a cell -- is only asserted on when it has
+    something to say. Toolkits report the empty string for text they do not
+    publish, and a check that a label is empty would then pass against an
+    application that had stopped drawing entirely. An entry is the opposite
+    case: empty is a real state there, and clearing a field is a thing worth
+    verifying, so the empty string stands.
+    """
+    element = observed.target.element
+    window = observed.target.window
+    if element is None or not element.addressable:
+        if window is not None and window.addressable:
+            return ("window", window.title)
+        return ("nothing", None)
+    if element.role in _CHECKABLE_ROLES and observed.checked is not None:
+        return ("checked", bool(observed.checked))
+    if observed.text is not None:
+        if element.role in _TEXT_ROLES:
+            return ("text", observed.text)
+        if observed.text and element.role in _READING_ROLES:
+            return ("text", observed.text)
+    return ("showing", None)
 
 
 def _distance(a: tuple[int, int], b: tuple[int, int]) -> float:

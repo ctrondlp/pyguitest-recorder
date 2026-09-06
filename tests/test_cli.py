@@ -135,3 +135,13 @@ def _empty(tmp_path):
     if not path.exists():
         path.write_text("")
     return path
+
+
+def test_the_check_key_can_be_set_and_switched_off():
+    from pyguitest_recorder.cli import _overrides
+
+    parser = build_parser()
+    assert _overrides(parser.parse_args(["--check-key", "F12"]))["check_key"] == "F12"
+    assert _overrides(parser.parse_args(["--no-checks"]))["check_key"] == ""
+    # Unset means the default survives, rather than being overwritten with None.
+    assert _overrides(parser.parse_args([]))["check_key"] is None

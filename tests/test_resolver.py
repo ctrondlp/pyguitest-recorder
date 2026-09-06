@@ -322,13 +322,27 @@ class FakeCapability:
 
 
 class FakeElement:
-    def __init__(self, role, name, description="", pid=None, parent=None, children=()):
+    def __init__(
+        self,
+        role,
+        name,
+        description="",
+        pid=None,
+        parent=None,
+        children=(),
+        text=None,
+        checked=None,
+        checkable=False,
+    ):
         self.role = role
         self.name = name
         self.description = description
         self.pid = pid
         self.parent = parent
         self.children = list(children)
+        self.text = text
+        self.checked = checked
+        self.checkable = checkable
 
 
 class ElementSession(FakeSession):
@@ -439,3 +453,56 @@ def test_a_hit_that_bottoms_out_at_the_window_is_not_a_widget():
     assert target.element is None
     assert target.window is not None
     assert any("bottomed out at the window" in w for w in made.warnings)
+
+
+# -- inspecting for a check --------------------------------------------------
+
+
+def test_null_resolver_inspects_to_a_bare_point():
+    observed = NullResolver().inspect(5, 6)
+    assert (observed.target.x, observed.target.y) == (5, 6)
+    assert observed.text is None and observed.checked is None
+
+
+def test_inspect_reads_the_state_off_the_live_element():
+    element = FakeElement(
+        "entry", "Filename", pid=77, text="report.txt", checkable=False
+    )
+    observed = element_resolver(element=element).inspect(130, 130)
+    assert observed.target.element.name == "Filename"
+    assert observed.text == "report.txt"
+
+
+def test_inspect_reads_a_checkbox_state():
+    element = FakeElement(
+        "check box", "Read only", pid=77, checked=True, checkable=True
+    )
+    observed = element_resolver(element=element).inspect(130, 130)
+    assert observed.checked is True and observed.checkable is True
+
+
+def test_a_tree_that_changed_between_the_two_reads_drops_the_state():
+    # The element is named once and read again; a menu closing under the
+    # pointer between the two is enough. A reading that cannot be attributed
+    # to the element the check named is worse than no reading, because the
+    # generated check would then assert some other widget's text.
+    made = element_resolver()
+    swapped = FakeElement("label", "Something else", pid=77, text="not the same widget")
+    named = made.session.element
+
+    answers = [named, swapped]
+
+    def element_at(x, y):
+        return answers.pop(0) if answers else swapped
+
+    made.session.element_at = element_at
+    observed = made.inspect(130, 130)
+    assert observed.text is None
+    assert any("changed between" in warning for warning in made.warnings)
+
+
+def test_a_state_read_that_raises_leaves_the_check_at_showing():
+    made = element_resolver()
+    made.session.fail.add("element_at")
+    observed = made.inspect(130, 130)
+    assert observed.text is None and observed.checked is None

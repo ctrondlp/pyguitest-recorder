@@ -1,6 +1,8 @@
 """Canonical events and the recording that holds them."""
 
 from .events import (
+    CHECKS,
+    Assertion,
     Click,
     Comment,
     Drag,
@@ -25,6 +27,8 @@ from .events import (
 from .recording import Environment, Recording
 
 __all__ = [
+    "CHECKS",
+    "Assertion",
     "Click",
     "Comment",
     "Drag",
