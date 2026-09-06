@@ -170,6 +170,8 @@ class Recorder:
     _stopping: bool = field(default=False, init=False)
     _stop_pending: list[Any] = field(default_factory=list, init=False)
     _mods: set[str] = field(default_factory=set, init=False)
+    _stop_passed: int = field(default=0, init=False)
+    """Stop-key presses that were handed on rather than ending the run."""
 
     def __enter__(self) -> Recorder:
         """Open the capture backend and the context session."""
@@ -231,6 +233,19 @@ class Recorder:
         self._collect_warnings()
         return self.recording
 
+    @property
+    def unstopped_presses(self) -> int:
+        """Stop-key presses that were recorded rather than ending the recording.
+
+        Worth telling the user about afterwards. Pressing Escape once when two
+        are needed does nothing visible, so the natural response is to press it
+        again -- and the first press, having been handed on, is now a keystroke
+        in their script. That is the right default (it keeps "press Escape to
+        close the dialog" recordable) but it surprises people exactly once, and
+        a line at the end costs nothing.
+        """
+        return self._stop_passed
+
     def _consume(self, raws: list[Any]) -> None:
         """Record and normalize raw events that are known not to be the stop key."""
         if self._normalizer is None:
@@ -275,6 +290,7 @@ class Recorder:
         held = self._modifiers_after(raw)
         if not self._is_stop_event(raw, held):
             pending, self._stop_pending = self._stop_pending, []
+            self._stop_passed += sum(1 for e in pending if e.kind == "key_press")
             return ([*pending, raw], False)
         if self._stop_pending and (
             raw.timestamp - self._stop_pending[-1].timestamp
@@ -283,6 +299,7 @@ class Recorder:
             # Too slow to be one run, so the earlier presses were the
             # application's and this one starts a new run of its own.
             pending, self._stop_pending = self._stop_pending, [raw]
+            self._stop_passed += sum(1 for e in pending if e.kind == "key_press")
             return (pending, False)
         self._stop_pending.append(raw)
         presses = sum(1 for e in self._stop_pending if e.kind == "key_press")

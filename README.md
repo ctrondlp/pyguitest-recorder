@@ -179,6 +179,13 @@ close the dialog" recordable. A key nothing else wants can drop the repeat:
 same reason — a bare F9 is a screenshot key on some laptops, and a bare F1 is
 help nearly everywhere.
 
+The generated file opens with a docstring naming the recorder and pyguitest
+versions, the desktop it was recorded on, and a pointer to the notes at the
+end. `--no-header` drops it; `--header TEXT` (or a multi-line `header` in the
+config file) puts your own text above it, for a licence or a ticket number —
+the provenance block still follows, since setting a header should not
+silently drop the record of what made the file.
+
 ### What comes out
 
 ```python

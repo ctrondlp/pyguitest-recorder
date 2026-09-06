@@ -536,3 +536,57 @@ def test_the_stop_key_can_carry_a_modifier(key):
     assert not stopped and keysyms == ["Escape"]
     keysyms, stopped = feed_stop(recorder, [key(2.0, "Control_L"), key(2.1, "Escape")])
     assert stopped
+
+
+def test_stop_presses_that_did_not_stop_are_counted(key):
+    # Pressing Escape once when two are needed does nothing visible, so the
+    # natural next move is to press it again -- and the first press is by then
+    # a keystroke in the script. The CLI says so rather than leaving it to be
+    # discovered in the generated file.
+    recorder = stop_recorder()
+    feed_stop(
+        recorder,
+        [
+            key(1.0, "Escape"),
+            key(1.05, "Escape", kind="key_release"),
+            key(3.0, "a", "a"),
+        ],
+    )
+    assert recorder.unstopped_presses == 1
+
+
+def test_a_clean_stop_counts_nothing(key):
+    recorder = stop_recorder()
+    feed_stop(recorder, [key(1.0, "Escape"), key(1.1, "Escape")])
+    assert recorder.unstopped_presses == 0
+
+
+def test_shift_is_kept_in_a_combination_that_has_another_modifier(key):
+    # Shift and AltGr decide only whether this is a hotkey at all, because
+    # they make text rather than commands. Once Ctrl is down they are part of
+    # the combination: Ctrl+Shift+S is a different shortcut from Ctrl+S, and
+    # dropping the Shift turned a recorded "Save As" into "Save".
+    events = drain(
+        Normalizer(),
+        [
+            key(1.0, "Control_L"),
+            key(1.05, "Shift_L"),
+            key(1.1, "S"),
+            key(1.2, "Shift_L", kind="key_release"),
+            key(1.3, "Control_L", kind="key_release"),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["HotKey"]
+    assert events[0].keys == ("ctrl", "shift", "S")
+
+
+def test_shift_alone_is_still_text_not_a_hotkey(key):
+    events = drain(
+        Normalizer(),
+        [
+            key(1.0, "Shift_L"),
+            key(1.05, "A", "A"),
+            key(1.1, "Shift_L", kind="key_release"),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["TextInput"]

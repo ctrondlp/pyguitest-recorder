@@ -329,7 +329,13 @@ class Normalizer:
         active = self._mods - _TEXT_SAFE
         if active:
             out = self._flush_text()
-            keys = (*sorted(active), raw.keysym)
+            # Every modifier actually held, not just the ones that decided
+            # this was a hotkey at all. Shift and AltGr are excluded from that
+            # decision because they make text rather than commands -- but once
+            # Ctrl is down, Ctrl+Shift+S is a different shortcut from Ctrl+S,
+            # and dropping the Shift turned a recorded "Save As" into "Save":
+            # a script that runs cleanly and does the wrong thing.
+            keys = (*sorted(self._mods), raw.keysym)
             out.append(
                 HotKey(
                     timestamp=self._at(raw),

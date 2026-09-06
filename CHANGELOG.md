@@ -38,6 +38,24 @@ source.
   id" is not actionable without that, and its widget-position section carries
   the three-application GTK 4 measurement rather than the single dialog it
   started from.
+- The generated script's header carries **the recorder's own version**, not
+  only pyguitest's -- the profile says which API the calls were checked
+  against, this says which recorder emitted them. `--no-header` drops the
+  docstring; `--header TEXT`, or a multi-line `header` in the config file,
+  puts your own text above it while keeping the provenance block below.
+- **The diagnostic notes moved to the end of the file.** One recording of a
+  text editor put forty lines of them above the first import; the header now
+  carries a one-line pointer and the notes sit in a comment block after
+  `main()`. Long emitted comments are wrapped, too -- a comment is opaque to
+  `ruff format`, so it was the one thing in a generated file that could run
+  past the line limit.
+- A long run of one key collapses into the loop it obviously is. Clearing a
+  field with Backspace rendered as twenty consecutive identical lines; the
+  recording still holds every tap, so this is a rendering decision and an old
+  recording picks it up on `--regenerate`.
+- `--record-motion` has a command-line flag at last. It was a config-file key
+  only, which made the one setting that records hover-driven menu navigation
+  undiscoverable from `--help`.
 - **Checks, which are what make a recording a test.** Pressing Ctrl+F1 over
   something records a check on it, and the generated script verifies it: a
   checkbox against its state, a field or a label against what it read, any
@@ -167,6 +185,12 @@ validator first.
 - `wait_for_idle` emitted a pid read off a variable nothing defined.
 - A window titled `gui` generated `gui = gui.wait_for_window(...)`.
 - Window titles went into `wait_for_window`'s **regex** unescaped.
+- **A combination lost its Shift.** Shift and AltGr are excluded from the
+  test for "is this a hotkey at all", because they make text rather than
+  commands -- but they were then excluded from the combination itself, so
+  Ctrl+Shift+S recorded as `send_keys("^(s)")`. A recorded "Save As" replayed
+  as "Save": a script that runs cleanly and does the wrong thing, which is the
+  failure this project cares about most. Every held modifier is kept now.
 - Hotkey keysyms were truncated to three letters, so `Return` became `{RET}`,
   which is not the abbreviation.
 - A wait *after typing* was never detected at all, which is the shape

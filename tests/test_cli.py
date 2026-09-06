@@ -145,3 +145,13 @@ def test_the_check_key_can_be_set_and_switched_off():
     assert _overrides(parser.parse_args(["--no-checks"]))["check_key"] == ""
     # Unset means the default survives, rather than being overwritten with None.
     assert _overrides(parser.parse_args([]))["check_key"] is None
+
+
+def test_record_motion_has_a_flag_not_only_a_config_key():
+    # It had only a config key, so the one setting that makes hover-driven
+    # menu navigation recordable was undiscoverable from --help.
+    from pyguitest_recorder.cli import _overrides
+
+    parser = build_parser()
+    assert _overrides(parser.parse_args(["--record-motion"]))["record_motion"] is True
+    assert _overrides(parser.parse_args([]))["record_motion"] is None

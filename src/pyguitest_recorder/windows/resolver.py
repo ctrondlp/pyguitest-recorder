@@ -590,12 +590,17 @@ class DesktopResolver:
         if not known.app_id and window.app_id:
             known.app_id = window.app_id
         if window.title and window.title != known.title:
+            # Warned once per window, not once per title. An editor retitles
+            # itself on every keystroke, so naming the new title here put
+            # eight near-identical notes in the header of one recording --
+            # each unique, so `_warn`'s deduplication could not collapse them.
+            if known.stable:
+                self._warn(
+                    f"the window first seen as {known.title!r} renamed itself "
+                    "while it was being recorded; that first title is what the "
+                    "script matches on, and an app id would be steadier"
+                )
             known.stable = False
-            self._warn(
-                f"a window's title changed while it was being recorded "
-                f"({known.title!r} became {window.title!r}); the first is what "
-                "the script matches on, and an app id would be steadier"
-            )
         return known
 
     def _identity_key(self, window: Any) -> Any:

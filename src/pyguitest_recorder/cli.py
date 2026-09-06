@@ -70,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="record no checks; the check key types into the application instead",
     )
     capture.add_argument(
+        "--record-motion",
+        action="store_true",
+        default=None,
+        help="record pointer movement in its own right, not only as part of a"
+        " drag; needed for anything driven by hovering, such as opening a menu"
+        " without clicking it",
+    )
+    capture.add_argument(
         "--no-window-context",
         dest="window_context",
         action="store_false",
@@ -125,6 +133,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         default=None,
         help="never turn an unexplained pause into wait_for_idle (needs WINDOW_PID)",
+    )
+    render.add_argument(
+        "--no-header",
+        dest="include_header",
+        action="store_false",
+        default=None,
+        help="omit the docstring naming the versions and desktop recorded on",
+    )
+    render.add_argument(
+        "--header",
+        metavar="TEXT",
+        help="open the generated file with text of your own, above that"
+        " docstring; a licence or a ticket number, say",
     )
     render.add_argument(
         "--no-comments",
@@ -191,12 +212,15 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "stop_key",
         "stop_key_presses",
         "check_key",
+        "record_motion",
         "window_context",
         "element_context",
         "output",
         "session_file",
         "locators",
         "comments",
+        "include_header",
+        "header",
         "sync_inference",
         "infer_idle",
         "sensitive",
@@ -228,6 +252,8 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         default_timeout=settings.default_timeout,
         redact_sensitive=settings.redact_sensitive,
         format_output=settings.format_output,
+        include_header=settings.include_header,
+        header=settings.header,
     )
 
 
@@ -253,6 +279,21 @@ def _record(settings: Settings) -> int:
         recording = recorder.run()
     finally:
         recorder.stop()
+    if recorder.unstopped_presses:
+        # Pressing the stop key once when two are needed does nothing visible,
+        # so the natural next move is to press it again -- and the first press
+        # is by then a keystroke in the script. Handing it on is the right
+        # default, but it is worth saying out loud the once.
+        presses = recorder.unstopped_presses
+        print(
+            f"note: {presses} {settings.stop_key} press"
+            f"{'es were' if presses > 1 else ' was'} recorded as "
+            f"{'keystrokes' if presses > 1 else 'a keystroke'}, not as a stop. "
+            f"Stopping takes {settings.stop_key_presses} within "
+            f"{settings.stop_key_interval:g}s; delete "
+            f"{'them' if presses > 1 else 'it'} if that was a missed attempt.",
+            file=sys.stderr,
+        )
     return _emit(recording, settings)
 
 

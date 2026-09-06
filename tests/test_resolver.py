@@ -637,7 +637,10 @@ def test_a_drifting_title_stays_one_window():
     titles = {t.window.title for t in (first, second, third)}
     assert titles == {"New Document - Editor"}
     assert third.window.title_stable is False
-    assert any("title changed while" in w for w in made.warnings)
+    assert any("renamed itself" in w for w in made.warnings)
+    # One note per window, not one per title: an editor retitling on
+    # every keystroke put eight near-identical notes in one header.
+    assert sum("renamed itself" in w for w in made.warnings) == 1
 
 
 def test_the_first_title_is_the_one_kept():
