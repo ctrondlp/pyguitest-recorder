@@ -67,7 +67,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.4"
+PROFILE = "pyguitest-0.5"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -142,6 +142,9 @@ _APP_ID_HELPER = "_window_by_app_id"
 
 _ELEMENT_HELPER = "_expect_element"
 """Name of the lookup the `expect_` helpers share."""
+
+_DOUBLE_CLICK_HELPER = "double_click_element"
+"""Name of the emitted double click that `Element` itself cannot do."""
 
 _HELPER_NEEDS = {
     "expect_text": {_ELEMENT_HELPER},
@@ -304,6 +307,8 @@ class PythonGenerator:
         turn a context menu into an ordinary activation -- a script that runs
         cleanly and does the wrong thing, which is the worst outcome here.
         """
+        if event.button == 1 and event.count == 2 and self._double_click(event, state):
+            return
         if event.button == 1:
             call = self._element_call(event.target.element, state, "click()")
             if call is not None:
@@ -320,6 +325,37 @@ class PythonGenerator:
         else:
             state.lines.extend([f"gui.click({button})"] * event.count)
             self._note_repeat(event, state)
+
+    def _double_click(self, event: Click, state: _State) -> bool:
+        """Render a double click on a named element that stays a double click.
+
+        `Element` has no `double_click`, so this used to degrade to two
+        `Element.click()` calls and hope the toolkit read them as one gesture.
+        It frequently will not -- each click is a separate round trip through
+        the accessibility bus, which is slower than any double-click interval
+        -- and the failure is silent: double-clicking a folder icon simply
+        does not open the folder. Seen in a real recording of a file manager.
+
+        `Session.double_click` is a real double click but goes wherever the
+        pointer is, so the element is located first and its *live* extents
+        drive the move. That keeps the locator an element -- the point is read
+        at replay, not baked in -- while the gesture stays one gesture.
+        """
+        element = event.target.element
+        locator = self._element_expr(element, state)
+        if locator is None or element is None:
+            return False
+        if element.extents is None:
+            # Nothing said this element has a position worth trusting, and a
+            # move to a rectangle that does not exist is worse than two clicks.
+            return False
+        state.capabilities.update(
+            {"ELEMENT_TREE", "ELEMENT_GEOMETRY", "POINTER_MOVE", "POINTER_BUTTON"}
+        )
+        state.helpers.add(_DOUBLE_CLICK_HELPER)
+        state.lines.append(f"{_DOUBLE_CLICK_HELPER}(gui, {locator})")
+        state.pointer = None
+        return True
 
     def _note_button_fallback(self, event: Click, state: _State) -> None:
         """Explain a coordinate click on an element that could have been named."""
@@ -628,16 +664,28 @@ class PythonGenerator:
         self, element: ElementRef | None, state: _State, action: str
     ) -> str | None:
         """Return an element-based call, or None if no element can be named."""
+        locator = self._element_expr(element, state)
+        if locator is None:
+            return None
+        state.capabilities.add("ELEMENT_ACTION")
+        return f"{locator}.{action}"
+
+    def _element_expr(self, element: ElementRef | None, state: _State) -> str | None:
+        """Return the expression that finds this element, without an action.
+
+        Split out from `_element_call` because a double click needs the
+        element itself rather than a method on it -- see `_double_click`.
+        """
         if self.options.locators != "element":
             return None
         if element is None or not element.addressable:
             return None
-        state.capabilities.update({"ELEMENT_TREE", "ELEMENT_ACTION"})
+        state.capabilities.add("ELEMENT_TREE")
         sugar = _SUGAR.get(element.role)
         if sugar is not None:
-            return f"gui.{sugar}({_literal(element.name)}).{action}"
+            return f"gui.{sugar}({_literal(element.name)})"
         args = self._role_arg(element, state)
-        return f"gui.element({args}, name={_literal(element.name)}).{action}"
+        return f"gui.element({args}, name={_literal(element.name)})"
 
     def _role_arg(self, element: ElementRef, state: _State) -> str:
         """Render the `role=` argument, as a Role constant where one exists."""
@@ -988,6 +1036,23 @@ _HELPER_SOURCE = {
         if time.monotonic() >= deadline:
             raise LookupError(f"no window with app_id {app_id!r} appeared")
         gui.wait(0.25)
+''',
+    _DOUBLE_CLICK_HELPER: '''def double_click_element(gui, element):
+    """Double-click a named element, which Element cannot do for itself.
+
+    Two `element.click()` calls are not a double click: each is a separate
+    round trip over the accessibility bus, which is slower than any toolkit's
+    double-click interval, so the pair arrives as two single clicks and a
+    double-clicked folder icon simply does not open.
+
+    The element is still the locator -- its rectangle is read here, at replay,
+    rather than baked in when the recording was made -- and only the gesture
+    falls back to the pointer, because that is where pyguitest's real
+    double_click lives.
+    """
+    x, y, width, height = gui.extents(element)
+    gui.move_mouse(x + width // 2, y + height // 2)
+    gui.double_click()
 ''',
     _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout):
     """Return the named element, or fail saying it never appeared."""

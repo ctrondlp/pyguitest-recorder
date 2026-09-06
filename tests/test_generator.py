@@ -718,3 +718,42 @@ def test_a_multi_line_custom_header_keeps_its_shape():
 
 def test_a_three_key_combination_keeps_every_modifier():
     assert 'gui.send_keys("^(+(S))")' in render(HotKey(keys=("ctrl", "shift", "S")))
+
+
+def test_a_double_click_on_a_named_element_stays_one_gesture(window):
+    # Two Element.click() calls are not a double click: each is a separate
+    # round trip over the accessibility bus, slower than any toolkit's
+    # double-click interval, so a double-clicked folder icon never opens.
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    expected = 'double_click_element(gui, gui.element(role=Role.ICON, name="Computer"))'
+    assert expected in source
+    # The helper's own docstring mentions `element.click()`, so look at the
+    # body rather than the whole file.
+    assert ".click()" not in source.split("def main")[1]
+    assert "def double_click_element(" in source
+    assert "gui.double_click()" in source
+    assert "Capability.ELEMENT_GEOMETRY" in source
+    assert validate(source) == []
+
+
+def test_the_double_click_reads_the_rectangle_at_replay_not_from_the_recording():
+    # The element stays the locator; only the gesture needs a pointer. Baking
+    # the recorded rectangle in would break the moment the window moved.
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(Click(target=Target(x=40, y=50, element=icon), count=2))
+    assert "gui.extents(element)" in source
+    assert "10" not in source.split("def main")[1]
+
+
+def test_a_double_click_with_no_rectangle_falls_back_to_two_clicks(window):
+    # Nothing said this element has a position worth trusting, and a move to
+    # a rectangle that does not exist is worse than two clicks.
+    icon = ElementRef(role="icon", name="Computer")
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    assert source.count(".click()") == 2
+    assert "double_click_element" not in source

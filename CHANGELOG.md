@@ -127,11 +127,11 @@ source.
   desktop. Both names map to the same accessor and the same `Role` constant.
 
   **This needs the matching pyguitest fix**, which accepts both spellings in
-  its own role lookups and is unreleased as of writing. On a pyguitest that
-  lacks it, `gui.button("Save")` searches `"push button"` and finds nothing on
-  a current desktop, where the longhand `element(role="button", ...)` this
-  replaces did work. Move the dependency floor to whichever release carries
-  it.
+  its own role lookups and shipped in **pyguitest 0.5.0** — which is why the
+  dependency floor is 0.5.0 rather than the 0.4.0 that first provided
+  `ELEMENT_GEOMETRY`. On an older pyguitest, `gui.button("Save")` searches
+  `"push button"` and finds nothing on a current desktop, where the longhand
+  `element(role="button", ...)` this replaces did work.
 - Lint and type settings matched against pyguitest's, taking the stricter of
   the two throughout: `max-complexity` ratcheted from 15 to 11 (nothing under
   `src/` or `tests/` exceeds 8), mypy's `sqlite_cache = false` carried over so
