@@ -400,17 +400,36 @@ class Normalizer:
         if self._typed.text and idle > self.options.text_idle:
             out = self._flush_text()
         if not self._typed.text:
-            target = self._text_target(raw)
+            focused = self.resolver.focused()
+            target = self._text_target(raw, focused)
             self._typed = _Typed(
                 target=target,
                 timestamp=self._at(raw),
-                sensitive=self.options.sensitive or _is_secret(target),
+                sensitive=self.options.sensitive or self._is_secret(target, focused),
             )
         self._typed.text += raw.text
         self._typed.last = raw.timestamp
         return out
 
-    def _text_target(self, raw: RawEvent) -> Target:
+    def _is_secret(self, target: Target, focused: Target | None) -> bool:
+        """Whether this run of typing must never reach the generated script.
+
+        Asked of the focused element as well as the one the text is attributed
+        to, because those are different questions and only one of them needs a
+        *name*. A field has to be nameable to be used as a locator; it does not
+        have to be nameable to be a password.
+
+        That distinction leaked a real password. A GTK password entry commonly
+        publishes no accessible name -- its label is a sibling -- so the
+        focused field was rejected as a locator, the run was attributed to the
+        username box it had been tabbed out of, and a network-share password
+        went into the script verbatim.
+        """
+        if _is_secret(target):
+            return True
+        return focused is not None and _is_secret(focused)
+
+    def _text_target(self, raw: RawEvent, focused: Target | None) -> Target:
         """Decide which element a run of typing belongs to.
 
         Keyboard focus is the principled answer and is asked first: it is what
@@ -431,7 +450,6 @@ class Normalizer:
         accessible tree, and the answer that matters is where the text started
         going, not where focus drifted to by the last character.
         """
-        focused = self.resolver.focused()
         if focused is not None and _is_text_field(focused.element):
             return focused
         clicked = self._clicked

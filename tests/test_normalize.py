@@ -613,3 +613,38 @@ def test_a_press_and_release_at_different_points_is_still_a_drag(press, release)
         [press(1.0, x=100, y=100), motion, release(1.2, x=400, y=400)],
     )
     assert [type(e).__name__ for e in events] == ["Drag"]
+
+
+def test_an_unnamed_password_field_still_makes_the_run_secret(press, release, key):
+    # The leak this exists to stop. A GTK password entry commonly publishes no
+    # accessible name -- its label is a sibling -- so it was rejected as a
+    # locator and the run was attributed to the username box it had been
+    # tabbed out of. A real network-share password went into a script verbatim.
+    username = ElementRef(role="entry", name="Username")
+    secret = Target(x=0, y=0, element=ElementRef(role="password text", name=""))
+    resolver = FakeResolver(elements=[((0, 0, 500, 500), username)], focus=secret)
+    events = drain(
+        Normalizer(resolver=resolver),
+        [
+            press(1.0, x=10, y=10),
+            release(1.02, x=10, y=10),
+            key(2.0, "Tab"),
+            key(2.1, "p", "p"),
+        ],
+    )
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.sensitive is True
+
+
+def test_a_named_password_field_is_still_secret_and_still_the_target(key):
+    named = Target(x=0, y=0, element=ElementRef(role="password text", name="Password"))
+    events = drain(Normalizer(resolver=FakeResolver(focus=named)), [key(1.0, "p", "p")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.sensitive is True
+    assert typed.target.element.name == "Password"
+
+
+def test_focus_on_an_ordinary_field_is_not_secret(key):
+    plain = Target(x=0, y=0, element=ElementRef(role="entry", name="Search"))
+    events = drain(Normalizer(resolver=FakeResolver(focus=plain)), [key(1.0, "p", "p")])
+    assert [e for e in events if isinstance(e, TextInput)][0].sensitive is False

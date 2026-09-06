@@ -509,8 +509,32 @@ class PythonGenerator:
         self._comment(f"Check: {what}", state)
 
     def _emit_drag(self, event: Drag, state: _State) -> None:
-        """Render a drag as pyguitest's own drag primitive."""
+        """Render a drag as pyguitest's own drag primitive.
+
+        A drag that *moves a window* has to be written in screen coordinates.
+        Every other point in a generated script is relative to its window,
+        because that is what survives the window being somewhere else -- but
+        the window here is the thing being dragged, so it travels with the
+        pointer and the offset within it barely changes. Both endpoints then
+        render against different origins and collapse: a real recording of
+        someone dragging a calculator around produced
+        `gui.drag((x + 485, y + 49), (x + 485, y + 49))`, which moves nothing
+        while looking like it does.
+        """
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON", "TIMING"})
+        if _dragged_its_own_window(event):
+            self._comment(
+                "this drag moved the window it began in, so its endpoints are "
+                "screen coordinates rather than offsets into a window that "
+                "was moving at the time",
+                state,
+            )
+            start = f"{event.start.x}, {event.start.y}"
+            end = f"{event.end.x}, {event.end.y}"
+            state.pointer = None
+            button = "" if event.button == 1 else f", button={event.button}"
+            state.lines.append(f"gui.drag(({start}), ({end}){button})")
+            return
         start = self._point(event.start, state)
         end = self._point(event.end, state)
         button = "" if event.button == 1 else f", button={event.button}"
@@ -537,7 +561,18 @@ class PythonGenerator:
 
     def _emit_textinput(self, event: TextInput, state: _State) -> None:
         """Render typed text, into a named field where one was identified."""
-        text = self._secret(event, state) if event.sensitive else _literal(event.text)
+        if event.sensitive:
+            text = self._secret(event, state)
+            # Said at the point of use, not only in the binding block at the
+            # top: a reader scanning the body should not have to work out why
+            # one `type_text` takes a name where every other takes a string.
+            self._comment(
+                "this went into a password field, so the text itself was "
+                "never written here",
+                state,
+            )
+        else:
+            text = _literal(event.text)
         element = event.target.element if event.target else None
         if (
             self.options.locators == "element"
@@ -551,7 +586,37 @@ class PythonGenerator:
             )
             return
         state.capabilities.add("TEXT_ENTRY")
+        self._note_unidentified_text(event, state)
         state.lines.append(f"gui.type_text({text})")
+
+    def _note_unidentified_text(self, event: TextInput, state: _State) -> None:
+        """Say when typed text went somewhere the recording could not name.
+
+        Password redaction works by *recognising* the field: text is withheld
+        only where the element under it published the `password text` role. So
+        a password typed into a field the recording never identified is
+        written into the script in clear, and nothing about the script says
+        so. That happened for real, into a network-share authentication
+        dialog reached by Tab from the username field -- the recorder still
+        believed it was in the username field, which is not a password field,
+        so the password went in verbatim.
+
+        This cannot be fixed by guessing: withholding every unidentified run
+        would redact most typing on a toolkit whose hit-testing does not work,
+        and guessing from the text itself is worse. What it can do is stop
+        being silent, so that `--sensitive` gets used where it matters.
+        """
+        if event.sensitive or not self.options.redact_sensitive:
+            return
+        warning = (
+            "typed text went to a field this recording could not identify, so "
+            "it is in this script verbatim. Password fields are only withheld "
+            "when they can be recognised -- if any of this was a secret, "
+            "re-record with --sensitive and treat this file as credential-"
+            "bearing until you have checked it"
+        )
+        if warning not in state.warnings:
+            state.warnings.append(warning)
 
     def _secret(self, event: TextInput, state: _State) -> str:
         """Render sensitive input as an environment lookup, never as a literal."""
@@ -870,6 +935,22 @@ def _collapse_taps(body: list[str]) -> list[str]:
             out.append(f"    {body[index]}")
         index += run
     return out
+
+
+def _dragged_its_own_window(event: Drag) -> bool:
+    """Whether this drag moved the very window its coordinates are relative to.
+
+    Recognised by the window being the same one at both ends while its origin
+    is not: only the window moving under a held button does that.
+    """
+    start, end = event.start.window, event.end.window
+    if start is None or end is None:
+        return False
+    if start.geometry is None or end.geometry is None:
+        return False
+    if (start.app_id or start.title) != (end.app_id or end.title):
+        return False
+    return start.geometry[:2] != end.geometry[:2]
 
 
 def _helpers_needed(requested: set[str]) -> list[str]:

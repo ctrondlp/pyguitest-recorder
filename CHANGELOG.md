@@ -187,6 +187,31 @@ validator first.
 - `wait_for_idle` emitted a pid read off a variable nothing defined.
 - A window titled `gui` generated `gui = gui.wait_for_window(...)`.
 - Window titles went into `wait_for_window`'s **regex** unescaped.
+- **A password reached a generated script in clear.** Redaction recognises a
+  password field by its `password text` role, and the focus-based targeting
+  added earlier required the focused element to be *named* before it would use
+  it -- a sound rule for a locator, since an unnamed field cannot be found
+  again at replay, and the wrong rule for secrecy. A GTK password entry
+  commonly publishes no name at all (its label is a sibling), so the field was
+  rejected, the run was attributed to the username box it had been tabbed out
+  of, and a real network-share password went in verbatim. Locating and secrecy
+  are asked separately now: a field must be nameable to be used as a locator,
+  and needs no name to make the run secret.
+
+  Two things around it, because recognition can always fail: a redacted run
+  says so at the point of use rather than only in the binding block, and text
+  typed somewhere the recording *could not identify at all* now raises a note
+  saying it is in the file verbatim and to re-record with `--sensitive`. That
+  case cannot be fixed by guessing -- withholding every unidentified run would
+  redact most typing on a toolkit whose hit-testing does not work -- but it
+  can stop being silent.
+- **A drag that moved its own window rendered as a no-op.** Every other point
+  in a generated script is window-relative, because that is what survives the
+  window being somewhere else -- but a drag on a titlebar moves the window
+  with the pointer, so the offset within it barely changes and both endpoints
+  collapse. A recording of someone dragging a calculator around produced
+  `gui.drag((x + 485, y + 49), (x + 485, y + 49))`. Such a drag is written in
+  screen coordinates now, with a comment saying why.
 - **A drag whose ends were the same point.** Whether a press and release is a
   drag is decided by where the button went down and came up, not by whether
   the pointer moved in between. Dragging out and coming back produced

@@ -757,3 +757,57 @@ def test_a_double_click_with_no_rectangle_falls_back_to_two_clicks(window):
     )
     assert source.count(".click()") == 2
     assert "double_click_element" not in source
+
+
+def test_a_redacted_run_says_why_at_the_point_of_use():
+    # A reader scanning the body should not have to work out why one
+    # `type_text` takes a name where every other takes a string.
+    source = render(TextInput(text="hunter2", sensitive=True))
+    assert "went into a password field" in source
+    assert "hunter2" not in source
+
+
+def test_text_with_no_identified_field_is_reported_as_a_risk():
+    # Redaction works by recognising the field, so text typed somewhere the
+    # recording could not name is in the script verbatim -- and used to be so
+    # silently. A real network-share password went in that way.
+    recording = Recording(events=[TextInput(text="whatever")])
+    source = generate(recording, GeneratorOptions())
+    assert "could not identify" in source
+    assert "--sensitive" in source
+
+
+def test_text_into_a_named_field_is_not_reported_as_a_risk():
+    field = ElementRef(role="entry", name="Name")
+    recording = Recording(
+        events=[TextInput(text="Ada", target=Target(x=1, y=1, element=field))]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "could not identify" not in source
+
+
+def test_a_drag_that_moved_its_own_window_uses_screen_coordinates():
+    # The window travels with the pointer, so the offset within it barely
+    # changes and both endpoints collapse. A real recording of someone
+    # dragging a calculator produced gui.drag((x + 485, y + 49), (x + 485, y + 49)).
+    before = WindowRef(title="Calculator", geometry=(100, 100, 400, 300))
+    after = WindowRef(title="Calculator", geometry=(300, 250, 400, 300))
+    source = render(
+        Drag(
+            start=Target(x=150, y=140, window=before),
+            end=Target(x=350, y=290, window=after),
+        )
+    )
+    assert "gui.drag((150, 140), (350, 290))" in source
+    assert "moved the window it began in" in source
+
+
+def test_a_drag_inside_a_window_that_stayed_put_is_still_relative(window):
+    source = render(
+        Drag(
+            start=Target(x=150, y=100, window=window),
+            end=Target(x=300, y=200, window=window),
+        )
+    )
+    assert "example_x +" in source
+    assert "moved the window it began in" not in source
