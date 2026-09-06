@@ -22,18 +22,72 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .analyzer import Normalizer, NormalizerOptions
+from .analyzer import (
+    MODIFIERS,
+    Normalizer,
+    NormalizerOptions,
+    chord_matches,
+    parse_chord,
+)
 from .backends.base import CaptureBackend, CaptureUnavailable
 from .config import Settings
 from .model import Environment, Recording
 from .windows import ContextResolver, DesktopResolver, NullResolver
 
 __all__ = [
+    "ContextReport",
     "Recorder",
     "choose_backend",
     "describe_environment",
+    "probe_context",
     "scoped_environment",
 ]
+
+
+@dataclass
+class ContextReport:
+    """What a recording made right now would actually be able to say.
+
+    Capture answers "can input be seen at all"; this answers the question that
+    decides what the generated script looks like. A recording with neither is
+    still a recording, of bare screen coordinates -- which is the outcome most
+    worth knowing about *before* spending ten minutes making one.
+    """
+
+    windows: bool = False
+    """Whether toplevels can be identified, so a coordinate is window-relative."""
+
+    elements: bool = False
+    """Whether a click can be named, which is the reason this tool exists."""
+
+    notes: list[str] = field(default_factory=list)
+    """Everything that degraded, in the words the recording would carry."""
+
+
+def probe_context(settings: Settings) -> ContextReport:
+    """Open the context a recording would use, report on it, and close it.
+
+    Deliberately the same code path `start()` takes rather than a lighter
+    imitation of it: a probe that answers differently from the real thing is
+    worse than no probe. Capture is not started, so this takes no input and
+    leaves no RECORD context behind.
+    """
+    recorder = Recorder(settings=settings)
+    notes: list[str] = []
+    display = settings.display or os.environ.get("DISPLAY", "")
+    session = recorder._open_session(display, notes)
+    report = ContextReport(notes=notes)
+    if session is None:
+        return report
+    try:
+        report.windows = _lists_windows(session)
+        resolver = recorder._open_resolver_for(session)
+        report.elements = resolver.resolves_elements
+        report.notes.extend(w for w in resolver.warnings if w not in report.notes)
+    finally:
+        with contextlib.suppress(Exception):
+            session.close()
+    return report
 
 
 def choose_backend(settings: Settings) -> CaptureBackend:
@@ -114,6 +168,8 @@ class Recorder:
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
+    _stop_pending: list[Any] = field(default_factory=list, init=False)
+    _mods: set[str] = field(default_factory=set, init=False)
 
     def __enter__(self) -> Recorder:
         """Open the capture backend and the context session."""
@@ -160,18 +216,30 @@ class Recorder:
             raise RuntimeError("start() must be called before run()")
         try:
             for raw in self._backend.events():
-                if self._is_stop_key(raw):
+                ready, stop = self._stop_sequence(raw)
+                if stop:
                     break
-                if self.settings.record_raw:
-                    self.recording.raw.append(raw.to_dict())
-                for event in self._normalizer.feed(raw):
-                    self.recording.add(event)
+                self._consume(ready)
         except KeyboardInterrupt:
             pass
+        # Presses held for a stop run that never completed are the
+        # application's, not the recorder's, so they belong in the recording.
+        self._consume(self._stop_pending)
+        self._stop_pending = []
         for event in self._normalizer.flush():
             self.recording.add(event)
         self._collect_warnings()
         return self.recording
+
+    def _consume(self, raws: list[Any]) -> None:
+        """Record and normalize raw events that are known not to be the stop key."""
+        if self._normalizer is None:
+            return
+        for raw in raws:
+            if self.settings.record_raw:
+                self.recording.raw.append(raw.to_dict())
+            for event in self._normalizer.feed(raw):
+                self.recording.add(event)
 
     def _collect_warnings(self) -> None:
         """Carry what the resolver learned while recording into the notes.
@@ -187,18 +255,68 @@ class Recorder:
         notes = self.recording.environment.notes
         notes.extend(w for w in self._resolver.warnings if w not in notes)
 
-    def _is_stop_key(self, raw: Any) -> bool:
-        """Whether this event is the panic key that ends the recording.
+    def _stop_sequence(self, raw: Any) -> tuple[list[Any], bool]:
+        """Sort one raw event into what to record and whether to stop.
 
         A recorder that can only be stopped from its own terminal is a
         recorder you cannot stop while driving another application full
-        screen, which is most of the time.
+        screen, which is most of the time. So the stop key is read here,
+        before normalization, and swallowed.
+
+        The default is Escape pressed twice, which needs more than matching a
+        keysym: a single Escape belongs to the application being recorded, so
+        presses are held until the run either completes -- and the recording
+        ends, discarding them -- or is broken, at which point they are handed
+        on in order and recorded like any other key. That is what keeps
+        "press Escape to close the dialog" recordable while Escape is also
+        what stops the recording. Nothing is held across the end of the
+        stream: `run` flushes whatever is pending before finishing.
         """
-        return (
-            bool(self.settings.stop_key)
-            and raw.kind == "key_press"
-            and raw.keysym == self.settings.stop_key
-        )
+        held = self._modifiers_after(raw)
+        if not self._is_stop_event(raw, held):
+            pending, self._stop_pending = self._stop_pending, []
+            return ([*pending, raw], False)
+        if self._stop_pending and (
+            raw.timestamp - self._stop_pending[-1].timestamp
+            > self.settings.stop_key_interval
+        ):
+            # Too slow to be one run, so the earlier presses were the
+            # application's and this one starts a new run of its own.
+            pending, self._stop_pending = self._stop_pending, [raw]
+            return (pending, False)
+        self._stop_pending.append(raw)
+        presses = sum(1 for e in self._stop_pending if e.kind == "key_press")
+        if presses >= max(1, self.settings.stop_key_presses):
+            self._stop_pending = []
+            return ([], True)
+        return ([], False)
+
+    def _is_stop_event(self, raw: Any, held: set[str]) -> bool:
+        """Whether this event belongs to a run of stop-key presses.
+
+        Releases count as belonging to the run without advancing it, so the
+        release between two presses does not read as the run being broken.
+        """
+        if raw.kind not in ("key_press", "key_release"):
+            return False
+        if raw.kind == "key_release":
+            _, key = parse_chord(self.settings.stop_key)
+            return bool(key) and raw.keysym == key and bool(self._stop_pending)
+        return chord_matches(self.settings.stop_key, held, raw.keysym)
+
+    def _modifiers_after(self, raw: Any) -> set[str]:
+        """Track which modifiers are down, which the normalizer cannot do for us.
+
+        The stop key is recognized before normalization by design, so its
+        modifier state has to be tracked here as well as there.
+        """
+        modifier = MODIFIERS.get(getattr(raw, "keysym", "") or "")
+        if modifier is not None:
+            if raw.kind == "key_press":
+                self._mods.add(modifier)
+            elif raw.kind == "key_release":
+                self._mods.discard(modifier)
+        return self._mods
 
     def stop(self) -> None:
         """Stop capture and close everything opened by `start`."""
@@ -298,9 +416,11 @@ class Recorder:
         """Build the resolver matching the settings and what actually opened."""
         if self._session is None:
             return NullResolver()
-        return DesktopResolver(
-            session=self._session, elements=self.settings.element_context
-        )
+        return self._open_resolver_for(self._session)
+
+    def _open_resolver_for(self, session: Any) -> DesktopResolver:
+        """Build the resolver for one session, so a probe can build the same one."""
+        return DesktopResolver(session=session, elements=self.settings.element_context)
 
     def _normalizer_options(self) -> NormalizerOptions:
         """Translate settings into the analyzer's thresholds."""

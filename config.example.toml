@@ -11,9 +11,17 @@
 # display = ":0"          # unset means $DISPLAY
 screen = 0
 backend = "auto"          # "auto" or "xrecord"
-stop_key = "Pause"        # keysym that ends a recording
-check_key = "F9"          # keysym that records a check on what is under the
-                          # pointer; "" records none and lets the key through
+# Both of these are chords: "Escape", "ctrl+Escape", "ctrl+shift+F1". They
+# match exactly, so binding ctrl+F1 leaves ctrl+shift+F1 to the application.
+stop_key = "Escape"       # key that ends a recording
+stop_key_presses = 2      # ...pressed this many times in a row. Two, because
+                          # one Escape belongs to the application being
+                          # recorded; presses that do not complete a run are
+                          # passed through and recorded. Use 1 with a key
+                          # nothing else wants, such as Pause.
+stop_key_interval = 1.0   # seconds within which those presses must arrive
+check_key = "ctrl+F1"     # records a check on what is under the pointer;
+                          # "" records none and lets the key through
 window_context = true     # open a pyguitest session to identify windows
 element_context = true    # resolve clicks to AT-SPI elements
 

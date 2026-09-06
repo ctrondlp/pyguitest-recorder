@@ -38,7 +38,7 @@ source.
   id" is not actionable without that, and its widget-position section carries
   the three-application GTK 4 measurement rather than the single dialog it
   started from.
-- **Checks, which are what make a recording a test.** Pressing F9 over
+- **Checks, which are what make a recording a test.** Pressing Ctrl+F1 over
   something records a check on it, and the generated script verifies it: a
   checkbox against its state, a field or a label against what it read, any
   other named element against being on screen, and a window against being
@@ -51,6 +51,15 @@ source.
   the instant an action returns races an application that has not redrawn.
   Password fields are redacted as typed input is, and a check that resolved to
   nothing is reported in the script's header rather than dropped.
+- Both bound keys are configurable and take a chord syntax (`Escape`,
+  `ctrl+Escape`, `ctrl+shift+F1`), matched exactly so binding one leaves the
+  combinations around it to the application. The defaults moved to what
+  laptops actually have: **Escape pressed twice** to stop, since many
+  keyboards have no Pause key, and **Ctrl+F1** to check, since a bare F9 is a
+  screenshot key on some laptops and a bare F1 is help nearly everywhere.
+  Stop presses that do not complete a run are passed through and recorded, so
+  "press Escape to close the dialog" stays recordable; `--stop-presses 1`
+  restores single-press behaviour for a key nothing else wants.
 - Window variables and comments are named from the **title**, while window
   *identity* still keys on the app id. The two want different fields: the app
   id is what does not drift, and the title is what a reader recognizes. This
@@ -110,6 +119,32 @@ source.
   `src/` or `tests/` exceeds 8), mypy's `sqlite_cache = false` carried over so
   the type checker runs on a Python built without `_sqlite3`, and `strict`
   kept, which already implies the three flags pyguitest sets by hand.
+
+### Found by the first recording of a real application
+
+Everything above was found on a private X server driving a test dialog. The
+first recording of somebody's actual desktop -- a file manager, a text editor
+and a terminal on GhostBSD -- found three more in one pass.
+
+- **A window that renamed itself became four windows.** The editor retitled
+  itself on every keystroke, and window identity was "app id, or failing that
+  the title", so each new title read as a new window: four `wait_for_window`
+  calls for one window, three matching nothing at replay. `wait_for_window`
+  answers None rather than raising, so the script then failed several lines
+  further down on `None.pid`. Identity now follows the live window handle --
+  which is what pyguitest's own `Window` compares on, precisely because
+  titles move -- and the *first* title seen is the one every later mention
+  reuses. That is also the right one to match on: replay starts from the same
+  state and follows the same sequence, so the title the window had when the
+  recording first touched it is the title the script will find.
+- **The same element was waited for twice.** Two pauses in front of one
+  element emitted two identical `wait_for_element` calls: the window rule
+  marked its window seen, the element rule never marked its element.
+- **A long title truncated mid-word**, giving variables like
+  `hello_there_draft_text_edito`, which reads as a typo in every line it
+  appears in. Cut at a word boundary now.
+- A hyphen in a title is no longer escaped into the matching pattern. It is
+  only special inside a character class, and titles are full of them.
 
 ### Fixed before anyone could hit them
 

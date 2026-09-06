@@ -18,7 +18,9 @@ EXAMPLE_CONFIG = Path(__file__).resolve().parents[1] / "config.example.toml"
 def test_example_config_parses_and_sets_only_known_keys():
     settings, source = load_settings(EXAMPLE_CONFIG)
     assert source == EXAMPLE_CONFIG
-    assert settings.stop_key == "Pause"
+    assert settings.stop_key == "Escape"
+    assert settings.stop_key_presses == 2
+    assert settings.check_key == "ctrl+F1"
     assert settings.locators == "element"
 
 
@@ -112,7 +114,8 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     stream = [
         RawEvent(kind="button_press", timestamp=1.0, x=430, y=115, button=1),
         RawEvent(kind="button_release", timestamp=1.05, x=430, y=115, button=1),
-        RawEvent(kind="key_press", timestamp=3.5, keysym="F9", x=100, y=505),
+        RawEvent(kind="key_press", timestamp=3.4, keysym="Control_L", x=100, y=505),
+        RawEvent(kind="key_press", timestamp=3.5, keysym="F1", x=100, y=505),
     ]
 
     recording = Recording(environment=Environment(session_type="x11"))
@@ -129,7 +132,7 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     assert 'gui.button("Save").click()' in source
     assert 'expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")' in source
     # The check key itself is not part of the interaction being replayed.
-    assert "F9" not in source
+    assert "F1" not in source
 
 
 def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
@@ -142,10 +145,12 @@ def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
     )
     normalizer = Normalizer(resolver=resolver, started=0.0)
     recording = Recording()
-    for event in normalizer.feed(
-        RawEvent(kind="key_press", timestamp=1.0, keysym="F9", x=10, y=10)
+    for raw in (
+        RawEvent(kind="key_press", timestamp=1.0, keysym="Control_L", x=10, y=10),
+        RawEvent(kind="key_press", timestamp=1.05, keysym="F1", x=10, y=10),
     ):
-        recording.add(event)
+        for event in normalizer.feed(raw):
+            recording.add(event)
 
     path = tmp_path / "rec.json"
     recording.save(path)
@@ -154,3 +159,83 @@ def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
         'expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)'
         in source
     )
+
+
+class RenamingEditor:
+    """One live window, renaming itself as text arrives.
+
+    Identity by handle, exactly as pyguitest's own Window does it, because
+    that is the distinction under test: same window, different title.
+    """
+
+    def __init__(self):
+        self.handle = 42
+        self.title = "New Document (Draft) - Text Editor"
+        self.app_id = ""
+        self.pid = 900
+        self.typed = 0
+
+    def rename(self):
+        self.typed += 1
+        self.title = f"{'Hello'[: self.typed]} (Draft) - Text Editor"
+
+    def __eq__(self, other):
+        return getattr(other, "handle", None) == self.handle
+
+    def __hash__(self):
+        return hash(self.handle)
+
+
+class OneWindowSession:
+    """The little of a pyguitest Session that window resolution asks for."""
+
+    def __init__(self, window):
+        self.window = window
+
+    @property
+    def capabilities(self):
+        return set()
+
+    def window_at(self, x, y, screen=0):
+        return self.window
+
+    def active_window(self):
+        return self.window
+
+    def geometry(self, window):
+        return (0, 0, 800, 600)
+
+
+def test_an_editor_that_renames_itself_while_typing_stays_one_window():
+    """The shape the first recording of a real application came out wrong in.
+
+    A text editor renamed its window on every keystroke. Each title read as a
+    new window, so the script waited for four windows that were always one --
+    and since `wait_for_window` answers None rather than raising, replay then
+    failed several lines later on `None.pid`.
+    """
+    from pyguitest_recorder.analyzer import infer_synchronization
+    from pyguitest_recorder.windows import DesktopResolver
+
+    editor = RenamingEditor()
+    made = DesktopResolver(session=OneWindowSession(editor), elements=False)
+    normalizer = Normalizer(resolver=made, started=0.0)
+
+    recording = Recording(environment=Environment(session_type="x11"))
+    stamp = 1.0
+    for char in "Hello":
+        raw = RawEvent(kind="key_press", timestamp=stamp, keysym=char, text=char)
+        for event in normalizer.feed(raw):
+            recording.add(event)
+        # The editor renames itself, then the user pauses long enough for the
+        # analyzer to look for something to synchronize on.
+        editor.rename()
+        stamp += 2.0
+    for event in normalizer.flush():
+        recording.add(event)
+
+    recording.events = infer_synchronization(recording.events)
+    source = generate(recording)
+    assert validate(source) == []
+    assert source.count("gui.wait_for_window") == 1
+    assert "New Document" in source

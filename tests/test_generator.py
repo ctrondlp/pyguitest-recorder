@@ -652,3 +652,24 @@ def test_reverse_dns_app_ids_still_lose_their_leading_segments():
     window = WindowRef(title="", app_id="org.gnome.TextEditor")
     source = render(WindowActivate(window=window))
     assert "texteditor" in source
+
+
+def test_a_long_window_title_is_cut_at_a_word_boundary():
+    # Truncating to the character produced `hello_there_draft_text_edito`,
+    # which reads as a typo everywhere it appears.
+    window = WindowRef(title="Hello There (Draft) - Text Editor Deluxe")
+    source = render(WindowActivate(window=window))
+    assert "edito " not in source and "edito." not in source
+    assert "hello_there_draft_text = " in source
+
+
+def test_a_hyphen_in_a_title_is_not_escaped_into_noise():
+    # A hyphen is only special inside a character class, and titles are full
+    # of them: "Test Hello \\(Draft\\) \\- Text Editor" reads badly for the
+    # one bracket that actually needed escaping.
+    window = WindowRef(title="Hello (Draft) - Text Editor")
+    source = render(WindowActivate(window=window))
+    pattern = window_pattern(source)
+    assert pattern == r"Hello \(Draft\) - Text Editor"
+    assert re.search(pattern, "Hello (Draft) - Text Editor")
+    assert not re.search(pattern, "Hello Draft - Text Editor")

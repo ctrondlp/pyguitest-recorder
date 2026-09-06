@@ -247,6 +247,11 @@ def test_hesitation_inside_a_word_is_not_a_pause(key):
 # -- checks ------------------------------------------------------------------
 
 
+def check_chord(key, t=1.0):
+    """The default check key, ctrl+F1, as the two presses it really is."""
+    return [key(t, "Control_L"), key(t + 0.05, "F1")]
+
+
 def observed(role, name, text=None, checked=None, window=None):
     """A resolver whose one element covers everywhere, in a known state."""
     return FakeResolver(
@@ -259,19 +264,38 @@ def observed(role, name, text=None, checked=None, window=None):
 
 def test_the_check_key_records_a_check_instead_of_a_keystroke(key):
     resolver = observed("label", "Status", text="Saved")
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert [type(e).__name__ for e in events] == ["Assertion"]
     assert events[0].check == "text"
     assert events[0].expected == "Saved"
 
 
 def test_the_check_key_can_be_switched_off(key):
-    # With no check key the key belongs to the application again, and has to
-    # record as the keystroke it is rather than disappearing.
+    # With no check key the combination belongs to the application again, and
+    # has to record as the hotkey it is rather than disappearing.
     normalizer = Normalizer(options=NormalizerOptions(check_key=""))
-    events = drain(normalizer, [key(1.0, "F9")])
+    events = drain(normalizer, check_chord(key))
+    assert [type(e).__name__ for e in events] == ["HotKey"]
+    assert events[0].keys == ("ctrl", "F1")
+
+
+def test_the_check_key_needs_its_modifier(key):
+    # A bare F1 is help almost everywhere; only the exact combination fires.
+    events = drain(
+        Normalizer(resolver=observed("label", "Status", text="Saved")),
+        [key(1.0, "F1")],
+    )
     assert [type(e).__name__ for e in events] == ["KeyStroke"]
-    assert events[0].key == "F9"
+
+
+def test_a_larger_combination_is_not_the_check_key(key):
+    # Exact matching keeps ctrl+shift+F1 usable in the application being
+    # recorded, rather than swallowing everything built on ctrl+F1.
+    events = drain(
+        Normalizer(resolver=observed("label", "Status", text="Saved")),
+        [key(1.0, "Control_L"), key(1.05, "Shift_L"), key(1.1, "F1")],
+    )
+    assert [type(e).__name__ for e in events] == ["HotKey"]
 
 
 def test_a_check_lands_after_the_typing_it_verifies(key):
@@ -281,26 +305,26 @@ def test_a_check_lands_after_the_typing_it_verifies(key):
     resolver = observed("entry", "Filename", text="report.txt")
     events = drain(
         Normalizer(resolver=resolver),
-        [key(1.0, "h", "h"), key(1.1, "i", "i"), key(1.2, "F9")],
+        [key(1.0, "h", "h"), key(1.1, "i", "i"), *check_chord(key, 1.2)],
     )
     assert [type(e).__name__ for e in events] == ["TextInput", "Assertion"]
 
 
 def test_a_password_field_check_is_marked_sensitive(key):
     resolver = observed("password text", "Password", text="hunter2")
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert events[0].sensitive is True
 
 
 def test_a_checkbox_is_checked_rather_than_read(key):
     resolver = observed("check box", "Read only", text="", checked=True)
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert (events[0].check, events[0].expected) == ("checked", True)
 
 
 def test_a_button_can_only_be_checked_for_being_there(key):
     resolver = observed("push button", "Save", text="Save")
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert events[0].check == "showing"
 
 
@@ -308,27 +332,27 @@ def test_an_empty_label_is_not_asserted_on(key):
     # A toolkit that publishes no text reports the empty string, and "this
     # label is empty" passes against an application that stopped drawing.
     resolver = observed("label", "Status", text="")
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert events[0].check == "showing"
 
 
 def test_an_empty_entry_is_asserted_on(key):
     # The opposite case: clearing a field is a real state worth verifying.
     resolver = observed("entry", "Filename", text="")
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert (events[0].check, events[0].expected) == ("text", "")
 
 
 def test_a_check_with_no_element_falls_back_to_the_window(key, window):
     resolver = FakeResolver(window=window)
-    events = drain(Normalizer(resolver=resolver), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=resolver), check_chord(key))
     assert (events[0].check, events[0].expected) == ("window", "Example")
 
 
 def test_a_check_on_nothing_is_recorded_rather_than_dropped(key):
     # Silently discarding it would leave a script that looks like it verifies
     # something; the generator turns this into a warning in the header.
-    events = drain(Normalizer(resolver=FakeResolver()), [key(1.0, "F9")])
+    events = drain(Normalizer(resolver=FakeResolver()), check_chord(key))
     assert events[0].check == "nothing"
 
 
@@ -435,3 +459,80 @@ def test_focus_is_asked_once_per_run_not_once_per_character(key, window):
         [key(1.0, "h", "h"), key(1.1, "i", "i"), key(1.2, "!", "!")],
     )
     assert Counting.calls == 1
+
+
+# -- the stop key ------------------------------------------------------------
+
+
+def stop_recorder(**overrides):
+    """A Recorder with capture and context switched off, for the key logic."""
+    from pyguitest_recorder.config import Settings
+    from pyguitest_recorder.recorder import Recorder
+
+    settings = Settings(window_context=False, element_context=False, **overrides)
+    return Recorder(settings=settings)
+
+
+def feed_stop(recorder, raws):
+    """Push raw events through the stop sequence, collecting what got through."""
+    passed, stopped = [], False
+    for raw in raws:
+        ready, stop = recorder._stop_sequence(raw)
+        passed.extend(ready)
+        if stop:
+            stopped = True
+            break
+    return [r.keysym for r in passed], stopped
+
+
+def test_two_escapes_in_a_row_stop_the_recording(key):
+    keysyms, stopped = feed_stop(
+        stop_recorder(),
+        [
+            key(1.0, "Escape"),
+            key(1.05, "Escape", kind="key_release"),
+            key(1.1, "Escape"),
+        ],
+    )
+    assert stopped
+    assert keysyms == []
+
+
+def test_one_escape_is_the_applications_and_is_recorded(key):
+    # Closing a dialog has to stay recordable while Escape also stops the
+    # recording, so a press that does not complete a run is handed on.
+    keysyms, stopped = feed_stop(
+        stop_recorder(),
+        [
+            key(1.0, "Escape"),
+            key(1.05, "Escape", kind="key_release"),
+            key(2.0, "a", "a"),
+        ],
+    )
+    assert not stopped
+    assert keysyms == ["Escape", "Escape", "a"]
+
+
+def test_two_slow_escapes_are_two_ordinary_presses(key):
+    keysyms, stopped = feed_stop(
+        stop_recorder(stop_key_interval=0.5),
+        [key(1.0, "Escape"), key(5.0, "Escape"), key(6.0, "a", "a")],
+    )
+    assert not stopped
+    assert keysyms == ["Escape", "Escape", "a"]
+
+
+def test_a_single_press_key_still_stops_on_one(key):
+    # `Pause` was the old default and suits a keyboard that has one.
+    keysyms, stopped = feed_stop(
+        stop_recorder(stop_key="Pause", stop_key_presses=1), [key(1.0, "Pause")]
+    )
+    assert stopped and keysyms == []
+
+
+def test_the_stop_key_can_carry_a_modifier(key):
+    recorder = stop_recorder(stop_key="ctrl+Escape", stop_key_presses=1)
+    keysyms, stopped = feed_stop(recorder, [key(1.0, "Escape")])
+    assert not stopped and keysyms == ["Escape"]
+    keysyms, stopped = feed_stop(recorder, [key(2.0, "Control_L"), key(2.1, "Escape")])
+    assert stopped

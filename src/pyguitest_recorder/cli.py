@@ -20,7 +20,13 @@ from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
 from .model import Origin, Recording
-from .recorder import Recorder, choose_backend, describe_environment
+from .recorder import (
+    ContextReport,
+    Recorder,
+    choose_backend,
+    describe_environment,
+    probe_context,
+)
 
 __all__ = ["main", "build_parser"]
 
@@ -38,13 +44,23 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--screen", type=int, help="screen number (default: 0)")
     capture.add_argument(
         "--stop-key",
-        metavar="KEYSYM",
-        help="key that ends the recording (default: Pause)",
+        metavar="KEY",
+        help="key that ends the recording, e.g. Escape or ctrl+Escape"
+        " (default: Escape)",
+    )
+    capture.add_argument(
+        "--stop-presses",
+        dest="stop_key_presses",
+        type=int,
+        metavar="N",
+        help="how many stop-key presses in a row end the recording (default: 2,"
+        " since a single Escape belongs to the application)",
     )
     capture.add_argument(
         "--check-key",
-        metavar="KEYSYM",
-        help="key that records a check on whatever the pointer is over (default: F9)",
+        metavar="KEY",
+        help="key that records a check on whatever the pointer is over,"
+        " e.g. ctrl+F1 (default: ctrl+F1)",
     )
     capture.add_argument(
         "--no-checks",
@@ -173,6 +189,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "display",
         "screen",
         "stop_key",
+        "stop_key_presses",
         "check_key",
         "window_context",
         "element_context",
@@ -222,8 +239,7 @@ def _record(settings: Settings) -> int:
     except CaptureUnavailable as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 1
-    stop = settings.stop_key or "Ctrl-C"
-    print(f"Recording. Press {stop} to stop.", file=sys.stderr)
+    print(f"Recording. {_stop_hint(settings)} to stop.", file=sys.stderr)
     if settings.check_key:
         print(
             f"Point at something and press {settings.check_key} to check it.",
@@ -317,12 +333,52 @@ def _doctor(settings: Settings) -> int:
     print(f"compositor:        {environment.compositor or 'unknown'}")
     print(f"display:           {environment.display or 'unset'}")
     print(f"pyguitest:         {environment.pyguitest_version or 'not importable'}")
-    for note in environment.notes:
+
+    # Capture answers "can input be seen"; this answers what the generated
+    # script will look like, which is the part worth knowing before spending
+    # ten minutes on a recording that turns out to be all coordinates.
+    context = probe_context(settings) if capture_ok else ContextReport()
+    print(f"window context:    {'yes' if context.windows else 'no'}")
+    print(f"element context:   {'yes' if context.elements else 'no'}")
+
+    for note in environment.notes + context.notes:
         print(f"note:              {note}")
     print("config searched:")
     for path in config_paths():
         print(f"  {'*' if path.is_file() else '-'} {path}")
+    print(f"verdict:           {_verdict(capture_ok, context)}")
     return 0 if capture_ok else 1
+
+
+def _stop_hint(settings: Settings) -> str:
+    """How to describe the stop key to someone about to need it."""
+    if not settings.stop_key:
+        return "Press Ctrl-C"
+    times = {1: "", 2: " twice", 3: " three times"}.get(
+        settings.stop_key_presses, f" {settings.stop_key_presses} times"
+    )
+    return f"Press {settings.stop_key}{times}"
+
+
+def _verdict(capture_ok: bool, context: ContextReport) -> str:
+    """The one line `--doctor` exists to print.
+
+    It reported facts and left the reader to draw the conclusion, which is a
+    poor trade when the whole question is "can this machine record?" -- and
+    the answer has three outcomes, not two. Recording with no element context
+    works and produces a far more fragile script, so saying only "yes" would
+    be true and misleading.
+    """
+    if not capture_ok:
+        return "cannot record -- see the capture line above"
+    if context.elements:
+        return "ready to record, and clicks will be named"
+    if context.windows:
+        return (
+            "can record, but no click will be named -- the script will use "
+            "window-relative coordinates"
+        )
+    return "can record, but every click will be a bare screen coordinate"
 
 
 def _report_settings(settings: Settings, source: Path | None) -> None:

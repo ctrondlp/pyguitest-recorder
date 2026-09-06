@@ -22,14 +22,14 @@ and how:
 
 | Part | State |
 |------|-------|
-| Canonical event model, JSON round-trip | tested (234 tests), on CI |
+| Canonical event model, JSON round-trip | tested (255 tests), on CI |
 | Semantic analyzer (clicks, drags, text, hotkeys, pauses) | tested |
 | Synchronization inference | tested |
-| Checks (the F9 key, and what they generate) | tested; not yet run live |
+| Checks (the check key, and what they generate) | tested; not yet run live |
 | Script generator + API validation | tested against the installed pyguitest |
 | Configuration (TOML, XDG, precedence) | tested |
 | CLI (`--doctor`, `--regenerate`) | tested |
-| Window/title-drift resolution | tested against a fake session |
+| Window/title-drift resolution | tested; drift fix found by a live recording |
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
 | XRecord capture of a real application | run live against a real X server |
 | AT-SPI element resolution | run live against a real accessibility bus |
@@ -141,18 +141,43 @@ pyguitest 0.4.0 or newer is required outright: the generator emits
 
 ```sh
 pyguitest-recorder --doctor              # can this machine record? why not?
-pyguitest-recorder -o login_test.py      # record until the Pause key
+pyguitest-recorder -o login_test.py      # record until Escape, Escape
+pyguitest-recorder -o login_test.py --save-session rec.json   # keep both
 pyguitest-recorder --regenerate rec.json -o out.py   # re-render, no recording
 ```
 
-Uninstalled, from a checkout, that first line is
-`PYTHONPATH=src python -m pyguitest_recorder --doctor`, and so on for the
-rest.
+Without `-o` the script goes to stdout and the summary to stderr, so a
+redirect works too. Keeping the `.json` is worth it: `--regenerate` re-renders
+an old recording under whatever inference rules exist now, without recording
+it again.
 
-Recording stops on the **Pause** key (`--stop-key`), not only Ctrl-C — a
-recorder you can only stop from its own terminal is one you cannot stop while
-driving a full-screen application. **F9** (`--check-key`) records a check on
-whatever the pointer is over; see [Checks](#checks-what-makes-it-a-test).
+Uninstalled, from a checkout, put `src/` on the import path and call the
+module — every flag is the same:
+
+```sh
+PYTHONPATH=src python -m pyguitest_recorder --doctor
+PYTHONPATH=src python -m pyguitest_recorder -o login_test.py
+PYTHONPATH=src python -m pyguitest_recorder -o login_test.py --save-session rec.json
+```
+
+Recording stops on **Escape pressed twice**, not only Ctrl-C — a recorder you
+can only stop from its own terminal is one you cannot stop while driving a
+full-screen application. **Ctrl+F1** records a check on whatever the pointer is
+over; see [Checks](#checks-what-makes-it-a-test).
+
+Both are configurable (`--stop-key`, `--stop-presses`, `--check-key`, or the
+config file) and both take the same chord syntax — `Escape`, `ctrl+Escape`,
+`ctrl+shift+F1`. They match *exactly*, so binding `ctrl+F1` leaves
+`ctrl+shift+F1` to the application being recorded.
+
+The defaults are chosen around what laptops actually have. Pause is not on
+many keyboards any more, so Escape stands in — twice, because a single Escape
+belongs to the application, and a press that does not complete the run is
+passed through and recorded like any other key. That keeps "press Escape to
+close the dialog" recordable. A key nothing else wants can drop the repeat:
+`--stop-key Pause --stop-presses 1`. The check key carries a modifier for the
+same reason — a bare F9 is a screenshot key on some laptops, and a bare F1 is
+help nearly everywhere.
 
 ### What comes out
 
@@ -288,7 +313,7 @@ raises, whatever the application actually did — click Save, and a script that
 never looks at the result passes just as happily against a build where saving
 silently fails.
 
-Point at what should have changed and press **F9**. The recorder reads what is
+Point at what should have changed and press **Ctrl+F1**. The recorder reads what is
 under the pointer *and what it currently says*, and generates a check against
 that value:
 
@@ -328,7 +353,8 @@ otherwise race an application that has not finished redrawing.
 Text from a password field is redacted exactly as typed input is, and a check
 that could not be resolved to anything is reported in the header rather than
 dropped, so a script never looks like it verifies something it does not.
-`--no-checks` turns the key off and lets it through to the application.
+`--no-checks` turns the key off and lets it through to the application, and
+`--check-key` rebinds it.
 
 ### Waits, not sleeps
 
@@ -384,9 +410,12 @@ See [config.example.toml](config.example.toml).
 
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
-- **No recording has yet been made of a real desktop application.** The live
-  check records two GTK windows on a private server; nothing has been recorded
-  of a full application being used the way a person would use one.
+- **Only one recording has been made of a real desktop application** — a file
+  manager, a text editor and a terminal on GhostBSD. It found three bugs in
+  one pass, all now fixed (see the CHANGELOG), the worst of which made any
+  recording of an editor fail at replay. The routine live check still uses two
+  GTK windows on a private server, so this remains the thinnest-covered part
+  of the tool.
 - **The CI `live` job has never run on a GitHub runner.** It is written and
   passes here; the Ubuntu package names and daemon paths are reasoned, not
   observed.

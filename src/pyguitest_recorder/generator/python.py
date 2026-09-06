@@ -230,7 +230,12 @@ def _identifier(base: str, taken: set[str]) -> str:
         cleaned = f"win_{cleaned}" if cleaned else "win"
     if keyword.iskeyword(cleaned) or keyword.issoftkeyword(cleaned):
         cleaned = f"{cleaned}_window"
+    # Cut at a word boundary rather than mid-word: a long title truncated to
+    # the character produced `hello_there_draft_text_edito`, which reads as a
+    # typo in every line it appears in.
     candidate = cleaned[:28]
+    if len(cleaned) > 28 and "_" in candidate[1:]:
+        candidate = candidate.rsplit("_", 1)[0]
     suffix = 2
     while candidate in taken:
         candidate = f"{cleaned[:26]}_{suffix}"
@@ -963,11 +968,14 @@ def _title_pattern(title: str) -> str:
     "Document (1)" is otherwise a pattern that matches "Document 1", and a
     title with an unbalanced bracket in it does not compile at all.
 
-    The space escaping `re.escape` also does is undone. It changes nothing
-    about what the pattern matches and titles are mostly spaces, so leaving it
-    in makes every generated window lookup unreadable for no benefit.
+    The space and hyphen escaping `re.escape` also does is undone. Neither
+    changes what the pattern matches -- a hyphen is only special inside a
+    character class -- and titles are full of both, so leaving them in makes
+    every generated window lookup unreadable for no benefit: an escaped
+    hyphen and escaped spaces read far worse than they need to, for the one
+    bracket that actually had to be escaped.
     """
-    return _literal(re.escape(title).replace("\\ ", " "))
+    return _literal(re.escape(title).replace("\\ ", " ").replace("\\-", "-"))
 
 
 def _hotkey_string(keys: tuple[str, ...]) -> str:

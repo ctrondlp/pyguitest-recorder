@@ -49,15 +49,42 @@ class Settings:
     text_idle: float = 1.5
     pause_threshold: float = 1.0
     record_motion: bool = False
-    stop_key: str = "Pause"
-    """Keysym that ends the recording, so stopping never needs the terminal."""
+    stop_key: str = "Escape"
+    """Key that ends the recording, so stopping never needs the terminal.
 
-    check_key: str = "F9"
-    """Keysym that records a check on whatever the pointer is over.
+    Takes the same `+` chord syntax as `check_key`, so `ctrl+Escape` works
+    if a bare one is wanted by the application. `Pause` was the old default
+    and still suits a keyboard that has one -- with `stop_key_presses = 1`,
+    since nothing else uses it. Many laptops have no Pause key at all, which
+    is why it is no longer the default.
+    """
+
+    stop_key_presses: int = 2
+    """How many times `stop_key` must be pressed in a row to stop.
+
+    Two, because the default is Escape and a single Escape belongs to the
+    application being recorded -- swallowing it would make closing a dialog
+    unrecordable. Presses that do not complete the run are passed through to
+    the recording, so a lone Escape is still captured as one.
+    """
+
+    stop_key_interval: float = 1.0
+    """Seconds within which those presses have to arrive to count as a run."""
+
+    check_key: str = "ctrl+F1"
+    """Key that records a check on whatever the pointer is over.
 
     This is what makes a recording a test rather than a replay: without it a
     generated script asserts nothing and passes as long as it does not raise.
     Empty records no checks and lets the key through to the application.
+
+    Modifiers are written with `+`, as in `ctrl+F9` or `ctrl+shift+c`, and
+    must match exactly -- `ctrl+F9` does not fire on `ctrl+shift+F9`, so the
+    combinations near it stay usable in the application being recorded. A
+    bare `F9` is still accepted and then fires only with no modifier held.
+    The default carries a modifier because plain function keys are commonly
+    taken by the desktop -- F9 is a screenshot key on some laptops -- and F1
+    because a bare F1 is help almost everywhere while `ctrl+F1` rarely is.
     """
 
     sync_inference: bool = True

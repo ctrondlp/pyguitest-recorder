@@ -102,6 +102,17 @@ class NullResolver:
 
 
 @dataclass
+class _Identity:
+    """One live window's identity, held steady while its title moves."""
+
+    app_id: str
+    title: str
+    """The *first* title this window was seen with -- see `_identify`."""
+
+    stable: bool = True
+
+
+@dataclass
 class DesktopResolver:
     """Resolves against the live desktop, through pyguitest and AT-SPI.
 
@@ -115,7 +126,7 @@ class DesktopResolver:
     elements: bool = True
     ignore_pids: set[int] = field(default_factory=set)
 
-    _titles: dict[str, set[str]] = field(default_factory=dict, init=False)
+    _identity: dict[Any, _Identity] = field(default_factory=dict, init=False)
     _resolves_elements: bool = field(default=False, init=False)
     _warned: list[str] = field(default_factory=list, init=False)
     _scaled: bool = field(default=False, init=False)
@@ -173,6 +184,11 @@ class DesktopResolver:
     def warnings(self) -> list[str]:
         """Anything that degraded, for the recording's environment block."""
         return list(self._warned)
+
+    @property
+    def resolves_elements(self) -> bool:
+        """Whether clicks will carry a named element rather than a coordinate."""
+        return self._resolves_elements
 
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the window and element under this point.
@@ -534,25 +550,67 @@ class DesktopResolver:
             return None
 
     def _describe(self, window: Any) -> WindowRef:
-        """Snapshot a pyguitest Window, tracking whether its title is stable.
-
-        A title seen to change while the same app id stays put marks that
-        window unstable, and the generator demotes the title accordingly.
-        Titles drift constantly -- an editor appends its document name, a
-        browser follows the tab -- and matching on one is the single most
-        common reason a generated script stops finding its window.
-        """
-        key = window.app_id or window.title
-        seen = self._titles.setdefault(key, set())
-        if window.title:
-            seen.add(window.title)
+        """Snapshot a pyguitest Window under a *stable* identity."""
+        identity = self._identify(window)
         return WindowRef(
-            title=window.title,
-            app_id=window.app_id,
+            title=identity.title,
+            app_id=identity.app_id,
             pid=window.pid,
             geometry=self._geometry(window),
-            title_stable=len(seen) <= 1,
+            title_stable=identity.stable,
         )
+
+    def _identify(self, window: Any) -> _Identity:
+        """Follow one live window even as its title changes underneath it.
+
+        Keyed on the window itself, which pyguitest hashes and compares by
+        backend handle rather than by title -- exactly because a title can
+        change while the window stays put.
+
+        The title recorded is the **first** one seen, and every later mention
+        of that window reuses it. That is what stops a drifting title from
+        looking like a series of different windows: recording a text editor
+        while typing "Hello" produced four `wait_for_window` calls for one
+        window, three of which match nothing at replay, and since
+        `wait_for_window` answers None rather than raising, the script then
+        failed on `None.pid` several lines further down. Seen in the first
+        recording anyone made of a real application.
+
+        The first title is also the right one to match on, not merely the
+        cheapest: replay follows the same sequence from the same starting
+        state, so the title the window had when the recording first touched
+        it is the title it will have when the script first looks for it.
+        """
+        key = self._identity_key(window)
+        known = self._identity.get(key)
+        if known is None:
+            known = _Identity(app_id=window.app_id or "", title=window.title or "")
+            self._identity[key] = known
+            return known
+        if not known.app_id and window.app_id:
+            known.app_id = window.app_id
+        if window.title and window.title != known.title:
+            known.stable = False
+            self._warn(
+                f"a window's title changed while it was being recorded "
+                f"({known.title!r} became {window.title!r}); the first is what "
+                "the script matches on, and an app id would be steadier"
+            )
+        return known
+
+    def _identity_key(self, window: Any) -> Any:
+        """Something that names this window for as long as the session lasts.
+
+        The window itself where it can be hashed, since that follows the
+        backend handle. A backend whose handle cannot be hashed falls back to
+        the old behaviour of keying on what the window says it is, which
+        cannot survive a drifting title but is no worse than before.
+        """
+        try:
+            hash(window)
+        except TypeError:
+            return f"{window.app_id}\x00{window.title}"
+        return window
 
     def _geometry(self, window: Any) -> tuple[int, int, int, int] | None:
         """Read the window rectangle, where the backend has one."""

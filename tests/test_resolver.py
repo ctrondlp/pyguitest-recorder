@@ -603,3 +603,73 @@ def test_focus_falls_back_to_the_first_window_when_ancestry_says_nothing():
         windows=[FakeWindow(title="Only", pid=77), FakeWindow(title="Other", pid=77)],
     )
     assert made.focused().window.title == "Only"
+
+
+# -- a title that drifts while the recording is being made -------------------
+
+
+class Handled(FakeWindow):
+    """A window whose identity is its handle, as pyguitest's own Window is."""
+
+    def __init__(self, handle, **kwargs):
+        super().__init__(**kwargs)
+        self.handle = handle
+
+    def __eq__(self, other):
+        return isinstance(other, Handled) and self.handle == other.handle
+
+    def __hash__(self):
+        return hash(self.handle)
+
+
+def test_a_drifting_title_stays_one_window():
+    # The bug the first recording of a real application found: a text editor
+    # renamed itself on every keystroke, each title looked like a new window,
+    # and the script waited for four windows that were always one.
+    session = FakeSession(window=Handled(1, title="New Document - Editor"))
+    made = resolver(session)
+    first = made.resolve(1, 2)
+    session.window = Handled(1, title="Hello - Editor")
+    second = made.resolve(1, 2)
+    session.window = Handled(1, title="Hello There - Editor")
+    third = made.resolve(1, 2)
+
+    titles = {t.window.title for t in (first, second, third)}
+    assert titles == {"New Document - Editor"}
+    assert third.window.title_stable is False
+    assert any("title changed while" in w for w in made.warnings)
+
+
+def test_the_first_title_is_the_one_kept():
+    # Replay starts from the same state and follows the same sequence, so the
+    # title the window had when the recording first touched it is the one the
+    # script will find.
+    session = FakeSession(window=Handled(7, title="Untitled"))
+    made = resolver(session)
+    made.resolve(1, 2)
+    session.window = Handled(7, title="Report.odt")
+    assert made.resolve(1, 2).window.title == "Untitled"
+
+
+def test_two_different_windows_keep_their_own_titles():
+    session = FakeSession(window=Handled(1, title="First"))
+    made = resolver(session)
+    assert made.resolve(1, 2).window.title == "First"
+    session.window = Handled(2, title="Second")
+    assert made.resolve(1, 2).window.title == "Second"
+
+
+def test_a_steady_title_is_still_stable():
+    session = FakeSession(window=Handled(1, title="Steady"))
+    made = resolver(session)
+    made.resolve(1, 2)
+    assert made.resolve(3, 4).window.title_stable is True
+
+
+def test_an_app_id_seen_later_is_adopted():
+    # Some backends fill app_id in only once the window is fully mapped.
+    session = FakeSession(window=Handled(1, title="App", app_id=""))
+    made = resolver(session)
+    made.resolve(1, 2)
+    session.window = Handled(1, title="App", app_id="org.example.App")
+    assert made.resolve(1, 2).window.app_id == "org.example.App"

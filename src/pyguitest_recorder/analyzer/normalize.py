@@ -34,7 +34,14 @@ from ..model import (
 )
 from ..windows.resolver import ContextResolver, NullResolver, Observation
 
-__all__ = ["NormalizerOptions", "Normalizer", "MODIFIERS", "check_for"]
+__all__ = [
+    "NormalizerOptions",
+    "Normalizer",
+    "MODIFIERS",
+    "check_for",
+    "chord_matches",
+    "parse_chord",
+]
 
 MODIFIERS = {
     "Control_L": "ctrl",
@@ -54,6 +61,32 @@ MODIFIERS = {
 # Modifiers that change which character a key produces rather than what the
 # keystroke means. Text containing capitals is still text, not a hotkey.
 _TEXT_SAFE = frozenset({"shift", "altgr"})
+
+
+def parse_chord(spec: str) -> tuple[frozenset[str], str]:
+    """Split a key specification like `ctrl+F1` into its modifiers and key.
+
+    The key keeps its case, because X keysym names are case-sensitive and
+    `F1` is not `f1`; the modifiers do not, because `Ctrl` and `ctrl` plainly
+    mean the same thing to anyone writing a configuration file.
+    """
+    parts = [part for part in spec.split("+") if part]
+    if not parts:
+        return (frozenset(), "")
+    return (frozenset(part.lower() for part in parts[:-1]), parts[-1])
+
+
+def chord_matches(spec: str, held: set[str], keysym: str) -> bool:
+    """Whether `keysym`, with exactly `held` down, is the chord `spec` names.
+
+    Exactly, not merely including: `ctrl+F1` must not fire on `ctrl+shift+F1`,
+    so the combinations around a bound key stay usable in the application
+    being recorded. An empty spec matches nothing, which is how a key is
+    turned off.
+    """
+    modifiers, key = parse_chord(spec)
+    return bool(key) and keysym == key and held == modifiers
+
 
 # AT-SPI roles that receive typed text. Used to decide which element a run of
 # typing belongs to.
@@ -98,13 +131,15 @@ class NormalizerOptions:
     sensitive: bool = False
     """Treat all typed text as sensitive, whatever the focused element is."""
 
-    check_key: str = "F9"
-    """Keysym that records a check on whatever the pointer is over.
+    check_key: str = "ctrl+F1"
+    """Key that records a check on whatever the pointer is over.
 
-    Swallowed like the stop key is, so an application that binds this key
-    cannot be recorded pressing it. That is the price of a key that works
-    while another application is full screen, which is the only time one is
-    needed. Empty disables checks entirely and the key records normally.
+    Swallowed like the stop key is, so an application that binds this exact
+    combination cannot be recorded pressing it. That is the price of a key
+    that works while another application is full screen, which is the only
+    time one is needed -- and the reason the default carries a modifier and
+    matches exactly, which keeps the neighbouring combinations usable. Empty
+    disables checks entirely and the key records normally.
     """
 
 
@@ -285,7 +320,7 @@ class Normalizer:
 
     def _on_key_press(self, raw: RawEvent) -> list[Event]:
         """Record a check, accumulate text, or emit a hotkey or a named key."""
-        if self.options.check_key and raw.keysym == self.options.check_key:
+        if chord_matches(self.options.check_key, self._mods, raw.keysym):
             return self._check(raw)
         modifier = MODIFIERS.get(raw.keysym)
         if modifier is not None:

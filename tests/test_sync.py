@@ -324,3 +324,20 @@ def test_a_reactivation_comment_names_the_window_a_reader_would_recognize():
     assert raised
     assert "Recorder Check" in raised[-1].note
     assert "Zenity" not in raised[-1].note
+
+
+def test_the_same_element_is_not_waited_for_twice():
+    # Two pauses in front of one element produced two identical
+    # `wait_for_element` calls, seen in the first recording of a real
+    # application: the window rule marked its window seen, the element rule
+    # never marked its element.
+    events = [
+        click(1.0, element=SAVE),
+        Pause(timestamp=1.1, seconds=1.5),
+        click(3.0, element=OK),
+        Pause(timestamp=3.1, seconds=1.5),
+        click(5.0, element=OK),
+    ]
+    out = infer_synchronization(events)
+    waits = [e for e in out if isinstance(e, WaitForElement)]
+    assert [w.element.name for w in waits] == ["OK"]

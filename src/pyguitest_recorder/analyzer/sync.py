@@ -214,6 +214,12 @@ class _Inferencer:
             and element.addressable
             and (key, element.role, element.name) not in elements
         ):
+            # Marked seen here for the same reason the window rule does it: a
+            # second pause in front of the same element would otherwise wait
+            # for it all over again. Two identical consecutive
+            # `wait_for_element` calls came out of the first recording of a
+            # real application.
+            elements.add((key, element.role, element.name))
             return WaitForElement(
                 timestamp=pause.timestamp,
                 delay=pause.delay,
