@@ -30,6 +30,14 @@ source.
   added to pyguitest after this project first shipped with no way to express
   one, and released in 0.4.0. A double click on a *named* element still emits
   two `Element.click()` calls, since `Element` itself has no `double_click`.
+- `docs/testable-guis.md`, for the application developers on the other end of
+  a recording that came out as coordinates: what to publish so a control can
+  be named, with every claim marked as measured or as taken from toolkit
+  documentation. Its app-id advice now says which value that actually is on
+  X11 — `WM_CLASS` is a pair and tools read the *class* — since "set the app
+  id" is not actionable without that, and its widget-position section carries
+  the three-application GTK 4 measurement rather than the single dialog it
+  started from.
 - **Checks, which are what make a recording a test.** Pressing F9 over
   something records a check on it, and the generated script verifies it: a
   checkbox against its state, a field or a label against what it read, any

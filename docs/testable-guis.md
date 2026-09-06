@@ -24,7 +24,8 @@ it's done.
 | Keep those names **unique within a window** | The test clicks the Remove button you meant, not a different one |
 | Keep names **stable when state changes** | `"Save"` doesn't become `"Save (3 unsaved)"` and break every test |
 | Use the **right widget type** for the job | A button made from a clickable box isn't a button to anyone outside your process |
-| Give the window a **stable app id** | Tests survive a title that changes when the document does |
+| Give the window a **stable app id** (the class half of `WM_CLASS` on X11) | Tests survive a title that changes when the document does |
+| Report **which widget has keyboard focus** | Typed text can be attributed to the field it went into |
 | Report widget positions in **screen coordinates** | "What's under the mouse here?" gets the right answer |
 | Make long operations **visible** — a status message, a disabled button | Tests can wait for your app to be ready instead of sleeping for two seconds |
 
@@ -157,13 +158,37 @@ hunting for a differently-named widget per state does not.
 Window titles drift. GNOME Text Editor renames its window the moment the
 document has content, and a test pinned to the old title matches nothing.
 
-- Set the app id (`WM_CLASS` on X11, the Wayland app id) to your reverse-DNS
-  application id, and don't vary it per document. Tools prefer it over the
-  title when they can.
+- **Set a stable app id** and don't vary it per document. Tools prefer it over
+  the title when they can, precisely because it does not drift. See below for
+  which value that actually is on X11 — it is not obvious.
 - Keep the constant part of the title predictable — "Untitled — MyApp" is
   easier to match than "MyApp — Untitled".
 - **Give dialogs real titles.** An untitled modal can only be found as
   "whatever window just appeared".
+
+### Which value is the app id?
+
+On Wayland it is one string, conventionally your reverse-DNS application id.
+
+On X11 it is `WM_CLASS`, and the catch is that `WM_CLASS` is a **pair** — an
+instance name and a class. **Tools read the class.** That is what sway,
+Hyprland and pyguitest all report as an X11 window's app id, so it is the half
+worth getting right. Check yours with `xprop WM_CLASS`, then click the window:
+
+```
+WM_CLASS(STRING) = "myapp", "MyApp"
+                    ^        ^
+                    instance class — this is the one
+```
+
+The class is conventionally a capitalised program name rather than a
+reverse-DNS id — `"Gedit"`, `"Firefox"` — so don't be surprised when yours
+looks nothing like your Wayland app id. Either is fine; what matters is that
+it is set and identical on every run.
+
+Set neither and the property is simply absent — it is optional in ICCCM — so
+tools report an empty app id and your window can only be found by the title
+you were just told not to rely on.
 
 ## 6. Report positions in screen coordinates
 
@@ -173,14 +198,25 @@ it's worth a direct check.
 When something asks your widget where it is, the answer must be where it
 actually is *on the screen* — not relative to the window, and not `(0, 0)`.
 
-This isn't hypothetical. A GTK 4 dialog on Fedora 45 reported *every* widget at
-`(0, 0, 120, 44)`, so "what is at this point?" returned the same answer for
-every point in the window. Nothing errored. Tools that trusted it clicked
-confidently on entirely the wrong widget.
+This isn't hypothetical, and it is not one application's bug. Measured on
+Fedora 45 across three unrelated GTK 4 applications — gnome-calculator, baobab
+and gnome-text-editor — **every widget reported its correct size at position
+`(0, 0)`**. gnome-calculator's `C`, `↑n` and `7` buttons all claimed
+`(0, 0, 64, 44)`.
 
-Mostly this is your toolkit's job and it just works. Check it directly if you
-maintain custom widgets, and check it **on a second monitor and at a non-100%
-scale factor**, which is where the bugs live.
+The size is right and the position is missing, which has a specific
+consequence: "what is at this point?" cannot distinguish two widgets, so it
+walks back up and answers with the *window*. It did that for 48 of 49 sampled
+points in gnome-calculator, 42 of 49 in baobab, 48 of 49 in gnome-text-editor.
+Nothing errors. A tool that trusts it clicks confidently on the wrong widget;
+a tool that checks, like this one, falls back to raw coordinates and your
+application becomes untestable by name.
+
+Mostly this is your toolkit's job. If you are on GTK 4 it is currently *not*
+doing it, and there is nothing a tool above it can recover — a position that
+was never published cannot be inferred. Check it directly if you maintain
+custom widgets, and check it **on a second monitor and at a non-100% scale
+factor**, which is where the remaining bugs live.
 
 ## 7. Make "busy" and "ready" visible
 
@@ -207,7 +243,15 @@ So make progress observable:
 
 ## 8. Support keyboard focus and actions
 
-- **Report which widget has keyboard focus.** Tab-order tests depend on it.
+- **Report which widget has keyboard focus.** This carries more weight than it
+  looks. Tab-order tests depend on it, and so does knowing which field typed
+  text went into — a recorder cannot tell from the pointer, which the user
+  moves away the moment the field has focus. It is also the *only* thing that
+  still identifies a widget when hit-testing cannot (section 6), because focus
+  involves no geometry: a GTK 4 application whose clicks all degrade to
+  coordinates still gets `gui.text_field("Name").set_text(...)` for its
+  typing, purely because focus is reported correctly. Verified on a bare X
+  server, where Tab walks real widgets and each one reports itself focused.
 - **Expose the actions a widget supports** (click, press, toggle) rather than
   only reacting to raw mouse events. Tests can then invoke the action directly,
   which is faster and doesn't depend on the pointer being anywhere in
@@ -276,7 +320,9 @@ which ones it couldn't name, and why.
 - [ ] Names don't change when state changes
 - [ ] Widget types match behaviour — no buttons made of boxes
 - [ ] Custom widgets publish their contents, not one opaque rectangle
-- [ ] Window app id is stable; dialogs have titles
+- [ ] Window app id is stable — on X11, the *class* half of `WM_CLASS`
+- [ ] Dialogs have real titles
+- [ ] Keyboard focus is reported per widget, not just per window
 - [ ] Positions are correct on a second monitor and at non-100% scaling
 - [ ] Enabled / visible / checked reflect reality
 - [ ] Long operations show something that appears and disappears
@@ -288,11 +334,20 @@ which ones it couldn't name, and why.
 <summary>Where these claims come from</summary>
 
 Measured on live desktops by pyguitest or this recorder: the GTK 4 widget
-position bug (zenity, Fedora 45); `toolkit-accessibility` off by default on KDE
-and the silent empty results that follow (2026-09-01); Chromium and Electron
-absent from the accessibility tree while the system-wide flag is false (GNOME
-Shell 51, 2026-09-05); no per-widget focus reporting on GNOME Shell 50.4
-Wayland across three toolkits; window titles drifting under GNOME Text Editor.
+position bug — first in zenity, then across gnome-calculator, baobab and
+gnome-text-editor with the per-point hit rates quoted above (Fedora 45,
+at-spi2-core 2.61.1, gtk4 4.23.3, 2026-09-06); `toolkit-accessibility` off by
+default on KDE and the silent empty results that follow (2026-09-01); Chromium
+and Electron absent from the accessibility tree while the system-wide flag is
+false (GNOME Shell 51, 2026-09-05); window titles drifting under GNOME Text
+Editor.
+
+Focus reporting has been measured twice, with opposite results, and both are
+true: **no** per-widget focus on GNOME Shell 50.4 Wayland across three toolkits
+(the shell holds it session-wide), and **working** per-widget focus for GTK 4
+on a bare X server with no shell running (2026-09-06). So section 8 is worth
+doing even though a tool cannot always benefit from it — what breaks it is the
+desktop, not your application.
 Details in pyguitest's
 [validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
 
