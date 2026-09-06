@@ -83,14 +83,59 @@ model here is deliberately free of X11 vocabulary so that layer can feed it.
 
 ## Install
 
+**Not on PyPI yet** — nothing has been released. Until it is, use the clone
+below. Once it is:
+
 ```sh
-pip install -e '.[x11,atspi,dev]'
+pip install 'pyguitest-recorder[x11,atspi]'
+
+pyguitest-recorder --doctor      # start here: can this machine record?
 ```
 
-`python-xlib` is required for capture; without it `--doctor` says so. pyguitest
-0.4.0 or newer is required outright: the generator emits `gui.double_click()`
-and resolves elements through `Capability.ELEMENT_GEOMETRY`, neither of which
-exists in 0.3.0.
+`x11` brings `python-xlib`, which capture needs. `atspi` is what lets a click
+be recorded as a name instead of a coordinate — see the caveat below, because
+that one is not pip's to satisfy alone.
+
+### From a clone
+
+```sh
+git clone https://github.com/ctrondlp/pyguitest-recorder
+cd pyguitest-recorder
+pip install -e '.[x11,atspi,dev]'
+
+pyguitest-recorder --doctor
+```
+
+The editable install is what puts the `pyguitest-recorder` command on your
+path. **To run without installing anything** — trying a branch, or keeping
+the command off your path — this package uses a `src/` layout, so the source
+directory has to be on the import path:
+
+```sh
+PYTHONPATH=src python -m pyguitest_recorder --doctor
+```
+
+Every flag below works identically that way. It is not a way to skip the
+dependencies, though: `pyguitest` and `python-xlib` still have to be
+importable. `scripts/live-capture-check.py` needs neither form — it puts
+`src/` on the path itself and runs straight from a checkout.
+
+### The part pip cannot do for you
+
+`dogtail`, which element resolution goes through, **declares no dependencies
+of its own**: PyGObject and pyatspi have to come from your distribution. Miss
+them and nothing errors — `--doctor` reports element resolution off and every
+click in every recording comes out as a coordinate, which looks like the
+recorder being bad at its job rather than a missing package.
+
+On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
+`python3-gi python3-pyatspi gir1.2-atspi-2.0`. pyguitest's
+[install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
+carries the full table, including Arch, openSUSE and FreeBSD.
+
+pyguitest 0.4.0 or newer is required outright: the generator emits
+`gui.double_click()` and resolves elements through
+`Capability.ELEMENT_GEOMETRY`, neither of which exists in 0.3.0.
 
 ## Use
 
@@ -99,6 +144,10 @@ pyguitest-recorder --doctor              # can this machine record? why not?
 pyguitest-recorder -o login_test.py      # record until the Pause key
 pyguitest-recorder --regenerate rec.json -o out.py   # re-render, no recording
 ```
+
+Uninstalled, from a checkout, that first line is
+`PYTHONPATH=src python -m pyguitest_recorder --doctor`, and so on for the
+rest.
 
 Recording stops on the **Pause** key (`--stop-key`), not only Ctrl-C — a
 recorder you can only stop from its own terminal is one you cannot stop while
