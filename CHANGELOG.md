@@ -26,10 +26,12 @@ source.
   composing `x11` (windows, scoped to the recorded display) with `atspi`
   (elements), and the capability doubles as the version check: a pyguitest
   without it degrades the recording to coordinates rather than failing.
-- A double click at a coordinate now emits pyguitest's own `gui.double_click()`,
+- A double click at a coordinate emits pyguitest's own `gui.double_click()`,
   added to pyguitest after this project first shipped with no way to express
-  one, and released in 0.4.0. A double click on a *named* element still emits
-  two `Element.click()` calls, since `Element` itself has no `double_click`.
+  one, and released in 0.4.0. On a *named* element it emits a
+  `double_click_element` helper instead, since `Element` has no
+  `double_click` of its own -- see the fix below for why two `Element.click()`
+  calls are not a substitute.
 - `docs/testable-guis.md`, for the application developers on the other end of
   a recording that came out as coordinates: what to publish so a control can
   be named, with every claim marked as measured or as taken from toolkit
@@ -185,6 +187,19 @@ validator first.
 - `wait_for_idle` emitted a pid read off a variable nothing defined.
 - A window titled `gui` generated `gui = gui.wait_for_window(...)`.
 - Window titles went into `wait_for_window`'s **regex** unescaped.
+- **A drag whose ends were the same point.** Whether a press and release is a
+  drag is decided by where the button went down and came up, not by whether
+  the pointer moved in between. Dragging out and coming back produced
+  `gui.drag((x, y), (x, y))` -- seen in a real recording -- which moves
+  nothing while looking like it does. It records as a click now, noting that
+  the pointer wandered.
+- **Every multimedia key was nameless.** python-xlib loads only the core
+  keysym groups into `XK`, so anything outside them fell through to its hex
+  value and generated `gui.send_keys("^({0x1008ff12})")` -- a name `press_key`
+  cannot resolve, and one `validate()` cannot catch because it is a string
+  argument rather than a method. Found on a laptop whose F-row sends media
+  keys unless Fn is held, where Ctrl+F1 is really Ctrl+XF86AudioMute. The
+  groups are loaded now, so that records as `XF86_AudioMute`.
 - **A combination lost its Shift.** Shift and AltGr are excluded from the
   test for "is this a hotkey at all", because they make text rather than
   commands -- but they were then excluded from the combination itself, so

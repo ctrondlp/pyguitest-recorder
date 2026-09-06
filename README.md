@@ -22,7 +22,7 @@ and how:
 
 | Part | State |
 |------|-------|
-| Canonical event model, JSON round-trip | tested (255 tests), on CI |
+| Canonical event model, JSON round-trip | tested, on CI |
 | Semantic analyzer (clicks, drags, text, hotkeys, pauses) | tested |
 | Synchronization inference | tested |
 | Checks (the check key, and what they generate) | tested; not yet run live |
@@ -31,7 +31,7 @@ and how:
 | CLI (`--doctor`, `--regenerate`) | tested |
 | Window/title-drift resolution | tested; drift fix found by a live recording |
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
-| XRecord capture of a real application | run live against a real X server |
+| XRecord capture of a real application | run live, here and on CI runners |
 | AT-SPI element resolution | run live against a real accessibility bus |
 | Focus-based targeting for typed text | run live; names a GTK4 field |
 | Drag, window switching, save/regenerate | run live |
@@ -59,7 +59,7 @@ cleanly, but neither XTEST nor kernel-level `uinput` can inject into it —
 the compositor owns the pointer — so there is no input to record. It is the
 same wall this recorder describes below, met from the other side.
 
-## Why X11 only
+## Why recording is X11 only
 
 This is a property of the platform, not a missing feature.
 
@@ -80,6 +80,34 @@ The one part that *is* portable is element resolution: AT-SPI answers "what is
 under this point" identically under X11 and Wayland. An AT-SPI event-based
 acquisition layer is the plausible route to a Wayland recorder, and the event
 model here is deliberately free of X11 vocabulary so that layer can feed it.
+
+### Recording and replaying are different questions
+
+**Recording** needs X11 or XWayland, for the reason above. Under a Wayland
+session that means XWayland clients and nothing else, which the recording and
+the generated script's header both say.
+
+**Replaying** is pyguitest's problem, not this tool's, and it goes further —
+pyguitest injects on Wayland through portals, libei and per-compositor IPC.
+But how far a *particular* script gets depends on what is in it, and that is
+decided when it is recorded:
+
+| What the script contains | How it replays on pure Wayland |
+|---|---|
+| `gui.button("Save").click()` and other named elements | The portable case. AT-SPI answers the same under X11 and Wayland |
+| `gui.move_mouse(x, y)` and window-relative coordinates | Needs pointer and window-geometry capabilities the compositor may not grant |
+| `gui.activate_window(...)`, `wait_for_idle(win.pid)` | Compositor-tier: available on some desktops, absent on others |
+
+So a recording that resolved to elements is close to portable, and one that
+came out as coordinates is close to X11-only. That is the same reason element
+resolution is worth the trouble, stated from the replay end — and it is why
+the notes explaining *why* a script came out as coordinates are worth reading
+before assuming it will run somewhere else.
+
+Nothing here fails silently: the generated `gui.require(...)` preamble names
+the capabilities the script actually uses, so replaying it somewhere weaker
+raises a typed exception on the first line rather than clicking into empty
+space halfway through.
 
 ## Install
 
@@ -426,13 +454,17 @@ See [config.example.toml](config.example.toml).
   recording of an editor fail at replay. The routine live check still uses two
   GTK windows on a private server, so this remains the thinnest-covered part
   of the tool.
-- **The CI `live` job has never run on a GitHub runner.** It is written and
-  passes here; the Ubuntu package names and daemon paths are reasoned, not
-  observed.
-- **pyguitest's `Element` has no `double_click`**, only `Session` does. A
-  double click on a named element still emits two `Element.click()` calls;
-  a double click at a coordinate emits the real `gui.double_click()`. A
-  triple click has no primitive on either path and emits three clicks.
+- ~~The CI `live` job has never run on a GitHub runner.~~ **Closed:** it now
+  runs green on `ubuntu-latest` on every push, so the Ubuntu package names and
+  daemon paths are observed rather than reasoned.
+- **pyguitest's `Element` has no `double_click`**, only `Session` does. Worked
+  around rather than lived with: a double click on a named element emits a
+  `double_click_element` helper that looks the element up, reads its rectangle
+  *at replay*, and double-clicks there — so the element stays the locator and
+  the gesture stays one gesture. It needs the element to have a trustworthy
+  rectangle, and falls back to two `Element.click()` calls where it does not,
+  which no toolkit is obliged to read as a double click. A triple click has no
+  primitive on either path and emits three clicks.
 - **Element resolution needs `Capability.ELEMENT_GEOMETRY`**, added upstream
   for this and released in pyguitest 0.4.0. A pyguitest without it declares
   the capability nowhere, so the recorder degrades to coordinates and says so

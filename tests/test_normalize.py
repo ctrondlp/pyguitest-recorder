@@ -590,3 +590,26 @@ def test_shift_alone_is_still_text_not_a_hotkey(key):
         ],
     )
     assert [type(e).__name__ for e in events] == ["TextInput"]
+
+
+def test_a_press_and_release_at_one_point_is_a_click_not_a_drag(press, release):
+    # Where the button went down and came up decides this, not whether the
+    # pointer moved in between. A real recording produced
+    # `gui.drag((x, y), (x, y))`, which moves nothing while looking like it
+    # does -- the user had dragged out and come back.
+    motion = RawEvent(kind="motion", timestamp=1.05, x=400, y=400)
+    events = drain(
+        Normalizer(),
+        [press(1.0, x=100, y=100), motion, release(1.2, x=100, y=100)],
+    )
+    assert [type(e).__name__ for e in events] == ["Click"]
+    assert "left and came back" in events[0].note
+
+
+def test_a_press_and_release_at_different_points_is_still_a_drag(press, release):
+    motion = RawEvent(kind="motion", timestamp=1.05, x=250, y=250)
+    events = drain(
+        Normalizer(),
+        [press(1.0, x=100, y=100), motion, release(1.2, x=400, y=400)],
+    )
+    assert [type(e).__name__ for e in events] == ["Drag"]

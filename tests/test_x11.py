@@ -307,3 +307,24 @@ def test_an_error_on_the_pump_thread_surfaces_as_capture_unavailable():
     made._queue.put(RuntimeError("the X server went away"))
     with pytest.raises(CaptureUnavailable, match="went away"):
         list(made.events())
+
+
+def keysym_names():
+    from Xlib import XK
+
+    return _keysym_names({"XK": XK})
+
+
+def test_ordinary_keysyms_are_named():
+    names = keysym_names()
+    assert names.get(0xFFBE) == "F1"
+    assert names.get(0xFF0D) == "Return"
+
+
+def test_multimedia_keysyms_are_named_too():
+    # python-xlib loads only the core keysym groups into XK by default, so
+    # every media key fell through to its hex value. A laptop whose F-row
+    # sends media keys unless Fn is held recorded Ctrl+F1 as
+    # `send_keys("^({0x1008ff12})")` -- a name press_key cannot resolve, and
+    # one `validate()` cannot catch because it is a string argument.
+    assert keysym_names().get(0x1008FF12) == "XF86_AudioMute"

@@ -251,11 +251,8 @@ class Normalizer:
         if pending is None:
             return []
         held = raw.timestamp - pending.timestamp
-        moved = pending.moved or (
-            _distance((pending.target.x, pending.target.y), (raw.x, raw.y))
-            >= self.options.motion_threshold
-        )
-        if moved:
+        travelled = _distance((pending.target.x, pending.target.y), (raw.x, raw.y))
+        if travelled >= self.options.motion_threshold:
             return [
                 *self._flush_click(),
                 Drag(
@@ -265,10 +262,21 @@ class Normalizer:
                     button=raw.button,
                 ),
             ]
+        # Where the button went down and came up is what decides this, not
+        # whether the pointer moved in between. A press and release at one
+        # point is a click however far the pointer wandered first: a drag
+        # whose ends are the same point cannot be replayed as a drag at all,
+        # and `gui.drag((x, y), (x, y))` -- which a real recording produced --
+        # moves nothing while looking like it does.
+        return self._buffer_click(raw, pending, self._hold_note(held, pending))
+
+    def _hold_note(self, held: float, pending: _Pending) -> str:
+        """What to say about a click that was not a plain press and release."""
+        if pending.moved:
+            return "the pointer left and came back before the button was released"
         # A long hold that never moved is still a click; the hold is kept as
         # a note rather than silently discarded.
-        note = f"held for {held:.1f}s" if held > self.options.click_interval else ""
-        return self._buffer_click(raw, pending, note)
+        return f"held for {held:.1f}s" if held > self.options.click_interval else ""
 
     def _buffer_click(self, raw: RawEvent, pending: _Pending, note: str) -> list[Event]:
         """Buffer a click, merging it into the previous one where that applies.

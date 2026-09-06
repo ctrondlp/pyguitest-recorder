@@ -301,8 +301,20 @@ def _keysym_names(xlib: dict[str, Any]) -> dict[int, str]:
     pyguitest's `press_key` takes X keysym names -- `Return`, `Control_L`,
     `F5` -- so resolving names here means key identity survives the whole
     pipeline without a second translation table.
+
+    The extra keysym groups have to be asked for. python-xlib loads only the
+    core Latin/miscellany sets into `XK` by default, so every multimedia key
+    was nameless and fell through to its hex value: a laptop whose F-row
+    sends media keys unless Fn is held recorded `gui.send_keys("^({0x1008ff12})")`
+    for Ctrl+F1, which is XF86AudioMute and which `press_key` cannot resolve.
+    Loading the groups first makes that `XF86_AudioMute`, which it can.
     """
     XK = xlib["XK"]
+    for group in ("xf86", "xkb", "latin1", "miscellany"):
+        # Absent on an older python-xlib, and a missing group is one keysym
+        # family without names rather than a reason to fail the recording.
+        with contextlib.suppress(Exception):
+            XK.load_keysym_group(group)
     names: dict[int, str] = {}
     for attribute in dir(XK):
         if attribute.startswith("XK_"):
