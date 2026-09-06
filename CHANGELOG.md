@@ -55,6 +55,19 @@ source.
   without binding is reported.
 - `scripts/live-capture-check.py`, which records a real application on a
   private X server and runs the whole pipeline over the result. CI runs it.
+- A button recorded as `"button"` now generates `gui.button("Save")` rather
+  than the longhand `element()` form. at-spi2 renamed `ATSPI_ROLE_PUSH_BUTTON`
+  to `ATSPI_ROLE_BUTTON` without changing its integer, so which spelling a
+  recording carries depends on the at-spi2 it was made against — and 2.61.1
+  emits only the new one, so the sugar had stopped firing on a current
+  desktop. Both names map to the same accessor and the same `Role` constant.
+
+  **This needs the matching pyguitest fix**, which accepts both spellings in
+  its own role lookups and is unreleased as of writing. On a pyguitest that
+  lacks it, `gui.button("Save")` searches `"push button"` and finds nothing on
+  a current desktop, where the longhand `element(role="button", ...)` this
+  replaces did work. Move the dependency floor to whichever release carries
+  it.
 - Lint and type settings matched against pyguitest's, taking the stricter of
   the two throughout: `max-complexity` ratcheted from 15 to 11 (nothing under
   `src/` or `tests/` exceeds 8), mypy's `sqlite_cache = false` carried over so

@@ -78,8 +78,15 @@ what `--regenerate` re-renders against when that API has moved on.
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
 # through the general `element(role=..., name=...)` form.
+#
+# "button" is the same role as "push button": at-spi2 renamed the enum member
+# without changing its integer, so which string a recording carries depends on
+# the version it was made against. at-spi2 2.61.1 emits only "button", so
+# without this entry the sugar never fired on a current desktop and every
+# recorded button came out as the longhand `element()` form.
 _SUGAR = {
     "push button": "button",
+    "button": "button",
     "check box": "checkbox",
     "combo box": "dropdown",
     "menu item": "menu_item",
@@ -91,6 +98,7 @@ _TEXT_ROLES = frozenset({"entry", "text", "password text"})
 # Role value -> the Role enum member name, for readable output.
 _ROLE_CONSTANTS = {
     "push button": "PUSH_BUTTON",
+    "button": "PUSH_BUTTON",
     "toggle button": "TOGGLE_BUTTON",
     "check box": "CHECK_BOX",
     "radio button": "RADIO_BUTTON",

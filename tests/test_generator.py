@@ -593,3 +593,25 @@ def test_a_check_requires_the_capabilities_it_uses():
         GeneratorOptions(include_header=False),
     )
     assert "Capability.ELEMENT_TREE" in source
+
+
+def test_a_button_recorded_under_either_atspi_name_gets_the_sugar(window):
+    # at-spi2 renamed the role without changing its integer, so which string
+    # a recording carries depends on the version it was made against. 2.61.1
+    # emits only "button", and without that spelling every recorded button
+    # came out as the longhand element() form.
+    for role in ("push button", "button"):
+        element = ElementRef(role=role, name="Save")
+        source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+        assert 'gui.button("Save").click()' in source, role
+        assert validate(source) == []
+
+
+def test_a_button_recorded_as_button_still_names_the_role_constant(window):
+    element = ElementRef(role="button", name="Undo")
+    source = render(
+        WaitForElement(element=element),
+        Click(target=Target(x=1, y=2, window=window, element=element)),
+    )
+    assert "Role.PUSH_BUTTON" in source
+    assert validate(source) == []
