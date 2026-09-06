@@ -21,6 +21,7 @@ from ..model import (
     Assertion,
     Click,
     Drag,
+    ElementRef,
     Event,
     HotKey,
     KeyStroke,
@@ -363,16 +364,27 @@ class Normalizer:
     def _text_target(self, raw: RawEvent) -> Target:
         """Decide which element a run of typing belongs to.
 
-        The pointer is the wrong answer: you click a field to focus it and
-        then move the mouse away, so by the time the keys arrive the pointer
-        is somewhere else entirely. The last clicked text field is the right
-        one, and it is also how the user actually focused it.
+        Keyboard focus is the principled answer and is asked first: it is what
+        the toolkit itself believes the keys are going into, so it is right for
+        a field reached by Tab, by an accelerator, or by the application
+        focusing it on its own -- none of which the other rules see at all. It
+        is also the only rule that works on a toolkit whose hit-testing cannot
+        place a widget, which GTK4's cannot.
 
-        Keyboard focus would be the principled source, but AT-SPI does not
-        publish per-widget focus on every desktop -- on GNOME the FOCUSED
-        state is carried by one element system-wide and by no widget in any
-        application -- so it cannot be relied on here.
+        The pointer is the worst answer: you click a field to focus it and then
+        move the mouse away, so by the time the keys arrive the pointer is
+        somewhere else entirely. The last clicked text field is a good one, and
+        it stays as the fallback for every desktop that publishes no per-widget
+        focus -- GNOME Shell holds FOCUSED on its own toplevel for the whole
+        session, so this cannot simply be assumed to work.
+
+        Asked once per run rather than per keystroke: it costs a walk of the
+        accessible tree, and the answer that matters is where the text started
+        going, not where focus drifted to by the last character.
         """
+        focused = self.resolver.focused()
+        if focused is not None and _is_text_field(focused.element):
+            return focused
         clicked = self._clicked
         if (
             clicked is not None
@@ -472,6 +484,16 @@ def check_for(observed: Observation) -> tuple[str, str | bool | None]:
 def _distance(a: tuple[int, int], b: tuple[int, int]) -> float:
     """Straight-line distance between two points."""
     return float(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5)
+
+
+def _is_text_field(element: ElementRef | None) -> bool:
+    """Whether this element is somewhere a run of typing could have gone.
+
+    A name is required as well as a role: an unnamed field cannot be located
+    at replay, so preferring it over the clicked one would trade a locator
+    that works for one that does not.
+    """
+    return element is not None and element.role in _TEXT_ROLES and element.addressable
 
 
 def _is_secret(target: Target) -> bool:

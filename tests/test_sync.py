@@ -306,3 +306,21 @@ def test_a_check_in_a_background_window_does_not_raise_it():
     out = infer_synchronization(events)
     raised = [e for e in out if isinstance(e, WindowActivate)]
     assert [w.window.app_id for w in raised] == []
+
+
+def test_a_reactivation_comment_names_the_window_a_reader_would_recognize():
+    # `_window_key` prefers the app id because it does not drift, which makes
+    # a poor name in prose: "moved back to 'zenity'" for a window every other
+    # line calls "Recorder Check".
+    dialog = WindowRef(title="Recorder Check", app_id="Zenity", pid=11)
+    other = WindowRef(title="Second", app_id="Other", pid=12)
+    events = [
+        click(1.0, window=dialog, element=SAVE),
+        click(2.0, window=other, element=OK),
+        click(3.0, window=dialog, element=SAVE),
+    ]
+    out = infer_synchronization(events)
+    raised = [e for e in out if isinstance(e, WindowActivate)]
+    assert raised
+    assert "Recorder Check" in raised[-1].note
+    assert "Zenity" not in raised[-1].note

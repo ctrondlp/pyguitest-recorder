@@ -182,7 +182,7 @@ class _Inferencer:
                 timestamp=event.timestamp,
                 window=window,
                 origin=Origin.INFERRED,
-                note=f"the recording moved back to {key!r} here",
+                note=f"the recording moved back to {_window_label(window)!r} here",
             )
         ]
 
@@ -257,7 +257,7 @@ class _Inferencer:
 
     def _wait_for_window(self, pause: Pause, window: WindowRef) -> Event:
         """Render rule 1: the pause was a window opening."""
-        name = window.title or window.app_id
+        name = _window_label(window)
         return WaitForWindow(
             timestamp=pause.timestamp,
             delay=pause.delay,
@@ -339,6 +339,19 @@ def _window_key(window: WindowRef | None) -> str:
     if window is None:
         return ""
     return window.app_id or window.title
+
+
+def _window_label(window: WindowRef | None) -> str:
+    """What to call a window in a comment a person will read.
+
+    The title, where there is one. `_window_key` prefers the app id because
+    that is what does not drift, but it makes a poor name in prose: once X11
+    began reporting app ids, "the recording moved back to 'Recorder Check'"
+    became "moved back to 'zenity'", which is true and unhelpful.
+    """
+    if window is None:
+        return ""
+    return window.title or window.app_id
 
 
 def _waited(pause: Pause, what: str) -> str:

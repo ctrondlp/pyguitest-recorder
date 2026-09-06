@@ -74,6 +74,9 @@ class ContextResolver(Protocol):
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Return the target at this point along with what it currently reads."""
 
+    def focused(self) -> Target | None:
+        """Return the element holding keyboard focus, where that is knowable."""
+
     def close(self) -> None:
         """Release anything held open."""
 
@@ -89,6 +92,10 @@ class NullResolver:
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Return the bare point; there is nothing here to read a state off."""
         return Observation(target=self.resolve(x, y, screen))
+
+    def focused(self) -> Target | None:
+        """Nothing here knows what has focus."""
+        return None
 
     def close(self) -> None:
         """Nothing is held open."""
@@ -227,6 +234,114 @@ class DesktopResolver:
             )
         except Exception:  # noqa: BLE001 - an unreadable state is no state
             return Observation(target=target)
+
+    def focused(self) -> Target | None:
+        """The element holding keyboard focus, or None if it cannot be trusted.
+
+        This is the one question that names the widget typing is going *into*,
+        rather than the one the pointer happens to be resting over, and on a
+        toolkit whose hit-testing cannot place a widget it is the only question
+        that works at all. Measured live: GTK4 publishes per-widget focus
+        correctly on a bare X server, while `element_at` there returns the
+        frame for every point.
+
+        Two things are checked before the answer is believed.
+
+        A desktop that does not publish per-widget focus answers with a
+        *toplevel* instead -- GNOME Shell holds FOCUSED for the whole desktop
+        on its own window -- so a window role is treated as "no answer", the
+        same test `focus_tracking_works` makes. It is asked per run rather
+        than once at startup because it is a fact about this moment: nothing
+        has focus yet when a recording begins.
+
+        Then the process. The accessibility bus is scoped to the login session
+        and not to one X display, so `focused()` searches the whole desktop
+        and will cheerfully name a widget in another session's application --
+        and unlike a click, focus carries no coordinate to corroborate it
+        against. The owning window is the only evidence there is, so an
+        element no window on the recorded display accounts for is refused
+        outright rather than guessed at.
+        """
+        if not self._resolves_elements:
+            return None
+        try:
+            element = self.session.focused()
+        except Exception:  # noqa: BLE001 - an unreadable tree is no answer
+            return None
+        if element is None or element.role in WINDOW_ROLES:
+            return None
+        try:
+            ref = self._describe_element(element)
+        except Exception:  # noqa: BLE001
+            return None
+        window = self._window_owning(ref)
+        if window is None:
+            return None
+        # Focus has no coordinates of its own. The window's own origin is used
+        # rather than the pointer's position, so that if anything ever does
+        # read a coordinate off this target it gets one inside the right
+        # window instead of one pointing into a different one.
+        geometry = window.geometry
+        x, y = (geometry[0], geometry[1]) if geometry else (0, 0)
+        return Target(x=x, y=y, window=window, element=ref)
+
+    def _window_owning(self, element: ElementRef) -> WindowRef | None:
+        """The window on the recorded display whose process published `element`."""
+        if element.pid is None:
+            self._warn(
+                "ignored keyboard focus for elements that publish no process "
+                "id; nothing else can tie them to the display being recorded, "
+                "so typed text falls back to the last field that was clicked"
+            )
+            return None
+        try:
+            windows = list(self.session.windows())
+        except Exception:  # noqa: BLE001
+            return None
+        owned = [
+            window
+            for window in windows
+            if window.pid == element.pid and window.pid not in self.ignore_pids
+        ]
+        if owned:
+            return self._describe(self._best_owner(owned, element))
+        self._warn(
+            f"ignored keyboard focus in pid {element.pid}, which owns no window "
+            "on the recorded display; the accessibility bus is not scoped to "
+            "one X display, so it came from another session"
+        )
+        return None
+
+    def _best_owner(self, owned: list[Any], element: ElementRef) -> Any:
+        """Which of one process's windows the focused element actually sits in.
+
+        A process commonly owns more than one, and taking the first is how a
+        recording ends up announcing a window nothing was ever done in: zenity
+        owns both its dialog and a window called "zenity", and the run that
+        found this generated a `wait_for_window("zenity")` for typing that went
+        into the dialog.
+
+        The element's own ancestry settles it -- the accessible tree names the
+        toplevel it descends from, which is exactly the question being asked.
+        Focus falls back to the active window, since whatever holds the
+        keyboard is by definition in front, and to the first match only when
+        neither answers.
+        """
+        toplevel = next(
+            (name for role, name in reversed(element.path) if role in WINDOW_ROLES),
+            "",
+        )
+        if toplevel:
+            match = next((w for w in owned if w.title == toplevel), None)
+            if match is not None:
+                return match
+        active = self._active_window()
+        if active is not None:
+            handle = getattr(active, "handle", None)
+            for window in owned:
+                if handle is not None and getattr(window, "handle", None) == handle:
+                    return window
+        return owned[0]
 
     def _is_widget(self, element: ElementRef) -> bool:
         """Whether the answer is something a script could sensibly click.
@@ -464,16 +579,20 @@ class DesktopResolver:
             element = self.session.element_at(x, y)
             if element is None:
                 return None
-            return ElementRef(
-                role=element.role,
-                name=element.name or "",
-                description=element.description or "",
-                path=_ancestry(element),
-                extents=self._extents(element),
-                pid=element.pid,
-            )
+            return self._describe_element(element)
         except Exception:  # noqa: BLE001 - a stale tree raises freely
             return None
+
+    def _describe_element(self, element: Any) -> ElementRef:
+        """Snapshot a live accessible as the durable reference a recording keeps."""
+        return ElementRef(
+            role=element.role,
+            name=element.name or "",
+            description=element.description or "",
+            path=_ancestry(element),
+            extents=self._extents(element),
+            pid=element.pid,
+        )
 
     def _extents(self, element: Any) -> tuple[int, int, int, int] | None:
         """The element's screen rectangle, where the session serves one."""

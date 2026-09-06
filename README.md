@@ -22,7 +22,7 @@ and how:
 
 | Part | State |
 |------|-------|
-| Canonical event model, JSON round-trip | tested (217 tests), on CI |
+| Canonical event model, JSON round-trip | tested (234 tests), on CI |
 | Semantic analyzer (clicks, drags, text, hotkeys, pauses) | tested |
 | Synchronization inference | tested |
 | Checks (the F9 key, and what they generate) | tested; not yet run live |
@@ -33,6 +33,7 @@ and how:
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
 | XRecord capture of a real application | run live against a real X server |
 | AT-SPI element resolution | run live against a real accessibility bus |
+| Focus-based targeting for typed text | run live; names a GTK4 field |
 | Drag, window switching, save/regenerate | run live |
 
 `scripts/live-capture-check.py` is what closed the last two rows. It starts a
@@ -188,6 +189,41 @@ application, [docs/testable-guis.md](docs/testable-guis.md) is the document to
 hand its developers: what to publish so a click can be recorded by name, and
 how to assert it in their own suite.
 
+### Typing goes where focus is, not where the pointer is
+
+Hit-testing is not the only question worth asking, and on GTK4 it is not a
+question that can be answered at all — every widget there reports its size at
+the origin with no position, so `element_at` returns the frame for essentially
+every point (measured across gnome-calculator, baobab and gnome-text-editor).
+
+Keyboard focus is unaffected by that, because it involves no geometry, and it
+is measurably reliable on a bare X server: `focus_tracking_works()` is true
+and Tab walks real widgets. So a run of typed text asks the toolkit what has
+focus, and a recording gets `gui.text_field("Name").set_text("Ada")` where it
+would otherwise have got `gui.type_text("Ada")` — including for a field
+reached by Tab, by an accelerator, or focused by the application itself, none
+of which the pointer sees.
+
+It is asked once per run rather than per keystroke (it costs a walk of the
+accessible tree), and only believed when it survives the same scrutiny
+everything else here gets:
+
+- a *toplevel* holding focus means the desktop does not publish per-widget
+  focus at all — GNOME Shell carries it on its own window for the whole
+  session — so that reads as "no answer" rather than as the frame;
+- the focused element's process must own a window on the recorded display.
+  Focus carries no coordinate to corroborate it against, so unlike a click
+  there is no second opinion available, and an element from another session
+  is refused rather than guessed at;
+- among that process's windows, the one the element's own accessible ancestry
+  names. Taking the first is how a recording announces a window nothing was
+  done in: zenity owns both its dialog and a window called "zenity", and the
+  live run that found this generated a stray `wait_for_window("zenity")` for
+  typing that went into the dialog.
+
+The last clicked text field remains the fallback wherever focus cannot be
+had, which is every desktop running a shell that holds FOCUSED itself.
+
 **Generated code is checked before it is offered.** `validate()` compiles the
 file, confirms every `gui.<method>` call exists on the installed
 `pyguitest.Session`, checks each `Capability` and `Role` constant against the
@@ -319,9 +355,14 @@ See [config.example.toml](config.example.toml).
 - **pyguitest's X11 backend could not be pointed at a display by argument.**
   Fixed upstream; the recorder still sets `DISPLAY` around the call, which
   works on any version.
-- **GTK4 applications cannot be located by AT-SPI hit-testing** on the
-  versions tested here, so their clicks come out as coordinates. See above;
-  the recorder detects it rather than guessing.
+- **GTK4 applications cannot be located by AT-SPI hit-testing.** Their
+  widgets report a size at the origin and no position, so `element_at`
+  returns the frame for essentially every point — measured across
+  gnome-calculator (48 of 49 sampled points), baobab (42/49) and
+  gnome-text-editor (48/49). Nothing above AT-SPI can recover a position
+  that was never published, so **clicks** there come out as coordinates.
+  Typed text is the exception and does get named, through focus rather than
+  geometry — see above.
 
 ## License
 

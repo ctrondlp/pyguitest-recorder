@@ -506,3 +506,100 @@ def test_a_state_read_that_raises_leaves_the_check_at_showing():
     made.session.fail.add("element_at")
     observed = made.inspect(130, 130)
     assert observed.text is None and observed.checked is None
+
+
+# -- keyboard focus ----------------------------------------------------------
+
+
+def focus_resolver(focused, windows=None, **kwargs):
+    """A resolver whose session reports `focused` and lists `windows`."""
+    made = element_resolver(**kwargs)
+    made.session.focused = lambda: focused
+    made.session.windows = lambda: (
+        windows if windows is not None else [made.session.window]
+    )
+    return made
+
+
+def test_null_resolver_knows_nothing_about_focus():
+    assert NullResolver().focused() is None
+
+
+def test_focus_names_the_focused_field():
+    element = FakeElement("entry", "Search", pid=77)
+    target = focus_resolver(element).focused()
+    assert target is not None
+    assert target.element.name == "Search"
+    assert target.window.title == "Target"
+
+
+def test_a_toplevel_holding_focus_is_read_as_no_answer():
+    # GNOME Shell carries FOCUSED on its own window for the whole desktop, so
+    # a window role means "this desktop does not publish per-widget focus"
+    # rather than "the frame is what you are typing into".
+    for role in ("frame", "window", "dialog"):
+        assert focus_resolver(FakeElement(role, "Shell", pid=77)).focused() is None
+
+
+def test_focus_in_a_process_owning_no_window_here_is_refused():
+    # The leak that matters most: the accessibility bus is scoped to the login
+    # session, `focused()` searches the whole desktop, and unlike a click
+    # there is no coordinate to corroborate the answer against. Typing would
+    # otherwise be attributed to a widget in the developer's own editor.
+    made = focus_resolver(FakeElement("entry", "Elsewhere", pid=4242))
+    assert made.focused() is None
+    assert any("another session" in warning for warning in made.warnings)
+
+
+def test_focus_on_an_element_with_no_pid_is_refused():
+    # Nothing else can tie it to the recorded display.
+    made = focus_resolver(FakeElement("entry", "Search", pid=None))
+    assert made.focused() is None
+    assert any("no process id" in warning for warning in made.warnings)
+
+
+def test_no_focus_at_all_is_not_a_failure():
+    assert focus_resolver(None).focused() is None
+
+
+def test_a_session_that_raises_on_focus_degrades_quietly():
+    made = element_resolver()
+
+    def boom():
+        raise RuntimeError("the tree went stale")
+
+    made.session.focused = boom
+    assert made.focused() is None
+
+
+def test_focus_is_not_asked_when_element_resolution_is_off():
+    made = element_resolver(capabilities=("WINDOW_LIST",))
+    made.session.focused = lambda: FakeElement("entry", "Search", pid=77)
+    assert made.focused() is None
+
+
+def test_focus_picks_the_window_the_element_actually_descends_from():
+    # A process commonly owns more than one window, and taking the first is
+    # how a recording announces a window nothing was ever done in. Seen live:
+    # zenity owns both its dialog and a window called "zenity", and typing
+    # into the dialog generated wait_for_window("zenity").
+    entry = FakeElement("entry", "Name", pid=77)
+    entry.parent = FakeElement("dialog", "Recorder Check", pid=77)
+    made = focus_resolver(
+        entry,
+        windows=[
+            FakeWindow(title="zenity", pid=77),
+            FakeWindow(title="Recorder Check", pid=77),
+        ],
+    )
+    target = made.focused()
+    assert target.window.title == "Recorder Check"
+
+
+def test_focus_falls_back_to_the_first_window_when_ancestry_says_nothing():
+    entry = FakeElement("entry", "Name", pid=77)
+    made = focus_resolver(
+        entry,
+        windows=[FakeWindow(title="Only", pid=77), FakeWindow(title="Other", pid=77)],
+    )
+    assert made.focused().window.title == "Only"

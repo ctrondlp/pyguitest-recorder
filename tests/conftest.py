@@ -8,11 +8,12 @@ from pyguitest_recorder.windows import Observation
 class FakeResolver:
     """Resolves every point to a fixed window, and elements by rectangle."""
 
-    def __init__(self, window=None, elements=(), text=None, checked=None):
+    def __init__(self, window=None, elements=(), text=None, checked=None, focus=None):
         self.window = window
         self.elements = list(elements)
         self.text = text
         self.checked = checked
+        self.focus = focus
 
     def resolve(self, x, y, screen=0):
         element = None
@@ -30,6 +31,10 @@ class FakeResolver:
             checked=self.checked,
             checkable=self.checked is not None,
         )
+
+    def focused(self):
+        """What has keyboard focus, which most desktops cannot say."""
+        return self.focus
 
     def close(self):
         pass

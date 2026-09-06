@@ -12,6 +12,7 @@ from pyguitest_recorder.model import (
     Origin,
     Pause,
     Scroll,
+    Target,
     TextInput,
 )
 
@@ -329,3 +330,108 @@ def test_a_check_on_nothing_is_recorded_rather_than_dropped(key):
     # something; the generator turns this into a warning in the header.
     events = drain(Normalizer(resolver=FakeResolver()), [key(1.0, "F9")])
     assert events[0].check == "nothing"
+
+
+# -- typed text goes where focus is ------------------------------------------
+
+
+def test_typing_follows_keyboard_focus_when_the_desktop_publishes_it(key, window):
+    # The case no other rule sees: the field was reached by Tab, so nothing
+    # was ever clicked and the pointer is wherever it was left.
+    focus = Target(
+        x=0,
+        y=0,
+        window=window,
+        element=ElementRef(role="entry", name="Search"),
+    )
+    resolver = FakeResolver(window=window, focus=focus)
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "h", "h")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.element.name == "Search"
+
+
+def test_focus_beats_the_last_clicked_field(key, window):
+    # Clicking one field and then tabbing to the next is ordinary, and the
+    # clicked one is then the wrong answer.
+    clicked = ElementRef(role="entry", name="First")
+    focus = Target(
+        x=0, y=0, window=window, element=ElementRef(role="entry", name="Second")
+    )
+    resolver = FakeResolver(
+        window=window, elements=[((0, 0, 500, 500), clicked)], focus=focus
+    )
+    normalizer = Normalizer(resolver=resolver)
+    events = drain(
+        normalizer,
+        [
+            RawEvent(kind="button_press", timestamp=1.0, x=10, y=10, button=1),
+            RawEvent(kind="button_release", timestamp=1.02, x=10, y=10, button=1),
+            key(2.0, "h", "h"),
+        ],
+    )
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.element.name == "Second"
+
+
+def test_focus_on_something_that_does_not_take_text_is_ignored(key, window):
+    # A button can hold focus while typing goes to the field behind it; only
+    # a text role is evidence about where the characters went.
+    clicked = ElementRef(role="entry", name="Name")
+    focus = Target(
+        x=0, y=0, window=window, element=ElementRef(role="push button", name="Save")
+    )
+    resolver = FakeResolver(
+        window=window, elements=[((0, 0, 500, 500), clicked)], focus=focus
+    )
+    events = drain(
+        Normalizer(resolver=resolver),
+        [
+            RawEvent(kind="button_press", timestamp=1.0, x=10, y=10, button=1),
+            RawEvent(kind="button_release", timestamp=1.02, x=10, y=10, button=1),
+            key(2.0, "h", "h"),
+        ],
+    )
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.element.name == "Name"
+
+
+def test_an_unnamed_focused_field_does_not_displace_a_named_clicked_one(key, window):
+    # An unnamed element cannot be located at replay, so preferring it would
+    # trade a locator that works for one that does not.
+    clicked = ElementRef(role="entry", name="Name")
+    focus = Target(x=0, y=0, window=window, element=ElementRef(role="entry", name=""))
+    resolver = FakeResolver(
+        window=window, elements=[((0, 0, 500, 500), clicked)], focus=focus
+    )
+    events = drain(
+        Normalizer(resolver=resolver),
+        [
+            RawEvent(kind="button_press", timestamp=1.0, x=10, y=10, button=1),
+            RawEvent(kind="button_release", timestamp=1.02, x=10, y=10, button=1),
+            key(2.0, "h", "h"),
+        ],
+    )
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.element.name == "Name"
+
+
+def test_focus_is_asked_once_per_run_not_once_per_character(key, window):
+    # It costs a walk of the accessible tree, and the answer that matters is
+    # where the text started going.
+    focus = Target(
+        x=0, y=0, window=window, element=ElementRef(role="entry", name="Search")
+    )
+
+    class Counting(FakeResolver):
+        calls = 0
+
+        def focused(self):
+            Counting.calls += 1
+            return self.focus
+
+    resolver = Counting(window=window, focus=focus)
+    drain(
+        Normalizer(resolver=resolver),
+        [key(1.0, "h", "h"), key(1.1, "i", "i"), key(1.2, "!", "!")],
+    )
+    assert Counting.calls == 1

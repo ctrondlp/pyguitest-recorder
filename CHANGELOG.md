@@ -43,6 +43,35 @@ source.
   the instant an action returns races an application that has not redrawn.
   Password fields are redacted as typed input is, and a check that resolved to
   nothing is reported in the script's header rather than dropped.
+- Window variables and comments are named from the **title**, while window
+  *identity* still keys on the app id. The two want different fields: the app
+  id is what does not drift, and the title is what a reader recognizes. This
+  had no visible effect while X11 reported no app id at all; the moment
+  pyguitest started populating it from `WM_CLASS`, a window called "Recorder
+  Check" began binding to `zenity` and its comment read "the recording moved
+  back to 'zenity'". Also stopped reading a one-dot app id as reverse-DNS,
+  which bound `check_app.py` to `py`; two dots are required now, so
+  `org.gnome.TextEditor` still shortens and a program name does not.
+- **Typed text is attributed by keyboard focus**, not by where the pointer
+  happened to be resting. A run of typing asks the toolkit what has focus, so
+  a field reached by Tab, by an accelerator, or focused by the application
+  itself is named — none of which the pointer sees. It also works where
+  hit-testing cannot: GTK4 publishes a size at the origin and no position for
+  every widget, so `element_at` returns the frame for essentially every point,
+  while focus involves no geometry and is measurably reliable. The live check
+  now generates `gui.text_field("Name").set_text("Ada")` where it produced
+  `gui.type_text("Ada")` before — the first element this harness has ever
+  named on that stack.
+
+  Believed only when corroborated, since focus carries no coordinate to check
+  against: a *toplevel* holding focus means the desktop publishes no
+  per-widget focus (GNOME Shell holds it session-wide) and reads as no answer;
+  the process must own a window on the recorded display, or the answer came
+  from another session over the login-scoped accessibility bus; and the window
+  is the one the element's accessible ancestry names, not the first the
+  process owns — zenity owns both its dialog and a window called "zenity", and
+  taking the first generated a stray `wait_for_window("zenity")` for typing
+  that went into the dialog. The last clicked text field remains the fallback.
 - **Synchronization inference.** Each recorded pause is asked what it was
   waiting for and answered from what the events themselves saw: a window that
   had never been seen becomes `wait_for_window`, a new element in an open

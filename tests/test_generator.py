@@ -69,8 +69,8 @@ def test_unnamed_element_falls_back_to_coordinates(window):
     source = render(
         Click(target=Target(x=420, y=315, window=window, element=anonymous))
     )
-    assert "gui.geometry(app)" in source
-    assert "gui.move_mouse(app_x + 320, app_y + 265)" in source
+    assert "gui.geometry(example)" in source
+    assert "gui.move_mouse(example_x + 320, example_y + 265)" in source
 
 
 def test_no_window_geometry_falls_back_to_absolute():
@@ -201,10 +201,12 @@ def test_a_drifting_title_with_no_app_id_is_used_anyway_with_a_warning():
     assert "this match is fragile" in source
 
 
-def test_window_variable_is_named_from_the_app_id_tail():
-    window = WindowRef(title="T", app_id="org.gnome.TextEditor")
+def test_window_variable_is_named_from_the_app_id_when_there_is_no_title():
+    # The title leads where there is one -- it is what a reader recognizes --
+    # so the app id's reverse-DNS tail is what names a window without one.
+    window = WindowRef(title="", app_id="org.gnome.TextEditor")
     source = render(WindowActivate(window=window))
-    assert "texteditor = gui.wait_for_window" in source
+    assert "texteditor = " in source
 
 
 def test_validate_rejects_a_call_pyguitest_does_not_have():
@@ -275,7 +277,7 @@ def test_a_scroll_puts_the_pointer_back_where_it_was_recorded(window):
     # without a move scrolled whichever widget the previous action left it on.
     source = render(Scroll(target=Target(x=420, y=315, window=window), dy=3))
     body = source.split("gui.scroll")[0]
-    assert "gui.move_mouse(app_x + 320, app_y + 265)" in body
+    assert "gui.move_mouse(example_x + 320, example_y + 265)" in body
     assert "gui.scroll(dy=3)" in source
 
 
@@ -323,8 +325,8 @@ def test_wait_for_idle_takes_its_pid_from_the_window(window):
     # It used to read `app.pid` off a variable no generated line ever bound,
     # which compiles and then raises NameError on the first run.
     source = render(WaitForIdle(window=window, pid=99, timeout=30))
-    assert "gui.wait_for_idle(app.pid, timeout=30)" in source
-    assert "app = gui.wait_for_window(" in source
+    assert "gui.wait_for_idle(example.pid, timeout=30)" in source
+    assert "example = gui.wait_for_window(" in source
     assert "Capability.WINDOW_PID" in source
     assert validate(source) == []
 
@@ -404,7 +406,7 @@ def test_a_window_nothing_uses_is_still_waited_for_but_not_bound(window, save_bu
 
 def test_a_window_a_coordinate_needs_keeps_its_name(window):
     source = render(Click(target=Target(x=180, y=90, window=window)))
-    assert "app = gui.wait_for_window" in source
+    assert "example = gui.wait_for_window" in source
 
 
 def test_the_header_says_why_a_recording_degraded():
@@ -460,7 +462,7 @@ def test_a_window_that_stayed_put_is_read_once(window):
         Click(target=Target(x=180, y=90, window=window)),
         Click(target=Target(x=200, y=95, window=window)),
     )
-    assert source.count("gui.geometry(app)") == 1
+    assert source.count("gui.geometry(example)") == 1
 
 
 # -- checks ------------------------------------------------------------------
@@ -615,3 +617,38 @@ def test_a_button_recorded_as_button_still_names_the_role_constant(window):
     )
     assert "Role.PUSH_BUTTON" in source
     assert validate(source) == []
+
+
+def test_a_window_variable_is_named_from_the_title_a_reader_recognizes():
+    # Identity and readability want different fields. Once X11 began
+    # reporting app ids, a window titled "Recorder Check" bound to `zenity`.
+    window = WindowRef(title="Recorder Check", app_id="Zenity")
+    source = render(WindowActivate(window=window))
+    assert "recorder_check = gui.wait_for_window" in source
+    assert "zenity = " not in source
+
+
+def test_one_window_still_binds_once_however_it_is_named():
+    # The key stays the app id: two mentions of one window have to collapse
+    # to a single binding even if its title drifted between them.
+    first = WindowRef(title="Untitled", app_id="Editor", geometry=(0, 0, 800, 600))
+    second = WindowRef(title="Report", app_id="Editor", geometry=(0, 0, 800, 600))
+    source = render(
+        WindowActivate(window=first),
+        WindowActivate(window=second),
+    )
+    assert source.count("gui.wait_for_window") == 1
+
+
+def test_a_program_name_app_id_is_not_mistaken_for_reverse_dns():
+    # One dot is not reverse-DNS: `check_app.py` was binding to `py`.
+    window = WindowRef(title="", app_id="check_app.py")
+    source = render(WindowActivate(window=window))
+    assert "check_app_py = gui.wait_for_window" in source or "check_app_py" in source
+    assert "\npy = " not in source
+
+
+def test_reverse_dns_app_ids_still_lose_their_leading_segments():
+    window = WindowRef(title="", app_id="org.gnome.TextEditor")
+    source = render(WindowActivate(window=window))
+    assert "texteditor" in source

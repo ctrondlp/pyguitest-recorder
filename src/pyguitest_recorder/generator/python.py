@@ -212,12 +212,16 @@ def _literal(value: str | int | float | bool | None) -> str:
 def _identifier(base: str, taken: set[str]) -> str:
     """Make a readable, unique Python identifier from a window's identity.
 
-    Reverse-DNS app ids are the common case and their leading segments carry
-    no information, so `org.gnome.TextEditor` binds to `texteditor` rather
-    than `org_gnome_texteditor`, which would dominate every line it appears
-    in.
+    Reverse-DNS app ids are common and their leading segments carry no
+    information, so `org.gnome.TextEditor` binds to `texteditor` rather than
+    `org_gnome_texteditor`, which would dominate every line it appears in.
+
+    Two dots are required before that applies, not one. WM_CLASS is often just
+    a program name, and a one-dot rule read `check_app.py` as reverse-DNS and
+    bound the window to `py` -- seen in a live run the moment X11 started
+    reporting an app id at all.
     """
-    if "." in base and " " not in base:
+    if base.count(".") >= 2 and " " not in base:
         base = base.rsplit(".", 1)[-1]
     cleaned = "".join(c if c.isalnum() else "_" for c in base.lower()).strip("_")
     while "__" in cleaned:
@@ -672,12 +676,23 @@ class PythonGenerator:
     def _window_var(
         self, window: WindowRef, state: _State, timeout: float | None = None
     ) -> str:
-        """Bind a window to a variable, waiting for it the first time it is used."""
+        """Bind a window to a variable, waiting for it the first time it is used.
+
+        Identity and readability want different fields, so they get different
+        ones. The *key* prefers the app id, because that is what does not
+        drift and two mentions of one window have to collapse to one binding.
+        The *name* prefers the title, because it is what a reader recognizes:
+        once X11 began reporting app ids, a window called "Recorder Check" was
+        binding to `zenity`, which is true and unhelpful.
+        """
         key = window.app_id or window.title
         if key in state.windows:
             return state.windows[key]
         state.capabilities.add("WINDOW_LIST")
-        name = _identifier(key or "window", set(state.windows.values()) | _RESERVED)
+        readable = window.title or window.app_id
+        name = _identifier(
+            readable or "window", set(state.windows.values()) | _RESERVED
+        )
         state.windows[key] = name
         wait = timeout if timeout is not None else self.options.default_timeout
         state.lines.append(f"{name} = {self._window_lookup(window, wait, state)}")
