@@ -166,6 +166,24 @@ source.
 
 ### Fixed
 
+- **Two windows of one application could silently collapse into one
+  generated binding.** `_window_var` keyed a window's variable on `app_id`
+  alone, but `app_id` names the *application*, not the window -- two
+  terminal windows of one app share an app_id, so clicking in the second
+  one generated a click against the first one's `wait_for_window` binding
+  instead, with no error anywhere in the pipeline. The key is now
+  `(app_id, title)` together. Safe to add title back into the key, unlike
+  before app_id existed: the resolver already pins a window's title to what
+  it was first seen as and reuses that pinned value for every later
+  mention, so two mentions of the *same* window always carry the same
+  title here, however many times the real window renamed itself on screen
+  -- only two genuinely different windows see different titles. The
+  identical `app_id`-alone comparison in `_dragged_its_own_window` (deciding
+  whether a drag moved its own window) got the same fix, for a drag that
+  starts in one window of an app and ends in a different window of it.
+  Found reviewing an external audit's claim that this reproduces; it does,
+  and matters more now that X11 and GNOME Shell both fill `app_id`.
+
 - **A recorded AltGr keystroke generated a script that failed at replay,
   not just at recording time.** The normalizer already mapped
   `ISO_Level3_Shift` to an "altgr" modifier and the generator already

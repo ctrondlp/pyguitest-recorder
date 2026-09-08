@@ -194,7 +194,7 @@ class _State:
     lines: list[str] = field(default_factory=list)
     capabilities: set[str] = field(default_factory=set)
     roles: set[str] = field(default_factory=set)
-    windows: dict[str, str] = field(default_factory=dict)
+    windows: dict[tuple[str, str], str] = field(default_factory=dict)
     geometry_for: str | None = None
     geometry_origin: tuple[int, int] | None = None
     pointer: str | None = None
@@ -808,13 +808,20 @@ class PythonGenerator:
         """Bind a window to a variable, waiting for it the first time it is used.
 
         Identity and readability want different fields, so they get different
-        ones. The *key* prefers the app id, because that is what does not
-        drift and two mentions of one window have to collapse to one binding.
-        The *name* prefers the title, because it is what a reader recognizes:
+        ones. The *key* is `(app_id, title)` together, not app_id alone: two
+        terminal windows of one app share an app_id but are different
+        windows, and app_id alone collapsed the second one's clicks onto the
+        first one's binding. Title is safe to add to the key precisely
+        because the resolver already pins it to what the window was first
+        seen as and reuses that for every later mention (see WindowRef's
+        docstring) -- so two WindowRefs sharing both fields really are two
+        mentions of the one window, the case that still has to collapse to a
+        single binding, and two sharing only app_id are not. The *name*
+        prefers the title on its own, because it is what a reader recognizes:
         once X11 began reporting app ids, a window called "Recorder Check" was
         binding to `zenity`, which is true and unhelpful.
         """
-        key = window.app_id or window.title
+        key = (window.app_id, window.title)
         if key in state.windows:
             return state.windows[key]
         state.capabilities.add("WINDOW_LIST")
@@ -948,7 +955,10 @@ def _dragged_its_own_window(event: Drag) -> bool:
         return False
     if start.geometry is None or end.geometry is None:
         return False
-    if (start.app_id or start.title) != (end.app_id or end.title):
+    # Both fields together, as in _window_var: app_id alone is shared by
+    # every window of one app, so it cannot rule out a drag that starts in
+    # one window of an app and ends in a different window of that same app.
+    if (start.app_id, start.title) != (end.app_id, end.title):
         return False
     return start.geometry[:2] != end.geometry[:2]
 
