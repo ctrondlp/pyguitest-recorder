@@ -4,11 +4,18 @@
 by whoever has to automate your UI, and it asks for about a day of work spread
 across a codebase.
 
-**The short version:** automated GUI tests find your widgets the same way a
-screen reader does — through the accessibility tree. If a button has a name
-there, a test can click it by name and the test survives redesigns. If it
-doesn't, the test has to click pixel coordinates, and it breaks the next time
-anything moves.
+**The short version:** accessibility is the *foundation* of robust GUI
+automation. A test can find your widgets the same way a screen reader does —
+through the accessibility tree — and when it can, it clicks a button by name
+and survives redesigns. When it can't, it falls back to pixel coordinates,
+and those break the next time anything moves.
+
+Two qualifications, so the rest of this document is read accurately.
+Accessibility and automation are not the same thing: a test can also match a
+window title, compare an image, or click a coordinate, so a badly-labelled
+application is harder to test rather than impossible. And not everything the
+accessibility tree exposes is worth automating against — a name that changes
+with state is published, visible, and still useless to a test.
 
 None of this is test-only scaffolding. Every item below is the accessibility
 work the application already owed. Testability is what you get for free once
@@ -33,6 +40,24 @@ If you only do the first row, you have already fixed most of it.
 
 ---
 
+## The mental model: five things every widget publishes
+
+Everything below is one of these five. Knowing which one a problem belongs to
+is most of knowing how to fix it.
+
+| | What it is | A test uses it to | Gets it wrong when |
+|---|---|---|---|
+| **Role** | What kind of control this is — button, check box, text field, list item | Narrow a search: "the *button* named Save", not any node reading "Save" | You build a button out of a clickable box, so its role is "container" |
+| **Name** | The short label identifying it — usually the visible text | Find it at all | An icon-only button has no name, or a name is duplicated within the window |
+| **State** | Checked, selected, enabled, visible, focused | Assert on the outcome of an action, and wait for readiness | Enabled stays true while the action is unavailable |
+| **Value** | The number behind a slider, spinner or progress bar | Assert on a quantity without parsing a label | Progress lives only in the name, as `"Connecting… 40%"` |
+| **Relationships** | How widgets connect — which label names which field, what contains what | Disambiguate two identically-named controls, and attribute a label to a field | A field is left with no `labelled-by`, so its visible label is not its name |
+
+Roles and names are what a test searches on. States and values are what it
+asserts on. Relationships are what save it when a name alone is ambiguous.
+
+---
+
 ## Why it matters: the failure is silent
 
 The frustrating part of accessibility metadata is that nothing complains when
@@ -51,6 +76,44 @@ test suite just quietly gets worse:
 The second-to-last row is the dangerous one. A coordinate click that fails
 becomes a bug report. A named click on the wrong widget becomes a green test
 that isn't testing anything.
+
+### The same recording, before and after
+
+This is what the difference looks like in a generated test. Both files came
+from doing the identical thing — click the toolbar's save button, type a
+filename, confirm — against two versions of the same application.
+
+**Before**, with an unnamed icon-only toolbar button and an entry whose label
+is not associated with it:
+
+```python
+# note: no accessible element at (412, 88); recorded as a coordinate
+gui.move_mouse(412, 88)
+gui.click()
+gui.wait(1.5)
+gui.type_text("report.txt")
+gui.move_mouse(690, 512)
+gui.click()
+```
+
+Nothing in that file says what it does. It breaks when the window moves, when
+a toolbar item is added, and when the dialog opens a little slower than it did
+on the day it was recorded.
+
+**After**, with `Save` labelled, the filename entry `labelled-by` its label,
+and a status message that appears while writing:
+
+```python
+gui.button("Save").click()
+saveas = gui.wait_for_window("Save As", timeout=10)
+gui.text_field("Name").set_text("report.txt")
+gui.button("Save").click()
+gui.wait_until_gone(name="Saving…", timeout=10)
+```
+
+Same interaction, same recorder. The second one reads like a test someone
+wrote on purpose, and it survives everything the first one does not — and the
+only thing that changed was the metadata the application publishes.
 
 ---
 
@@ -99,7 +162,46 @@ button.setAccessibleDescription("Write the document to disk")
 </object>
 ```
 
-Three things that trip people up:
+### Form fields: connect the label to the field
+
+A text field almost never carries its own name. The name is sitting next to
+it, in a separate label widget, and unless you say the two are related the
+field is published as an unnamed entry — so `gui.text_field("Email")` finds
+nothing even though the word "Email" is plainly on screen.
+
+The relationship is what carries it:
+
+```python
+# GTK 4 (PyGObject) -- the label names the entry
+entry.update_relation([Gtk.AccessibleRelation.LABELLED_BY], [label])
+
+# GTK 3 (PyGObject) -- a mnemonic label does this for you
+label.set_mnemonic_widget(entry)
+
+# Qt (PyQt / PySide)
+label.setBuddy(line_edit)
+```
+
+```xml
+<!-- GTK 4 .ui file -->
+<object class="GtkEntry" id="email_entry">
+  <accessibility>
+    <relation name="labelled-by">email_label</relation>
+  </accessibility>
+</object>
+```
+
+Setting an explicit accessible name on the field works too, and is the right
+answer where there is no visible label at all — a search box whose only cue is
+a magnifying-glass icon, say. Prefer the relation when a visible label exists:
+one source of truth, and it stays correct when the label is translated.
+
+Same for a group of radio buttons or a set of related fields: label the group
+(`Gtk.AccessibleProperty.LABEL` on the box, `QGroupBox` in Qt) so a test can
+scope a search to it rather than relying on the whole window having unique
+names.
+
+### Three things that trip people up
 
 - **A tooltip is not a name.** Don't assume tooltip text reaches the
   accessibility tree. Set the label explicitly.
@@ -138,6 +240,39 @@ a custom text view: if you draw your own rows, publish them as list items with
 names, or the whole list is one opaque rectangle and every test against it is
 back to pixel coordinates.
 
+### Lists, trees and tables
+
+These are where most real applications keep the data a test actually cares
+about, and where a custom implementation most often publishes nothing.
+
+- **Publish the structure, not just the pixels.** A list should be a list with
+  list items inside it; a table should be a table whose rows contain cells. A
+  test then says "the row named *ada@example.com*", which survives sorting,
+  scrolling and re-styling. One opaque rectangle survives nothing.
+- **Name each row by what identifies it to a user** — the filename, the
+  account, the message subject — not by its index. Row 4 changes meaning the
+  moment anything is sorted or inserted.
+- **Expose selection as state, not as styling.** A test asks "is this row
+  selected?" through the selected state. If selection exists only as a
+  background colour, it is invisible to everything outside your process.
+- **Name the columns.** A cell whose column is anonymous can only be found
+  positionally, which is the table equivalent of a pixel coordinate.
+- **Virtualized lists are a real constraint, not a bug** — a list that
+  publishes only its realized rows is normal, and a test that needs row 900
+  has to scroll to it first. What matters is that scrolling *does* make the
+  row appear in the tree. If realized rows are never published, or stale rows
+  linger after scrolling, the list is worse than untestable: it is
+  misleadingly wrong.
+- **Per-row action buttons need the row to be findable.** Twenty rows each
+  with a "Delete" button is the duplicate-name problem from section 2 at
+  scale; naming the row is what makes "the Delete button inside the row named
+  X" expressible.
+
+If you implement your own widget from a drawing primitive, the toolkit cannot
+help you here — the accessible object and its children are yours to publish.
+That is real work, and it is the price of a custom widget; the alternative is
+that every test touching it is a coordinate click.
+
 ## 4. Keep names stable when state changes
 
 A name that carries state can't be written into a test.
@@ -168,12 +303,25 @@ document has content, and a test pinned to the old title matches nothing.
 
 ### Which value is the app id?
 
-On Wayland it is one string, conventionally your reverse-DNS application id.
+It depends on which display server your window is actually on — and on a
+modern desktop, two windows side by side may not agree.
 
-On X11 it is `WM_CLASS`, and the catch is that `WM_CLASS` is a **pair** — an
-instance name and a class. **Tools read the class.** That is what sway,
-Hyprland and pyguitest all report as an X11 window's app id, so it is the half
-worth getting right. Check yours with `xprop WM_CLASS`, then click the window:
+| Your window is | The app id comes from | Set it with |
+|---|---|---|
+| A **native Wayland** client | The `xdg_toplevel` app id — one string, conventionally your reverse-DNS application id | `Gtk.Application(application_id=...)`, `QGuiApplication::setDesktopFileName`, or your toolkit's equivalent |
+| An **X11** client, on a real X session | `WM_CLASS`, specifically the **class** half | The toolkit sets it from your program/application name; `xprop WM_CLASS` shows what you actually shipped |
+| An **X11 client under XWayland** (an X11 app in a Wayland session) | `WM_CLASS` again — XWayland clients are X11 clients, and the compositor reports them that way | Same as above |
+
+The XWayland row is the one that surprises people: in a single Wayland
+session, native clients are identified by their Wayland app id and XWayland
+clients by their `WM_CLASS`, so a tool listing windows sees both conventions
+at once. If you ship both a Wayland and an X11 build, set both, and do not
+assume the strings match — conventionally they do not.
+
+The catch on the X11 side is that `WM_CLASS` is a **pair** — an instance name
+and a class. **Tools read the class.** That is what sway, Hyprland and
+pyguitest all report as an X11 window's app id, so it is the half worth
+getting right. Check yours with `xprop WM_CLASS`, then click the window:
 
 ```
 WM_CLASS(STRING) = "myapp", "MyApp"
@@ -199,10 +347,10 @@ When something asks your widget where it is, the answer must be where it
 actually is *on the screen* — not relative to the window, and not `(0, 0)`.
 
 This isn't hypothetical, and it is not one application's bug. Measured on
-Fedora 45 across three unrelated GTK 4 applications — gnome-calculator, baobab
-and gnome-text-editor — **every widget reported its correct size at position
-`(0, 0)`**. gnome-calculator's `C`, `↑n` and `7` buttons all claimed
-`(0, 0, 64, 44)`.
+**Fedora 45, GTK 4.23.3 and at-spi2-core 2.61.1 (2026-09-06)** across three
+unrelated GTK 4 applications — gnome-calculator, baobab and gnome-text-editor
+— **every widget reported its correct size at position `(0, 0)`**.
+gnome-calculator's `C`, `↑n` and `7` buttons all claimed `(0, 0, 64, 44)`.
 
 The size is right and the position is missing, which has a specific
 consequence: "what is at this point?" cannot distinguish two widgets, so it
@@ -212,11 +360,29 @@ Nothing errors. A tool that trusts it clicks confidently on the wrong widget;
 a tool that checks, like this one, falls back to raw coordinates and your
 application becomes untestable by name.
 
-Mostly this is your toolkit's job. If you are on GTK 4 it is currently *not*
-doing it, and there is nothing a tool above it can recover — a position that
-was never published cannot be inferred. Check it directly if you maintain
-custom widgets, and check it **on a second monitor and at a non-100% scale
-factor**, which is where the remaining bugs live.
+Mostly this is your toolkit's job. On the GTK 4 versions measured above it was
+*not* being done, and there is nothing a tool higher up can recover — a
+position that was never published cannot be inferred. Treat that as a finding
+about those versions rather than a permanent property of GTK 4: it is the kind
+of thing that gets fixed upstream without an announcement, so **measure your
+own stack before concluding anything**:
+
+```python
+import pyguitest
+
+gui = pyguitest.connect()
+window = gui.window_element("MyApp")
+for element in gui.elements(within=window):
+    print(element.role, element.name, gui.extents(element))
+```
+
+Every widget reporting `x` and `y` of `0` while the sizes look right is the
+signature. A window that genuinely sits at the top-left corner of the screen
+is the one false positive — move it first.
+
+Check it directly if you maintain custom widgets, and check it **on a second
+monitor and at a non-100% scale factor**, which is where the remaining bugs
+live.
 
 ## 7. Make "busy" and "ready" visible
 
@@ -301,9 +467,34 @@ window = gui.window_element("MyApp")
 gui.assert_accessible(within=window)
 ```
 
-It fails with a list of every unnamed or ambiguously-named control. Add it once
-per screen and the *next* unnamed toolbar button fails the build on the day
-it's added, instead of six months later when someone tries to test it.
+**What it actually checks**, since the name under-promises. Two things, in
+this order:
+
+1. **Every visible control that should carry a name has one.** "Should" is a
+   fixed list of roles — push button, toggle button, check box, radio button,
+   link, entry, password field, spin button, combo box, menu item, check and
+   radio menu item, page tab, slider — and `roles=` overrides it. Invisible
+   controls are skipped deliberately: an off-screen widget nobody can reach is
+   not a labelling problem, and a hidden dialog's worth of them would drown
+   the findings that matter.
+2. **No two controls of the same role in scope share a name.** Same roles,
+   same scope. This is the section 2 problem, caught automatically.
+
+The failure names the counts and the roles, so it tells you *what* to go
+fix — "4 visible control(s) have no accessible name: 3 x push button, 1 x
+entry".
+
+**What it does not check**, so nobody reads a green build as more than it is:
+colour contrast, keyboard operability, tab order, focus visibility, whether a
+name is *meaningful* rather than merely present (`"Button1"` passes), whether
+labels are associated with the right fields, screen-reader announcement
+quality, or anything about states and values being honest. It is a floor, not
+a WCAG audit — but it is a floor that fails the build, which is more than most
+applications have.
+
+Add it once per screen and the *next* unnamed toolbar button fails the build
+on the day it's added, instead of six months later when someone tries to test
+it.
 
 **Record a session against your app.** Every click that comes out as
 `gui.button("Save").click()` is a control you got right; every click that comes
@@ -316,10 +507,12 @@ which ones it couldn't name, and why.
 
 - [ ] Every button, field, checkbox, menu item and tab has a name
 - [ ] Icon-only buttons have explicit labels, not just tooltips
+- [ ] Text fields are associated with their visible label (`labelled-by`)
 - [ ] No duplicate names within a single window
 - [ ] Names don't change when state changes
 - [ ] Widget types match behaviour — no buttons made of boxes
 - [ ] Custom widgets publish their contents, not one opaque rectangle
+- [ ] Lists and tables publish rows, cells and selection — not just pixels
 - [ ] Window app id is stable — on X11, the *class* half of `WM_CLASS`
 - [ ] Dialogs have real titles
 - [ ] Keyboard focus is reported per widget, not just per window
