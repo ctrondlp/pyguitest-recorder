@@ -166,6 +166,26 @@ source.
 
 ### Fixed
 
+- **A malformed or hand-edited recording could leak a display connection, or
+  fail with a bare `KeyError`/`TypeError` instead of a message naming what
+  was wrong.** Three items from the external review batch, all real:
+  `X11CaptureBackend.start()` only ran cleanup for the "no RECORD extension"
+  case, so any later failure -- the second connection refused,
+  `record_create_context` rejected -- leaked whatever had already been
+  opened; now the whole setup runs under one try/except that tears down
+  everything opened so far. `event_from_dict`/`Recording.from_dict` did no
+  validation of their own, so a missing `kind`, an unknown one, or a
+  required field left out of a hand-trimmed recording (`--regenerate` exists
+  precisely to invite that kind of editing) surfaced as a raw exception from
+  wherever the code first touched the bad value; both now raise `ValueError`
+  naming the event index and what was wrong, which `main()` already catches
+  and reports cleanly. `Recording.save()` wrote directly to the target path,
+  so an interrupt mid-write (a crash, a full disk, Ctrl-C) could leave a
+  truncated, unparsable file in place of a working recording -- possibly the
+  only copy of one that took real effort to make; it now writes to a temp
+  file in the same directory and renames it into place, which is atomic on
+  the same filesystem.
+
 - **Two windows of one application could silently collapse into one
   generated binding.** `_window_var` keyed a window's variable on `app_id`
   alone, but `app_id` names the *application*, not the window -- two

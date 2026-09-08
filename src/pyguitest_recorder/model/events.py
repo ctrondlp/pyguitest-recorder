@@ -421,15 +421,36 @@ _CONTEXT_FIELDS = {
 
 
 def event_from_dict(data: dict[str, Any]) -> Event:
-    """Rebuild an event from its serialized form, by its `kind` tag."""
+    """Rebuild an event from its serialized form, by its `kind` tag.
+
+    A recording is user-editable JSON -- `--regenerate` exists precisely so
+    one can be hand-trimmed and re-rendered -- so a malformed entry here must
+    fail with a message that names what is wrong, not a bare `KeyError`/
+    `TypeError` from three calls of indirection down in `_rebuild`.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"event entry is not an object: {data!r}")
     payload = dict(data)
-    kind = payload.pop("kind")
-    cls = EVENT_TYPES[kind]
-    payload["origin"] = Origin(payload.get("origin", Origin.OBSERVED.value))
-    for name, context in _CONTEXT_FIELDS.items():
-        if name in payload:
-            payload[name] = _rebuild(context, payload[name])
+    kind = payload.pop("kind", None)
+    if kind is None:
+        raise ValueError(f"event entry has no 'kind': {data!r}")
+    cls = EVENT_TYPES.get(kind)
+    if cls is None:
+        raise ValueError(
+            f"unknown event kind {kind!r}; this recorder understands "
+            f"{sorted(EVENT_TYPES)}"
+        )
+    try:
+        payload["origin"] = Origin(payload.get("origin", Origin.OBSERVED.value))
+        for name, context in _CONTEXT_FIELDS.items():
+            if name in payload:
+                payload[name] = _rebuild(context, payload[name])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed {kind!r} event ({exc})") from exc
     if "keys" in payload:
         payload["keys"] = tuple(payload["keys"])
     known = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in payload.items() if k in known})
+    try:
+        return cls(**{k: v for k, v in payload.items() if k in known})
+    except TypeError as exc:
+        raise ValueError(f"malformed {kind!r} event ({exc})") from exc

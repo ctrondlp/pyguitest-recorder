@@ -75,6 +75,59 @@ def test_future_format_is_refused():
         Recording.from_dict({"format": FORMAT_VERSION + 1})
 
 
+def test_a_non_object_event_entry_raises_a_clear_error():
+    with pytest.raises(ValueError, match="not an object"):
+        event_from_dict("just a string")  # type: ignore[arg-type]
+
+
+def test_an_event_with_no_kind_raises_a_clear_error():
+    with pytest.raises(ValueError, match="no 'kind'"):
+        event_from_dict({"timestamp": 1.0})
+
+
+def test_an_event_with_an_unknown_kind_raises_a_clear_error():
+    with pytest.raises(ValueError, match="unknown event kind 'not_a_real_kind'"):
+        event_from_dict({"kind": "not_a_real_kind"})
+
+
+def test_a_malformed_target_raises_a_clear_error_naming_the_event_kind():
+    # Target.x/y are required. A hand-edited recording missing one used to
+    # surface as a bare KeyError three calls of indirection down in _rebuild
+    # -- `--regenerate` is meant to support exactly this kind of editing, so
+    # the failure has to name what went wrong.
+    with pytest.raises(ValueError, match="malformed 'click' event"):
+        event_from_dict({"kind": "click", "target": {"y": 2}})
+
+
+def test_a_required_field_missing_entirely_raises_a_clear_error():
+    # MouseMove.target has no default, so an event with none at all used to
+    # surface as a bare TypeError from the dataclass constructor.
+    with pytest.raises(ValueError, match="malformed 'mouse_move' event"):
+        event_from_dict({"kind": "mouse_move"})
+
+
+def test_recording_from_dict_rejects_a_non_object_top_level():
+    with pytest.raises(ValueError, match="not a JSON object"):
+        Recording.from_dict(["not", "an", "object"])  # type: ignore[arg-type]
+
+
+def test_recording_from_dict_rejects_a_non_list_events_field():
+    with pytest.raises(ValueError, match="'events' is not a list"):
+        Recording.from_dict({"events": "oops"})
+
+
+def test_recording_from_dict_names_which_event_index_is_malformed():
+    with pytest.raises(ValueError, match=r"event #1: malformed 'click' event"):
+        Recording.from_dict(
+            {
+                "events": [
+                    {"kind": "click", "target": {"x": 1, "y": 2}},
+                    {"kind": "click", "target": {"y": 2}},
+                ]
+            }
+        )
+
+
 def test_element_addressable_requires_a_name():
     assert ElementRef(role="push button", name="Save").addressable
     assert not ElementRef(role="push button").addressable
@@ -93,6 +146,36 @@ def test_a_check_round_trips(window, save_button):
     assert rebuilt.expected == "Saved"
     assert rebuilt.sensitive is True
     assert rebuilt.target.element.name == "Save"
+
+
+def test_save_does_not_leave_a_temp_file_behind(tmp_path, window):
+    recording = Recording()
+    recording.add(Click(timestamp=0.0, target=Target(x=1, y=2, window=window)))
+    path = recording.save(tmp_path / "r.json")
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_save_leaves_the_previous_file_untouched_if_the_write_fails(
+    tmp_path, window, monkeypatch
+):
+    # A crash or interrupt mid-write must not corrupt the file that was
+    # already there -- write-then-rename means the old file (or nothing)
+    # survives, never a truncated one.
+    path = tmp_path / "r.json"
+    path.write_text('{"format": 1, "events": []}', encoding="utf-8")
+
+    recording = Recording()
+    recording.add(Click(timestamp=0.0, target=Target(x=1, y=2, window=window)))
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pyguitest_recorder.model.recording.os.replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        recording.save(path)
+
+    assert path.read_text(encoding="utf-8") == '{"format": 1, "events": []}'
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_a_boolean_expectation_survives_the_json_form():
