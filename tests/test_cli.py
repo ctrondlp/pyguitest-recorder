@@ -1,6 +1,6 @@
 import pytest
 
-from pyguitest_recorder.cli import build_parser, main
+from pyguitest_recorder.cli import _trimmed_events, build_parser, main
 from pyguitest_recorder.model import Click, Recording, Target, WindowRef
 
 
@@ -12,6 +12,35 @@ def saved(tmp_path):
     recording = Recording()
     recording.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
     path = tmp_path / "rec.json"
+    recording.save(path)
+    return path
+
+
+def _clicks(*coords_at):
+    """A Recording of Click events, at the given [((x, y), timestamp), ...]."""
+    window = WindowRef(
+        title="Example", app_id="org.example.App", geometry=(0, 0, 800, 600)
+    )
+    recording = Recording()
+    for (x, y), timestamp in coords_at:
+        recording.add(
+            Click(timestamp=timestamp, target=Target(x=x, y=y, window=window))
+        )
+    return recording
+
+
+@pytest.fixture
+def multi_saved(tmp_path):
+    # Four clicks: one at the very start (the "fumbling" --from is meant to
+    # cut), one mis-click in the middle (what --drop is meant to remove),
+    # and two good ones after it.
+    recording = _clicks(
+        ((10, 20), 0.0),
+        ((30, 40), 5.0),
+        ((50, 60), 9.0),
+        ((70, 80), 12.0),
+    )
+    path = tmp_path / "multi.json"
     recording.save(path)
     return path
 
@@ -155,3 +184,120 @@ def test_record_motion_has_a_flag_not_only_a_config_key():
     parser = build_parser()
     assert _overrides(parser.parse_args(["--record-motion"]))["record_motion"] is True
     assert _overrides(parser.parse_args([]))["record_motion"] is None
+
+
+# -- trimming ----------------------------------------------------------
+
+
+def _events():
+    recording = _clicks(((0, 0), 0.0), ((1, 1), 5.0), ((2, 2), 9.0), ((3, 3), 12.0))
+    return recording.events
+
+
+def test_from_drops_everything_before_it():
+    kept = _trimmed_events(_events(), trim_from=5.0, trim_to=None, drop=None)
+    assert [e.timestamp for e in kept] == [5.0, 9.0, 12.0]
+
+
+def test_to_drops_everything_at_or_after_it():
+    kept = _trimmed_events(_events(), trim_from=None, trim_to=9.0, drop=None)
+    assert [e.timestamp for e in kept] == [0.0, 5.0]
+
+
+def test_from_and_to_together_keep_a_window():
+    kept = _trimmed_events(_events(), trim_from=5.0, trim_to=12.0, drop=None)
+    assert [e.timestamp for e in kept] == [5.0, 9.0]
+
+
+def test_drop_removes_specific_indices():
+    kept = _trimmed_events(
+        _events(), trim_from=None, trim_to=None, drop=frozenset({0, 2})
+    )
+    assert [e.timestamp for e in kept] == [5.0, 12.0]
+
+
+def test_drop_indices_are_into_the_original_list_not_the_survivors():
+    # --from 5 --drop 0 means "drop event 0 of the original four" (t=0.0,
+    # already excluded by --from) -- not "drop the first survivor" (t=5.0).
+    kept = _trimmed_events(_events(), trim_from=5.0, trim_to=None, drop=frozenset({0}))
+    assert [e.timestamp for e in kept] == [5.0, 9.0, 12.0]
+
+
+def test_an_out_of_range_drop_index_raises():
+    with pytest.raises(ValueError, match="out of range"):
+        _trimmed_events(_events(), trim_from=None, trim_to=None, drop=frozenset({99}))
+
+
+def test_no_trim_arguments_returns_every_event_unchanged():
+    events = _events()
+    assert _trimmed_events(events, trim_from=None, trim_to=None, drop=None) == events
+
+
+def test_regenerate_with_from_drops_the_early_fumbling(multi_saved, tmp_path):
+    out = tmp_path / "s.py"
+    main(
+        [
+            "--regenerate",
+            str(multi_saved),
+            "--from",
+            "5",
+            "--absolute-coordinates",
+            "-o",
+            str(out),
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    source = out.read_text()
+    assert "gui.move_mouse(10, 20)" not in source
+    assert "gui.move_mouse(30, 40)" in source
+    assert "gui.move_mouse(70, 80)" in source
+
+
+def test_regenerate_with_drop_removes_the_mis_click(multi_saved, tmp_path):
+    out = tmp_path / "s.py"
+    main(
+        [
+            "--regenerate",
+            str(multi_saved),
+            "--drop",
+            "1",
+            "--absolute-coordinates",
+            "-o",
+            str(out),
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    source = out.read_text()
+    assert "gui.move_mouse(30, 40)" not in source
+    assert "gui.move_mouse(10, 20)" in source
+    assert "gui.move_mouse(50, 60)" in source
+    assert "gui.move_mouse(70, 80)" in source
+
+
+def test_an_invalid_drop_index_is_reported_not_a_traceback(
+    multi_saved, tmp_path, capsys
+):
+    code = main(
+        [
+            "--regenerate",
+            str(multi_saved),
+            "--drop",
+            "99",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert code == 2
+    assert "out of range" in capsys.readouterr().err
+
+
+def test_drop_parses_a_comma_separated_list():
+    args = build_parser().parse_args(["--drop", "3,7,12"])
+    assert args.drop == frozenset({3, 7, 12})
+
+
+def test_a_malformed_drop_list_is_rejected_by_the_parser(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--drop", "not-a-number"])

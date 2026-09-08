@@ -169,7 +169,34 @@ class DesktopResolver:
         except Exception as exc:  # noqa: BLE001 - any failure is the same answer
             self._warn(f"element resolution off: the accessible tree ({exc})")
             return False
+        self._warn_if_chromium_invisible()
         return True
+
+    def _warn_if_chromium_invisible(self) -> None:
+        """Note the one case element resolution stays partly blind.
+
+        Chromium -- and so Electron, VS Code, Slack and the rest -- builds
+        no accessible tree at all until something announces that an
+        assistive technology is running, which on Linux means
+        `org.a11y.Status.IsEnabled`. Element resolution is otherwise
+        working here (`_can_resolve_elements` already returned true by the
+        time this runs), so a click on a GTK or Qt window resolves fine
+        while one on a Chromium window silently finds no element -- which
+        without this note reads as a resolver bug rather than the known,
+        diagnosable gap it is. See pyguitest's own
+        `assistive_technology_enabled` for the measurement this reports.
+        """
+        try:
+            from pyguitest.session import assistive_technology_enabled
+        except ImportError:
+            return
+        if assistive_technology_enabled() is False:
+            self._warn(
+                "Chromium and Electron windows (VS Code, Slack, and the "
+                "rest) will resolve to no element: org.a11y.Status.IsEnabled "
+                "is false, so they never register with the accessible tree "
+                "at all, even though other windows resolve normally"
+            )
 
     def _any_screen_scaled(self) -> bool:
         """Whether any screen is scaled, which makes extents incomparable."""

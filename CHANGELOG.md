@@ -139,6 +139,30 @@ source.
   `src/` or `tests/` exceeds 8), mypy's `sqlite_cache = false` carried over so
   the type checker runs on a Python built without `_sqlite3`, and `strict`
   kept, which already implies the three flags pyguitest sets by hand.
+- **`--doctor` and every recording now say when Chromium or Electron will
+  resolve to no element**, rather than leaving it to read as a resolver bug.
+  Chromium — and so Electron, VS Code, Slack and the rest — builds no
+  accessible tree at all until something announces that an assistive
+  technology is running (`org.a11y.Status.IsEnabled`), so element resolution
+  can be genuinely working (a GTK or Qt window resolves fine) while a
+  Chromium-family window silently finds nothing. `DesktopResolver` now checks
+  the same probe pyguitest's own `assistive_technology_enabled()` measures,
+  and adds a note — through the same warnings mechanism `--doctor` already
+  surfaces and every recording's environment block already carries — only
+  when the answer is a measured `False`; an unmeasurable answer (`None`, no
+  `gdbus`, no bus) stays silent rather than warning about a gap that may not
+  even apply.
+- **Trimming a saved recording**, without hand-editing the generated script.
+  `--from SECONDS`/`--to SECONDS` drop everything outside a time window;
+  `--drop N[,N...]` drops specific events by their 0-based index in the
+  original recording — indices are always into the *original* list, so
+  `--from 8 --drop 0` unambiguously means "the very first event", not
+  whichever event happens to be first among `--from`'s survivors. Works with
+  `--regenerate` on a saved `.json`, and equally right after a live
+  recording, ahead of both re-analysis and `--save-session` — so a trim is
+  applied once and the saved copy keeps it, rather than needing to be
+  repeated on every future `--regenerate`. An out-of-range `--drop` index is
+  reported and refused rather than silently ignored.
 
 ### Documentation
 

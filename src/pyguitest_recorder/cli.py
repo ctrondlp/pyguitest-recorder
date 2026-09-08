@@ -19,7 +19,7 @@ from .analyzer import SyncOptions, infer_synchronization
 from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
-from .model import Origin, Recording
+from .model import Event, Origin, Recording
 from .recorder import (
     ContextReport,
     Recorder,
@@ -29,6 +29,16 @@ from .recorder import (
 )
 
 __all__ = ["main", "build_parser"]
+
+
+def _parse_indices(value: str) -> frozenset[int]:
+    """Parse `--drop`'s comma-separated index list, e.g. "3,7,12"."""
+    try:
+        return frozenset(int(piece) for piece in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--drop wants comma-separated indices, e.g. 3,7,12 (got {value!r})"
+        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,6 +111,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--regenerate",
         metavar="FILE.json",
         help="re-render a saved recording and exit, without recording anything",
+    )
+    output.add_argument(
+        "--from",
+        dest="trim_from",
+        type=float,
+        metavar="SECONDS",
+        help="drop every event before this many seconds into the recording"
+        " -- works with --regenerate, or right after recording",
+    )
+    output.add_argument(
+        "--to",
+        dest="trim_to",
+        type=float,
+        metavar="SECONDS",
+        help="drop every event at or after this many seconds into the recording",
+    )
+    output.add_argument(
+        "--drop",
+        type=_parse_indices,
+        metavar="N[,N...]",
+        help="drop events by their 0-based index in the recording, e.g. 3,7,12"
+        " -- indices are into the original recording, applied before --from/--to",
     )
     output.add_argument("--config", metavar="FILE", help="configuration file to use")
 
@@ -199,9 +231,15 @@ def main(argv: list[str] | None = None) -> int:
         _report_settings(settings, source)
     if args.doctor:
         return _doctor(settings)
-    if args.regenerate:
-        return _regenerate(args.regenerate, settings)
-    return _record(settings)
+    try:
+        if args.regenerate:
+            return _regenerate(
+                args.regenerate, settings, args.trim_from, args.trim_to, args.drop
+            )
+        return _record(settings, args.trim_from, args.trim_to, args.drop)
+    except ValueError as exc:
+        print(f"pyguitest-recorder: {exc}", file=sys.stderr)
+        return 2
 
 
 def _overrides(args: argparse.Namespace) -> dict[str, object]:
@@ -257,7 +295,12 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
     )
 
 
-def _record(settings: Settings) -> int:
+def _record(
+    settings: Settings,
+    trim_from: float | None = None,
+    trim_to: float | None = None,
+    drop: frozenset[int] | None = None,
+) -> int:
     """Record until the stop key or Ctrl-C, then generate."""
     try:
         recorder = Recorder(settings=settings)
@@ -294,27 +337,101 @@ def _record(settings: Settings) -> int:
             f"{'them' if presses > 1 else 'it'} if that was a missed attempt.",
             file=sys.stderr,
         )
-    return _emit(recording, settings)
+    return _emit(recording, settings, trim_from=trim_from, trim_to=trim_to, drop=drop)
 
 
-def _regenerate(path: str, settings: Settings) -> int:
+def _regenerate(
+    path: str,
+    settings: Settings,
+    trim_from: float | None = None,
+    trim_to: float | None = None,
+    drop: frozenset[int] | None = None,
+) -> int:
     """Re-render a saved recording without touching the desktop."""
     try:
         recording = Recording.load(path)
     except (OSError, ValueError) as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 2
-    return _emit(recording, settings, save_session=False)
+    return _emit(
+        recording,
+        settings,
+        save_session=False,
+        trim_from=trim_from,
+        trim_to=trim_to,
+        drop=drop,
+    )
 
 
-def _emit(recording: Recording, settings: Settings, save_session: bool = True) -> int:
+def _trimmed_events(
+    events: list[Event],
+    trim_from: float | None,
+    trim_to: float | None,
+    drop: frozenset[int] | None,
+) -> list[Event]:
+    """Keep only events inside [trim_from, trim_to) and not in `drop`.
+
+    `drop` indexes the *original* list, before any of this runs -- so
+    `--from 8 --drop 0` always means "the very first event", not "whatever
+    is first among the survivors of --from", which would make the meaning
+    of one flag depend on whether another happened to run first.
+
+    An out-of-range index raises rather than being silently ignored: a
+    recording that turned out to have fewer events than expected is worth
+    noticing, not trimming around quietly.
+    """
+    if drop:
+        invalid = sorted(i for i in drop if i < 0 or i >= len(events))
+        if invalid:
+            raise ValueError(
+                f"--drop index out of range for a {len(events)}-event "
+                f"recording: {', '.join(map(str, invalid))}"
+            )
+    kept = []
+    for index, event in enumerate(events):
+        if drop and index in drop:
+            continue
+        if trim_from is not None and event.timestamp < trim_from:
+            continue
+        if trim_to is not None and event.timestamp >= trim_to:
+            continue
+        kept.append(event)
+    return kept
+
+
+def _emit(
+    recording: Recording,
+    settings: Settings,
+    save_session: bool = True,
+    trim_from: float | None = None,
+    trim_to: float | None = None,
+    drop: frozenset[int] | None = None,
+) -> int:
     """Generate, validate and write the script; report what was produced.
 
     Synchronization is inferred here rather than during capture, and what is
     saved is what was *observed*. A recording is then re-analyzed every time it
     is rendered -- so `--regenerate` picks up better inference rules without
     re-recording anything, and rendering the same file twice cannot compound.
+
+    Trimming happens first, ahead of both analysis and `--save-session`, so a
+    trimmed recording is what gets re-analyzed *and* what a saved copy holds
+    -- the whole point being to fix the recording once rather than repeating
+    the same --from/--drop on every future --regenerate.
     """
+    if trim_from is not None or trim_to is not None or drop:
+        kept = _trimmed_events(recording.events, trim_from, trim_to, drop)
+        print(
+            f"Trimmed {len(recording.events) - len(kept)} of "
+            f"{len(recording.events)} events",
+            file=sys.stderr,
+        )
+        recording = Recording(
+            events=kept,
+            environment=recording.environment,
+            raw=recording.raw,
+            started_at=recording.started_at,
+        )
     analyzed = _analyze(recording, settings)
     source = generate(analyzed, _generator_options(settings))
     problems = validate(source)

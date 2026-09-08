@@ -421,6 +421,31 @@ def test_a_dead_accessible_tree_is_noticed_before_it_is_believed():
     assert any("accessible tree" in warning for warning in made.warnings)
 
 
+def test_chromium_invisibility_is_noted_when_measured_off(monkeypatch):
+    # Chromium/Electron build no accessible tree at all until something
+    # announces an AT is running -- element resolution otherwise works, so
+    # without this note a click on VS Code or Slack finding no element
+    # would read as a resolver bug rather than a known, diagnosable gap.
+    monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: False)
+    made = element_resolver()
+    assert made.resolves_elements
+    assert any("org.a11y.Status.IsEnabled" in warning for warning in made.warnings)
+
+
+def test_no_chromium_note_when_measured_on(monkeypatch):
+    monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: True)
+    made = element_resolver()
+    assert not any("IsEnabled" in warning for warning in made.warnings)
+
+
+def test_no_chromium_note_when_it_cannot_be_measured(monkeypatch):
+    # None means the question could not be asked (no gdbus, no bus) -- not
+    # a reason to warn about a desktop-specific gap that may not apply.
+    monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: None)
+    made = element_resolver()
+    assert not any("IsEnabled" in warning for warning in made.warnings)
+
+
 def test_no_session_leaves_element_resolution_off_and_says_so():
     made = DesktopResolver(session=None, elements=True)
     assert made.resolve(130, 130).element is None
