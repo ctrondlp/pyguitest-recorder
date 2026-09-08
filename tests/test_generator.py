@@ -633,15 +633,35 @@ def test_a_window_variable_is_named_from_the_title_a_reader_recognizes():
 
 
 def test_one_window_still_binds_once_however_it_is_named():
-    # The key stays the app id: two mentions of one window have to collapse
-    # to a single binding even if its title drifted between them.
+    # Two mentions of the SAME window collapse to a single binding. Title is
+    # part of the key, but that does not reintroduce the drift problem: the
+    # resolver pins a window's title to what it was first seen as (see
+    # WindowRef's docstring) and reuses that pinned title for every later
+    # mention, so two WindowRefs for one window always carry the same title
+    # here, however many times its title actually changed on screen.
     first = WindowRef(title="Untitled", app_id="Editor", geometry=(0, 0, 800, 600))
-    second = WindowRef(title="Report", app_id="Editor", geometry=(0, 0, 800, 600))
+    second = WindowRef(title="Untitled", app_id="Editor", geometry=(0, 0, 800, 600))
     source = render(
         WindowActivate(window=first),
         WindowActivate(window=second),
     )
     assert source.count("gui.wait_for_window") == 1
+
+
+def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
+    # The bug this guards: app_id alone was the key, and app_id names the
+    # application, not the window -- two terminal windows of one app share
+    # an app_id, so the second one's clicks were silently generated against
+    # the first one's binding. Each window's title is pinned by the
+    # resolver at first sight (see the test above), so two windows that are
+    # genuinely different keep their own, different titles here.
+    first = WindowRef(title="~/project", app_id="Terminal", geometry=(0, 0, 800, 600))
+    second = WindowRef(title="~/docs", app_id="Terminal", geometry=(900, 0, 800, 600))
+    source = render(
+        WindowActivate(window=first),
+        WindowActivate(window=second),
+    )
+    assert source.count("gui.wait_for_window") == 2
 
 
 def test_a_program_name_app_id_is_not_mistaken_for_reverse_dns():
