@@ -140,6 +140,53 @@ source.
   the type checker runs on a Python built without `_sqlite3`, and `strict`
   kept, which already implies the three flags pyguitest sets by hand.
 
+### Documentation
+
+- **Restructured around recording a test rather than around how the recorder
+  was engineered**, following an external review that found the same thing
+  across all three of these projects: the depth was there, but a reader met
+  the reasoning before the instructions. The README opened with a
+  twelve-row verification table and an essay on why Wayland cannot be
+  recorded, and the warning that keyboard capture sees *every* application's
+  keystrokes sat at line 429 of 490 — well past where someone would have
+  started recording.
+
+  Now: a quick start at the top with that privacy warning beside the first
+  record command, the element → window-relative → absolute ladder drawn
+  before it is discussed, and `--save-session`/`--regenerate` promoted to the
+  quick start as "record once, regenerate forever". The README is 374 lines
+  shorter and nothing was deleted.
+
+  New `docs/`: `getting-started.md` (doctor through replay), `recipes.md`
+  (every flag that matters, by the task it serves), `troubleshooting.md`
+  (opening with "why is my script all coordinates?", the question the tool
+  actually generates), and an index. The engineering narrative moved intact
+  to `docs/developers/architecture.md` (why X11 only, recording versus
+  replaying, the element-resolution corroboration rules, focus-based
+  targeting) and `docs/developers/status.md` (the verification table, the
+  live-capture-check history, the known gaps).
+
+- **`docs/testable-guis.md` reworked against a 40-point line review.**
+  Accessibility is now framed as the *foundation* of robust automation rather
+  than a synonym for it; a Role / Name / State / Value / Relationships mental
+  model is introduced up front instead of being scattered through examples;
+  form-field label association (`labelled-by`, `set_mnemonic_widget`,
+  `setBuddy`) is covered, which was missing entirely and is the reason a
+  visibly-labelled entry can still be unnamed; lists, trees, tables and
+  custom widgets get real guidance rather than a paragraph; the app-id
+  section now separates native Wayland, X11 and XWayland instead of treating
+  the last as obvious; there is a worked before/after showing the same
+  interaction recorded against a badly and a well labelled application; and
+  `assert_accessible()` now states exactly what it checks *and what it does
+  not*, since the name under-promises in one direction and over-promises in
+  the other.
+
+  The GTK4 "widgets report size but no position" finding is now qualified by
+  the versions it was measured on, with a snippet for measuring your own
+  stack — it is the kind of thing that gets fixed upstream without an
+  announcement, and stating it as a permanent property of GTK4 would age
+  badly.
+
 ### Found by the first recording of a real application
 
 Everything above was found on a private X server driving a test dialog. The
