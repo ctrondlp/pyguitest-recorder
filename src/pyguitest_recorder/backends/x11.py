@@ -111,40 +111,52 @@ class X11CaptureBackend:
         self._keysyms: dict[int, str] = {}
 
     def start(self) -> None:
-        """Open both connections, create the record context and begin pumping."""
+        """Open both connections, create the record context and begin pumping.
+
+        Everything from the first connection onward runs under one try/except
+        that tears down whatever was opened so far on any failure -- a display
+        connection or the record context left dangling here has no other
+        owner to close it. This used to only run `stop()` for the
+        RECORD-extension-missing case; any other failure (the second
+        connection refused, `record_create_context` rejected, the thread
+        failing to start) leaked whatever had already been opened.
+        """
         xlib = _import_xlib()
-        self._control = _connect(xlib, self.display_name)
-        self._pump = _connect(xlib, self.display_name)
-        if not self._control.query_extension("RECORD"):
-            self.stop()
-            raise CaptureUnavailable(
-                "the X server has no RECORD extension; on Xorg this is the "
-                "x11-xserver-utils / xorg-x11-server-extra package"
+        try:
+            self._control = _connect(xlib, self.display_name)
+            self._pump = _connect(xlib, self.display_name)
+            if not self._control.query_extension("RECORD"):
+                raise CaptureUnavailable(
+                    "the X server has no RECORD extension; on Xorg this is the "
+                    "x11-xserver-utils / xorg-x11-server-extra package"
+                )
+            self._keysyms = _keysym_names(xlib)
+            # Created on the pump connection because that is the one that will
+            # enable it; see the module docstring.
+            self._context = self._pump.record_create_context(
+                0,
+                [xlib["record"].AllClients],
+                [
+                    {
+                        "core_requests": (0, 0),
+                        "core_replies": (0, 0),
+                        "ext_requests": (0, 0, 0, 0),
+                        "ext_replies": (0, 0, 0, 0),
+                        "delivered_events": (0, 0),
+                        "device_events": (_KEY_PRESS, _MOTION),
+                        "errors": (0, 0),
+                        "client_started": False,
+                        "client_died": False,
+                    }
+                ],
             )
-        self._keysyms = _keysym_names(xlib)
-        # Created on the pump connection because that is the one that will
-        # enable it; see the module docstring.
-        self._context = self._pump.record_create_context(
-            0,
-            [xlib["record"].AllClients],
-            [
-                {
-                    "core_requests": (0, 0),
-                    "core_replies": (0, 0),
-                    "ext_requests": (0, 0, 0, 0),
-                    "ext_replies": (0, 0, 0, 0),
-                    "delivered_events": (0, 0),
-                    "device_events": (_KEY_PRESS, _MOTION),
-                    "errors": (0, 0),
-                    "client_started": False,
-                    "client_died": False,
-                }
-            ],
-        )
-        self._thread = threading.Thread(
-            target=self._run, name="xrecord-capture", daemon=True
-        )
-        self._thread.start()
+            self._thread = threading.Thread(
+                target=self._run, name="xrecord-capture", daemon=True
+            )
+            self._thread.start()
+        except Exception:
+            self.stop()
+            raise
 
     def _run(self) -> None:
         """Pump the record context. Blocks until the context is disabled."""

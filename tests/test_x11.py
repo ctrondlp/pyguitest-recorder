@@ -16,6 +16,7 @@ record = pytest.importorskip("Xlib.ext.record", reason="python-xlib is not insta
 from Xlib.protocol import display as pdisplay  # noqa: E402
 from Xlib.protocol import event as xevent  # noqa: E402
 
+from pyguitest_recorder.backends import x11 as x11_module  # noqa: E402
 from pyguitest_recorder.backends.base import CaptureUnavailable  # noqa: E402
 from pyguitest_recorder.backends.x11 import (  # noqa: E402
     X11CaptureBackend,
@@ -293,6 +294,66 @@ def test_stop_lets_the_pump_thread_out_before_closing_its_connection():
         FakeConnection.close = original_close
     assert order[0] == "thread left record_enable_context"
     assert "connection closed" in order
+
+
+class _StartFakeConnection(FakeConnection):
+    """Adds the two calls `start()` makes that the shared fake doesn't."""
+
+    def __init__(self, *, create_context_error=None):
+        super().__init__()
+        self._create_context_error = create_context_error
+
+    def query_extension(self, name):
+        return True
+
+    def record_create_context(self, *args):
+        if self._create_context_error is not None:
+            raise self._create_context_error
+        return object()
+
+
+def test_start_closes_an_already_open_connection_when_the_second_fails(monkeypatch):
+    # start() used to only clean up for the "no RECORD extension" case --
+    # any other failure after the first connection succeeded (the second
+    # connection refused, here) leaked it.
+    opened = []
+
+    def fake_connect(xlib, name):
+        if opened:
+            raise CaptureUnavailable("second connection refused")
+        conn = _StartFakeConnection()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(x11_module, "_connect", fake_connect)
+    made = X11CaptureBackend()
+    with pytest.raises(CaptureUnavailable, match="second connection refused"):
+        made.start()
+    assert len(opened) == 1
+    assert opened[0].closed
+    assert made._control is None
+    assert made._pump is None
+
+
+def test_start_closes_both_connections_when_creating_the_context_fails(monkeypatch):
+    # A failure this late used to leak both connections: nothing after the
+    # RECORD-extension check ran through `stop()` on the way out.
+    opened = []
+
+    def fake_connect(xlib, name):
+        conn = _StartFakeConnection(create_context_error=RuntimeError("no context"))
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(x11_module, "_connect", fake_connect)
+    made = X11CaptureBackend()
+    with pytest.raises(RuntimeError, match="no context"):
+        made.start()
+    assert len(opened) == 2
+    assert all(conn.closed for conn in opened)
+    assert made._control is None
+    assert made._pump is None
+    assert made._context is None
 
 
 def test_events_yields_what_was_captured_and_stops_at_the_end():
