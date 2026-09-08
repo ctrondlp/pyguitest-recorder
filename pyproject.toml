@@ -21,6 +21,42 @@ license = "GPL-2.0-or-later"
 authors = [{ name = "Dennis K. Paulsen" }]
 keywords = ["gui", "testing", "recorder", "automation", "x11", "pyguitest"]
 
+# No `License ::` classifier: with the PEP 639 `license` SPDX string above,
+# setuptools>=77 rejects the distribution if both are present. Same reason
+# pyguitest's list omits one.
+classifiers = [
+    # 0.1.0, never tagged, and "record more real applications" is still an
+    # open item. Every piece works end to end, but the coverage 4-Beta claims
+    # is not one this tree can make yet; pyguitest is 4-Beta because it can.
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    # Capture is XRecord, so recording is X11-only. What it writes is
+    # pyguitest source, which then runs wherever pyguitest does -- these say
+    # where you can record, not where the generated script replays.
+    "Environment :: X11 Applications",
+    "Operating System :: POSIX :: Linux",
+    # The suite and a live recording both pass on FreeBSD 15.
+    "Operating System :: POSIX :: BSD :: FreeBSD",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    # The versions CI actually runs; 3.14 is added here when the matrix adds
+    # it, not before.
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Desktop Environment",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    # The whole output is Python source.
+    "Topic :: Software Development :: Code Generators",
+    # No `Typing :: Typed`: the tree is annotated and mypy runs strict over
+    # it, but no py.typed marker ships, so PEP 561 has downstream checkers
+    # ignore those annotations. The claim follows the marker, not the other
+    # way round.
+]
+
 # pyguitest is not optional: the recorder's output is pyguitest source, and
 # the generator validates what it emits against the installed public API.
 dependencies = [
