@@ -135,8 +135,9 @@ resolved, and matching picks the first. Disambiguate the generated call by
 hand:
 
 ```python
-gui.element(role=Role.PUSH_BUTTON, name="Remove",
-            within=gui.window_element("Accounts")).click()
+gui.element(
+    role=Role.PUSH_BUTTON, name="Remove", within=gui.window_element("Accounts")
+).click()
 ```
 
 Generated scripts are meant to be edited; this is one of the places where a
