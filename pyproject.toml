@@ -64,7 +64,7 @@ dependencies = [
     # the oldest that might work: `validate()` checks every emitted call
     # against the installed Session, so an older pyguitest would not fail
     # loudly, it would quietly accept a script naming methods it lacks.
-    "pyguitest>=0.5.0",
+    "pyguitest>=0.6.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

@@ -164,6 +164,22 @@ source.
   repeated on every future `--regenerate`. An out-of-range `--drop` index is
   reported and refused rather than silently ignored.
 
+### Fixed
+
+- **A recorded AltGr keystroke generated a script that failed at replay,
+  not just at recording time.** The normalizer already mapped
+  `ISO_Level3_Shift` to an "altgr" modifier and the generator already
+  rendered it as `gui.send_keys("&...")`; what neither could fix is that
+  pyguitest's own `Xlib.XK` never loaded the keysym group
+  `ISO_Level3_Shift` lives in, so every such script raised `ValueError:
+  unknown key name 'ISO_Level3_Shift'` the moment it ran, on any layout
+  with a group-2 symbol. **Needs the matching pyguitest fix**, which loads
+  that keysym group and shipped in **pyguitest 0.6.0** — which is why the
+  dependency floor is 0.6.0 rather than the 0.5.0 that first provided the
+  role-spelling fix. This was always a pyguitest-side bug, not a recorder
+  one; the floor bump is what actually closes it for anyone recording on
+  this version.
+
 ### Documentation
 
 - **Restructured around recording a test rather than around how the recorder
