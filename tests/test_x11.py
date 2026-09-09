@@ -20,6 +20,8 @@ from pyguitest_recorder.backends import x11 as x11_module  # noqa: E402
 from pyguitest_recorder.backends.base import CaptureUnavailable  # noqa: E402
 from pyguitest_recorder.backends.x11 import (  # noqa: E402
     X11CaptureBackend,
+    _group_switch_mask,
+    _is_case_pair,
     _keysym_names,
     _printable,
 )
@@ -37,14 +39,18 @@ class FakeProtocolDisplay:
 class FakeConnection:
     """A display connection that answers only what the parse path asks it."""
 
-    def __init__(self, keymap=None):
+    def __init__(self, keymap=None, modifier_mapping=None):
         self.display = FakeProtocolDisplay()
         self.keymap = keymap or {}
+        self.modifier_mapping = modifier_mapping or [[] for _ in range(8)]
         self.closed = False
         self.disabled = threading.Event()
 
     def keycode_to_keysym(self, keycode, index):
         return self.keymap.get((keycode, index), 0)
+
+    def get_modifier_mapping(self):
+        return self.modifier_mapping
 
     def record_disable_context(self, context):
         self.disabled.set()
@@ -134,11 +140,12 @@ def motion(x=7, y=8):
     )
 
 
-def backend(keymap=None, screen=0):
+def backend(keymap=None, screen=0, group_mask=None):
     made = X11CaptureBackend(screen=screen)
     made._control = FakeConnection(keymap)
     made._pump = FakeConnection(keymap)
     made._keysyms = _keysym_names({"XK": __import__("Xlib.XK", fromlist=["XK"])})
+    made._group_mask = group_mask
     return made
 
 
@@ -213,6 +220,67 @@ def test_a_key_with_no_shifted_mapping_falls_back_to_the_unshifted_one():
     # Return is not printable, so it stays a named key rather than text --
     # which is what keeps `gui.tap_key("Return")` out of `gui.type_text`.
     assert (got.keysym, got.text) == ("Return", "")
+
+
+def test_altgr_picks_the_group_2_keysym():
+    from Xlib import XK
+
+    # keycode 10 as a German "1" key: group 1 is 1/!, group 2 (AltGr) is a
+    # currency sign with no shifted form of its own.
+    made = backend(
+        keymap={(10, 0): XK.XK_1, (10, 1): XK.XK_exclam, (10, 2): XK.XK_at},
+        group_mask=1 << 4,  # Mod2, arbitrarily -- any Mod bit but the fixed ones
+    )
+    made._handle(FakeReply(key(10, state=1 << 4)))
+    got = drain(made)[0]
+    assert (got.keysym, got.text) == ("at", "@")
+
+
+def test_no_group_switch_bound_always_reads_group_1():
+    from Xlib import XK
+
+    # Same keymap as above, but this backend never found a Mode_switch/
+    # ISO_Level3_Shift key (group_mask=None, the default for every layout
+    # with no third level) -- group 2 must stay unreachable even if the
+    # state bit that would have selected it happens to be set for some
+    # other reason.
+    made = backend(
+        keymap={(10, 0): XK.XK_1, (10, 1): XK.XK_exclam, (10, 2): XK.XK_at},
+    )
+    made._handle(FakeReply(key(10, state=1 << 4)))
+    got = drain(made)[0]
+    assert got.keysym == "1"
+
+
+def test_capslock_shifts_a_letter_like_a_second_shift():
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (38, 1): XK.XK_A})
+    made._handle(FakeReply(key(38, state=x11_module._LOCK_MASK)))
+    got = drain(made)[0]
+    assert (got.keysym, got.text) == ("A", "A")
+
+
+def test_shift_cancels_capslock_on_a_letter():
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (38, 1): XK.XK_A})
+    state = x11_module._LOCK_MASK | x11_module._SHIFT_MASK
+    made._handle(FakeReply(key(38, state=state)))
+    got = drain(made)[0]
+    # Shift+CapsLock on a letter types lowercase, matching a real keyboard.
+    assert (got.keysym, got.text) == ("a", "a")
+
+
+def test_capslock_does_not_affect_digits_or_punctuation():
+    from Xlib import XK
+
+    made = backend(keymap={(10, 0): XK.XK_1, (10, 1): XK.XK_exclam})
+    made._handle(FakeReply(key(10, state=x11_module._LOCK_MASK)))
+    got = drain(made)[0]
+    # Lock has no case pair to latch onto here, so it is simply ignored --
+    # a real CapsLock does not turn "1" into "!".
+    assert (got.keysym, got.text) == ("1", "1")
 
 
 def test_an_unmapped_keycode_is_reported_rather_than_dropped():
@@ -389,3 +457,72 @@ def test_multimedia_keysyms_are_named_too():
     # `send_keys("^({0x1008ff12})")` -- a name press_key cannot resolve, and
     # one `validate()` cannot catch because it is a string argument.
     assert keysym_names().get(0x1008FF12) == "XF86_AudioMute"
+
+
+def test_group_switch_mask_finds_iso_level3_shift_on_whichever_mod():
+    from Xlib import XK
+
+    XK.load_keysym_group("xkb")  # ISO_Level3_Shift lives there, not in the core set
+    xlib = {"XK": XK}
+    # keycode 108 as a real AltGr key does: bound under Mod3, not Mod5,
+    # which is why this is not hardcoded to Mod5 in the implementation.
+    mapping = [[] for _ in range(8)]
+    mapping[5] = [108]  # index 5 == Mod3MapIndex
+    display = FakeConnection(
+        keymap={(108, 0): XK.XK_ISO_Level3_Shift},
+        modifier_mapping=mapping,
+    )
+    assert _group_switch_mask(display, xlib) == 1 << 5
+
+
+def test_group_switch_mask_accepts_mode_switch_too():
+    from Xlib import XK
+
+    xlib = {"XK": XK}
+    mapping = [[] for _ in range(8)]
+    mapping[7] = [203]  # index 7 == Mod5MapIndex
+    display = FakeConnection(
+        keymap={(203, 0): XK.XK_Mode_switch}, modifier_mapping=mapping
+    )
+    assert _group_switch_mask(display, xlib) == 1 << 7
+
+
+def test_group_switch_mask_is_none_when_nothing_is_bound():
+    from Xlib import XK
+
+    xlib = {"XK": XK}
+    display = FakeConnection(keymap={})
+    assert _group_switch_mask(display, xlib) is None
+
+
+def test_group_switch_mask_never_looks_at_shift_lock_or_control():
+    from Xlib import XK
+
+    xlib = {"XK": XK}
+    mapping = [[] for _ in range(8)]
+    # Put an actual Mode_switch keycode under Lock -- a nonsensical mapping,
+    # but the point is that indices 0-2 are skipped unconditionally, not
+    # that a real keyboard would ever do this.
+    mapping[1] = [50]
+    display = FakeConnection(
+        keymap={(50, 0): XK.XK_Mode_switch}, modifier_mapping=mapping
+    )
+    assert _group_switch_mask(display, xlib) is None
+
+
+def test_is_case_pair_recognizes_a_letters_two_cases():
+    from Xlib import XK
+
+    assert _is_case_pair(XK.XK_a, XK.XK_A) is True
+
+
+def test_is_case_pair_rejects_a_digit_and_its_shifted_symbol():
+    from Xlib import XK
+
+    assert _is_case_pair(XK.XK_1, XK.XK_exclam) is False
+
+
+def test_is_case_pair_rejects_two_identical_keysyms():
+    from Xlib import XK
+
+    assert _is_case_pair(XK.XK_a, XK.XK_a) is False

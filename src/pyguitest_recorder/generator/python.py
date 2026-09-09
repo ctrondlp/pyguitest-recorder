@@ -33,7 +33,8 @@ import re
 import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from ..model import (
@@ -187,6 +188,24 @@ class GeneratorOptions:
     """Run `ruff format` over the result. Silently skipped when ruff is absent."""
 
 
+_ElementKey = tuple[str, str, tuple[tuple[str, str], ...]]
+"""An element's (role, name, ancestry path) -- what tells two mentions of the
+same widget apart from two different widgets that happen to share a role and
+a name.
+
+Known limitation: two genuinely distinct widgets that also share their full
+ancestry path -- role and name identical at every level, such as repeated
+rows in a list with no per-row identifying name -- are indistinguishable by
+this key and collapse onto one `_ElementKey` in `_compute_element_scopes`,
+so the second one silently loses its collision warning and `within=`
+scoping. Nothing in `ElementRef` currently carries a signal that would tell
+them apart without also risking false collisions for a genuinely repeated
+reference to the same widget (e.g. `extents`, which changes if the window
+moves between two clicks on it). Resolving this needs a stable per-node
+identity from the accessibility layer, which pyguitest does not expose
+today -- see the PR #3 review thread this was flagged in."""
+
+
 @dataclass
 class _State:
     """Mutable bookkeeping for one render pass."""
@@ -201,6 +220,114 @@ class _State:
     helpers: set[str] = field(default_factory=set)
     secrets: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    element_scopes: dict[_ElementKey, tuple[str, str]] = field(default_factory=dict)
+    """Ambiguous element identity -> the ancestor that disambiguates it.
+
+    Computed once, over the whole recording, before rendering starts -- see
+    `_compute_element_scopes`. Empty for a recording with no colliding
+    (role, name) pair, which is the common case and costs nothing extra.
+    """
+
+    scope_vars: dict[tuple[str, str], str] = field(default_factory=dict)
+    """Ancestor (role, name) -> the variable it was bound to, so two elements
+    needing the same scoping container share one lookup rather than
+    searching for it twice."""
+
+
+def _iter_element_refs(recording: Recording) -> Iterator[ElementRef]:
+    """Every `ElementRef` an event carries, wherever it is nested.
+
+    Walked generically over each event's own dataclass fields rather than
+    naming `target`/`start`/`end`/`element` -- `Drag` alone has two `Target`s
+    under different names, and a field-name list here would need updating
+    every time an event type gained one, silently under-counting until it
+    was.
+    """
+    for event in recording.events:
+        for f in fields(event):
+            value = getattr(event, f.name)
+            if isinstance(value, Target):
+                if value.element is not None:
+                    yield value.element
+            elif isinstance(value, ElementRef):
+                yield value
+
+
+def _compute_element_scopes(
+    recording: Recording,
+) -> tuple[dict[_ElementKey, tuple[str, str]], list[str]]:
+    """Which addressable elements need `within=` to replay correctly.
+
+    Two elements collide when they share a (role, name) pyguitest would
+    search for, but not a full identity (role, name, ancestry path) -- the
+    same widget mentioned twice, the ordinary case, keys identically and
+    never reaches `groups` with more than one member. A real collision (two
+    distinct elements, same role and name, different ancestry) does, and
+    each such element gets whichever ancestor in its own path is not shared
+    by any other member of the group -- see `_disambiguating_ancestor`.
+
+    A collision `_disambiguating_ancestor` cannot resolve (nothing in the
+    path is both named and unshared) is reported as a warning rather than
+    left silent: the generated script would otherwise emit the same
+    unscoped `gui.element(role=..., name=...)` for two different widgets,
+    which matches whichever one pyguitest's search finds first -- exactly
+    the "confidently wrong" failure this project exists to avoid.
+    """
+    groups: dict[tuple[str, str], dict[_ElementKey, ElementRef]] = {}
+    for ref in _iter_element_refs(recording):
+        if not ref.addressable:
+            continue
+        key: _ElementKey = (ref.role, ref.name, ref.path)
+        groups.setdefault((ref.role, ref.name), {})[key] = ref
+    scopes: dict[_ElementKey, tuple[str, str]] = {}
+    warnings: list[str] = []
+    for (role, name), members in groups.items():
+        if len(members) < 2:
+            continue
+        unresolved = False
+        for key, ref in members.items():
+            others = [other for other_key, other in members.items() if other_key != key]
+            ancestor = _disambiguating_ancestor(ref, others)
+            if ancestor is not None:
+                scopes[key] = ancestor
+            else:
+                unresolved = True
+        if unresolved:
+            warnings.append(
+                f"{len(members)} elements named {name!r} with role {role!r} could "
+                "not be told apart by ancestry; the generated script may click "
+                "the wrong one"
+            )
+    return scopes, warnings
+
+
+def _disambiguating_ancestor(
+    ref: ElementRef, others: list[ElementRef]
+) -> tuple[str, str] | None:
+    """The nearest named ancestor of `ref` that none of `others` also has.
+
+    Walked from the immediate parent outward (nearest ancestors disambiguate
+    with the least indirection) rather than from the root, and skips any
+    ancestor with no name -- a nameless container cannot be found again by
+    `gui.element(name=...)` either, so binding one would just move the
+    ambiguity rather than resolve it. A candidate is rejected if it appears
+    *anywhere* in another element's path, not just at the matching depth --
+    `_ancestor_var` binds it with an unscoped `gui.element(role=, name=)`,
+    which has no notion of depth, so an ancestor shared at a different depth
+    would still resolve ambiguously at replay time. Returns None when
+    nothing in the whole path is both named and unshared, which does happen
+    (two identically structured, identically named panes -- see
+    docs/troubleshooting.md) and is a real limit of ancestry-based
+    disambiguation, not a bug in finding it.
+    """
+    path = ref.path
+    for depth in range(1, len(path) + 1):
+        candidate = path[-depth]
+        if not candidate[1]:
+            continue
+        if all(candidate not in other.path for other in others):
+            return candidate
+    return None
 
 
 def _literal(value: str | int | float | bool | None) -> str:
@@ -260,6 +387,9 @@ class PythonGenerator:
     def render(self, recording: Recording) -> str:
         """Return the complete generated module for `recording`."""
         state = _State()
+        if self.options.locators == "element":
+            state.element_scopes, scope_warnings = _compute_element_scopes(recording)
+            state.warnings.extend(scope_warnings)
         for event in recording.events:
             self._emit(event, state)
         source = self._assemble(recording, state)
@@ -495,11 +625,22 @@ class PythonGenerator:
     def _expect(
         self, helper: str, element: ElementRef, state: _State, extra: str = ""
     ) -> None:
-        """Emit one `expect_` call against a named element."""
+        """Emit one `expect_` call against a named element.
+
+        Scoped the same way a clicked element is (see `_element_expr`): a
+        check on one of two same-named elements needs `within=` exactly as
+        much as a click on it would, and is subject to the same collision
+        warning when ancestry cannot tell them apart.
+        """
         state.capabilities.add("ELEMENT_TREE")
         state.helpers.add(helper)
-        args = self._role_arg(element, state)
+        args = self._role_arg(element.role, state)
+        key: _ElementKey = (element.role, element.name, element.path)
+        scope = state.element_scopes.get(key)
         tail = f", {extra}" if extra else ""
+        if scope is not None:
+            within = self._ancestor_var(scope, state)
+            tail += f", within={within}"
         state.lines.append(
             f"{helper}(gui, {args}, name={_literal(element.name)}{tail})"
         )
@@ -668,11 +809,25 @@ class PythonGenerator:
         self._window_var(event.window, state, timeout=event.timeout)
 
     def _emit_waitforelement(self, event: WaitForElement, state: _State) -> None:
-        """Render waiting for an element to appear."""
+        """Render waiting for an element to appear.
+
+        Scoped like a click on the same element would be (see
+        `_element_expr`): waiting for one of two same-named elements needs
+        `within=` exactly as much as clicking it does, once it appears.
+        """
         state.capabilities.add("ELEMENT_TREE")
-        args = self._role_arg(event.element, state)
+        args = self._role_arg(event.element.role, state)
         if event.element.name:
             args += f", name={_literal(event.element.name)}"
+            key: _ElementKey = (
+                event.element.role,
+                event.element.name,
+                event.element.path,
+            )
+            scope = state.element_scopes.get(key)
+            if scope is not None:
+                within = self._ancestor_var(scope, state)
+                args += f", within={within}"
         state.lines.append(f"gui.wait_for_element({args}, timeout={event.timeout:g})")
         # Waiting for an element means the window under the pointer just
         # changed, so where the pointer was says nothing about where it is.
@@ -746,17 +901,45 @@ class PythonGenerator:
         if element is None or not element.addressable:
             return None
         state.capabilities.add("ELEMENT_TREE")
-        sugar = _SUGAR.get(element.role)
-        if sugar is not None:
-            return f"gui.{sugar}({_literal(element.name)})"
-        args = self._role_arg(element, state)
-        return f"gui.element({args}, name={_literal(element.name)})"
+        key: _ElementKey = (element.role, element.name, element.path)
+        scope = state.element_scopes.get(key)
+        if scope is None:
+            sugar = _SUGAR.get(element.role)
+            if sugar is not None:
+                return f"gui.{sugar}({_literal(element.name)})"
+            args = self._role_arg(element.role, state)
+            return f"gui.element({args}, name={_literal(element.name)})"
+        # No _SUGAR here even where one exists for this role: the sugar
+        # methods take no `within=`, exactly the scoping this element needs
+        # to avoid matching its same-named sibling elsewhere in the tree.
+        within = self._ancestor_var(scope, state)
+        args = self._role_arg(element.role, state)
+        return f"gui.element({args}, name={_literal(element.name)}, within={within})"
 
-    def _role_arg(self, element: ElementRef, state: _State) -> str:
+    def _ancestor_var(self, ancestor: tuple[str, str], state: _State) -> str:
+        """Bind a disambiguating ancestor to a variable, finding it once.
+
+        Cached by (role, name) in `state.scope_vars` so two elements that
+        need the same scoping container -- two fields in one dialog, say --
+        share a single lookup rather than searching for their shared parent
+        twice.
+        """
+        if ancestor in state.scope_vars:
+            return state.scope_vars[ancestor]
+        role, name = ancestor
+        state.capabilities.add("ELEMENT_TREE")
+        args = self._role_arg(role, state)
+        taken = set(state.scope_vars.values()) | set(state.windows.values()) | _RESERVED
+        var_name = _identifier(name or role, taken)
+        state.lines.append(f"{var_name} = gui.element({args}, name={_literal(name)})")
+        state.scope_vars[ancestor] = var_name
+        return var_name
+
+    def _role_arg(self, role: str, state: _State) -> str:
         """Render the `role=` argument, as a Role constant where one exists."""
-        constant = _ROLE_CONSTANTS.get(element.role)
+        constant = _ROLE_CONSTANTS.get(role)
         if constant is None:
-            return f"role={_literal(element.role)}"
+            return f"role={_literal(role)}"
         state.roles.add(constant)
         return f"role=Role.{constant}"
 
@@ -1145,9 +1328,9 @@ _HELPER_SOURCE = {
     gui.move_mouse(x + width // 2, y + height // 2)
     gui.double_click()
 ''',
-    _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout):
+    _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout, within=None):
     """Return the named element, or fail saying it never appeared."""
-    element = gui.wait_for_element(role=role, name=name, timeout=timeout)
+    element = gui.wait_for_element(role=role, name=name, within=within, timeout=timeout)
     if element is None:
         raise AssertionError(
             f"expected an element named {name!r} with role {role!r} to be "
@@ -1155,32 +1338,36 @@ _HELPER_SOURCE = {
         )
     return element
 ''',
-    "expect_text": '''def expect_text(gui, role, name, equals, timeout=5.0):
+    "expect_text": '''def expect_text(
+    gui, role, name, equals, timeout=5.0, within=None
+):
     """Fail unless the named element reads `equals`.
 
     Re-read until `timeout` rather than checked once. A check recorded right
     after the action it verifies would otherwise race the application, which
     has not necessarily finished redrawing by the time the click returns.
     """
-    element = _expect_element(gui, role, name, timeout)
+    element = _expect_element(gui, role, name, timeout, within)
     if gui.wait_until(lambda: element.text == equals, timeout=timeout):
         return
     raise AssertionError(
         f"expected {name!r} to read {equals!r}, but it reads {element.text!r}"
     )
 ''',
-    "expect_checked": '''def expect_checked(gui, role, name, checked, timeout=5.0):
+    "expect_checked": '''def expect_checked(
+    gui, role, name, checked, timeout=5.0, within=None
+):
     """Fail unless the named checkbox, radio button or toggle is in `checked`."""
-    element = _expect_element(gui, role, name, timeout)
+    element = _expect_element(gui, role, name, timeout, within)
     if gui.wait_until(lambda: element.checked == checked, timeout=timeout):
         return
     wanted = "checked" if checked else "unchecked"
     actual = "checked" if element.checked else "unchecked"
     raise AssertionError(f"expected {name!r} to be {wanted}, but it is {actual}")
 ''',
-    "expect_showing": '''def expect_showing(gui, role, name, timeout=5.0):
+    "expect_showing": '''def expect_showing(gui, role, name, timeout=5.0, within=None):
     """Fail unless the named element is present and visible."""
-    element = _expect_element(gui, role, name, timeout)
+    element = _expect_element(gui, role, name, timeout, within)
     if gui.wait_until(lambda: element.visible, timeout=timeout):
         return
     raise AssertionError(f"expected {name!r} to be showing, but it is not visible")
