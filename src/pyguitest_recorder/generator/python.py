@@ -1020,10 +1020,8 @@ class PythonGenerator:
     def _window_lookup(self, window: WindowRef, wait: float, state: _State) -> str:
         """Render the call that finds `window` again at replay time.
 
-        `wait_for_window` takes a *regex* and searches with it, so a title is
-        escaped on the way in -- "Untitled Document 1 (modified)" is otherwise
-        a pattern that matches a different string than the one recorded, and
-        one containing an unbalanced bracket does not compile at all.
+        `wait_for_window` matches a plain-string title literally, as a
+        substring -- see `_title_pattern`.
 
         A title seen to drift during the recording is not used at all. Titles
         drift constantly, an editor appending its document name being the
@@ -1375,7 +1373,9 @@ _HELPER_SOURCE = {
     "expect_window": '''def expect_window(gui, title, timeout=5.0):
     """Fail unless a window whose title matches `title` is open.
 
-    `title` is a regular expression, the same as `wait_for_window` takes.
+    `title` is matched the same way `wait_for_window` takes it: a plain
+    string matches literally, as a substring; pass a compiled regex for
+    pattern matching.
     """
     if gui.wait_for_window(title, timeout=timeout) is not None:
         return
@@ -1397,20 +1397,20 @@ which is earlier than the application finishes responding to it.
 
 
 def _title_pattern(title: str) -> str:
-    """Render a window title as the regex literal `wait_for_window` wants.
+    r"""Render a window title as the literal `wait_for_window` wants.
 
-    Escaped, because the title is matched as a pattern and not as text:
-    "Document (1)" is otherwise a pattern that matches "Document 1", and a
-    title with an unbalanced bracket in it does not compile at all.
-
-    The space and hyphen escaping `re.escape` also does is undone. Neither
-    changes what the pattern matches -- a hyphen is only special inside a
-    character class -- and titles are full of both, so leaving them in makes
-    every generated window lookup unreadable for no benefit: an escaped
-    hyphen and escaped spaces read far worse than they need to, for the one
-    bracket that actually had to be escaped.
+    pyguitest's own `wait_for_window`/`find_window`/`window_element` match a
+    plain string literally (as a substring), escaping it internally -- only
+    a compiled `re.Pattern` is treated as regex. Before that fix, a plain
+    string was always compiled as regex, so this function used to escape the
+    title itself: "Document (1)" was otherwise a pattern matching "Document
+    1", and a title with an unbalanced bracket did not compile at all.
+    Escaping here too, now, would double-escape -- `re.escape` on a string
+    that already contains literal backslashes from a first escaping pass
+    turns `\\(` into `\\\\(`, which then matches nothing real. So this emits
+    the raw title unchanged and lets pyguitest do the one escape.
     """
-    return _literal(re.escape(title).replace("\\ ", " ").replace("\\-", "-"))
+    return _literal(title)
 
 
 def _hotkey_string(keys: tuple[str, ...]) -> str:

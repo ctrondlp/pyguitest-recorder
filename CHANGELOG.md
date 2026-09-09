@@ -166,6 +166,23 @@ source.
 
 ### Fixed
 
+- **Generated window lookups would have started silently failing to match
+  any title containing regex metacharacters, once pyguitest is upgraded.**
+  `_title_pattern()` used to escape a recorded title before emitting it
+  (`"Document (1)"` -> `"Document \(1\)"` in the generated source), because
+  `wait_for_window`/`find_window`/`window_element` used to compile a plain
+  string as a regex unconditionally. That upstream pyguitest behavior
+  itself changed -- found live, validating against a real KDE Plasma 6 /
+  KWin session, where `window_element(window.title)` raised
+  `WindowNotFound` for GNOME Text Editor's own default title, "New Document
+  (Draft) - Text Editor" -- to match a plain string literally, as a
+  substring, escaping it internally instead. Once pyguitest carries that
+  fix, this generator's own pre-escaping would have doubled up: `re.escape`
+  on a string that already contains literal backslashes turns `\(` into
+  `\\(`, which matches nothing real. `_title_pattern()` now emits the raw
+  title unchanged and lets pyguitest do the one escape; the floor on
+  `pyguitest` bumped accordingly (see `pyproject.toml`).
+
 - **Two same-named elements in different containers were indistinguishable
   in generated scripts.** `ElementRef.path` (the chain of named ancestors)
   was recorded but never read by the generator, so a Save button in a Save

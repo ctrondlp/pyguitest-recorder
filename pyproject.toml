@@ -64,7 +64,18 @@ dependencies = [
     # the oldest that might work: `validate()` checks every emitted call
     # against the installed Session, so an older pyguitest would not fail
     # loudly, it would quietly accept a script naming methods it lacks.
-    "pyguitest>=0.6.0",
+    #
+    # 0.7.0 (exact number pending that release) is the floor specifically
+    # because find_windows/find_window/wait_for_window/window_element
+    # changed how a plain-string `title` matches: literally, as a substring,
+    # rather than always compiled as regex. _title_pattern() in
+    # generator/python.py used to pre-escape titles for the old behavior;
+    # it no longer does, since escaping here too would now double-escape
+    # and break matching on any title with regex metacharacters. Generated
+    # scripts run against an older pyguitest would silently mismatch
+    # instead of failing loudly, the same risk this comment already warns
+    # about for `validate()` -- so this floor is load-bearing, not routine.
+    "pyguitest>=0.7.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

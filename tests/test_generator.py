@@ -1,5 +1,4 @@
 import ast
-import re
 
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.model import (
@@ -355,24 +354,21 @@ def test_wait_for_idle_with_no_window_degrades_to_a_sleep():
     assert validate(source) == []
 
 
-def test_a_window_title_is_matched_as_text_not_as_a_pattern():
-    # wait_for_window takes a regex. "Document (1)" unescaped is a pattern
-    # that matches a different string, and an unbalanced bracket does not
-    # compile at all.
+def test_a_window_title_with_regex_metacharacters_is_emitted_unescaped():
+    # pyguitest's own wait_for_window matches a plain string literally now
+    # (as a substring) -- escaping it here too would double-escape and break
+    # the match (see _title_pattern's docstring). "Doc (1) [draft]+" is
+    # exactly the kind of title that broke under the old double-escaping
+    # regression this guards against.
     title = "Doc (1) [draft]+"
     source = render(
         WindowActivate(window=WindowRef(title=title, geometry=(0, 0, 9, 9)))
     )
-    pattern = window_pattern(source)
-    assert re.search(pattern, title)
-    # ...and the pattern is not one that would also match a different window.
-    assert not re.search(pattern, "Doc 1 draft")
+    assert window_pattern(source) == title
     assert validate(source) == []
 
 
-def test_a_title_pattern_keeps_its_spaces_readable():
-    # re.escape backslashes spaces too, which changes nothing about what the
-    # pattern matches and makes every generated window lookup unreadable.
+def test_a_title_with_no_metacharacters_is_emitted_unchanged():
     source = render(WindowActivate(window=WindowRef(title="Text Editor")))
     assert window_pattern(source) == "Text Editor"
 
@@ -557,14 +553,12 @@ def expect_window_pattern(source):
     raise AssertionError("no expect_window call in the generated source")
 
 
-def test_a_window_check_escapes_the_title_it_matches_on():
-    # `expect_window` searches with a regex, the same trap the window lookups
-    # had: "Document (1)" is otherwise a pattern matching "Document 1".
+def test_a_window_check_emits_its_title_unescaped():
+    # expect_window forwards straight to wait_for_window, which now matches
+    # a plain string literally -- see _title_pattern.
     window = WindowRef(title="Document (1)", app_id="org.example.App")
     source = render(check("window", window=window))
-    pattern = expect_window_pattern(source)
-    assert re.search(pattern, "Document (1)")
-    assert not re.search(pattern, "Document 1")
+    assert expect_window_pattern(source) == "Document (1)"
     assert validate(source) == []
 
 
@@ -849,16 +843,15 @@ def test_a_long_window_title_is_cut_at_a_word_boundary():
     assert "hello_there_draft_text = " in source
 
 
-def test_a_hyphen_in_a_title_is_not_escaped_into_noise():
-    # A hyphen is only special inside a character class, and titles are full
-    # of them: "Test Hello \\(Draft\\) \\- Text Editor" reads badly for the
-    # one bracket that actually needed escaping.
+def test_a_hyphen_and_parens_in_a_title_are_not_escaped_at_all():
+    # pyguitest matches a plain string literally now, so nothing here needs
+    # escaping -- "Hello \\(Draft\\) \\- Text Editor" would read badly for no
+    # benefit, and would in fact be wrong: pyguitest would escape it a
+    # second time, turning the literal backslashes into a pattern that
+    # matches none of this title's real characters.
     window = WindowRef(title="Hello (Draft) - Text Editor")
     source = render(WindowActivate(window=window))
-    pattern = window_pattern(source)
-    assert pattern == r"Hello \(Draft\) - Text Editor"
-    assert re.search(pattern, "Hello (Draft) - Text Editor")
-    assert not re.search(pattern, "Hello Draft - Text Editor")
+    assert window_pattern(source) == "Hello (Draft) - Text Editor"
 
 
 def full(*events, **options):
