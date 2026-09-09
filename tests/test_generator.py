@@ -715,6 +715,37 @@ def test_disambiguation_walks_past_a_shared_immediate_parent(window):
     assert validate(source) == []
 
 
+def test_disambiguation_rejects_an_ancestor_shared_at_a_different_depth(window):
+    # An extra unnamed wrapper closest to `a`'s leaf shifts every named
+    # ancestor beyond it one level deeper than the same names sit at in
+    # `b`'s path -- "General" is `a`'s depth-2 ancestor but `b`'s depth-1
+    # one. Comparing ancestors only at matching depths (the old behaviour)
+    # missed that "General" is shared, and would have scoped `a` to a
+    # container `b` sits in too, matching whichever panel named "General"
+    # pyguitest's search happened to find first.
+    a = ElementRef(
+        role="push button",
+        name="Save",
+        path=(("box", ""), ("panel", "General"), ("dialog", "Prefs")),
+    )
+    b = ElementRef(
+        role="push button",
+        name="Save",
+        path=(("panel", "General"), ("dialog", "Prefs")),
+    )
+    recording = Recording(
+        events=[
+            Click(target=Target(x=1, y=2, window=window, element=a)),
+            Click(target=Target(x=3, y=4, window=window, element=b)),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "WARNING: 2 elements named" in source
+    assert "told apart by ancestry" in source
+    assert "within=" not in source
+    assert validate(source) == []
+
+
 def test_an_unresolvable_collision_warns_instead_of_guessing(window):
     # Both elements sit only under unnamed ancestors, at different depths --
     # their full (role, name, path) keys differ, so this is a real collision,

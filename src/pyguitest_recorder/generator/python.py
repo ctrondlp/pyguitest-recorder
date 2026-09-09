@@ -191,7 +191,19 @@ class GeneratorOptions:
 _ElementKey = tuple[str, str, tuple[tuple[str, str], ...]]
 """An element's (role, name, ancestry path) -- what tells two mentions of the
 same widget apart from two different widgets that happen to share a role and
-a name."""
+a name.
+
+Known limitation: two genuinely distinct widgets that also share their full
+ancestry path -- role and name identical at every level, such as repeated
+rows in a list with no per-row identifying name -- are indistinguishable by
+this key and collapse onto one `_ElementKey` in `_compute_element_scopes`,
+so the second one silently loses its collision warning and `within=`
+scoping. Nothing in `ElementRef` currently carries a signal that would tell
+them apart without also risking false collisions for a genuinely repeated
+reference to the same widget (e.g. `extents`, which changes if the window
+moves between two clicks on it). Resolving this needs a stable per-node
+identity from the accessibility layer, which pyguitest does not expose
+today -- see the PR #3 review thread this was flagged in."""
 
 
 @dataclass
@@ -298,28 +310,24 @@ def _disambiguating_ancestor(
     with the least indirection) rather than from the root, and skips any
     ancestor with no name -- a nameless container cannot be found again by
     `gui.element(name=...)` either, so binding one would just move the
-    ambiguity rather than resolve it. Returns None when nothing in the whole
-    path is both named and unshared, which does happen (two identically
-    structured, identically named panes -- see docs/troubleshooting.md) and
-    is a real limit of ancestry-based disambiguation, not a bug in finding it.
+    ambiguity rather than resolve it. A candidate is rejected if it appears
+    *anywhere* in another element's path, not just at the matching depth --
+    `_ancestor_var` binds it with an unscoped `gui.element(role=, name=)`,
+    which has no notion of depth, so an ancestor shared at a different depth
+    would still resolve ambiguously at replay time. Returns None when
+    nothing in the whole path is both named and unshared, which does happen
+    (two identically structured, identically named panes -- see
+    docs/troubleshooting.md) and is a real limit of ancestry-based
+    disambiguation, not a bug in finding it.
     """
     path = ref.path
     for depth in range(1, len(path) + 1):
         candidate = path[-depth]
         if not candidate[1]:
             continue
-        if all(_ancestor_at(other, depth) != candidate for other in others):
+        if all(candidate not in other.path for other in others):
             return candidate
     return None
-
-
-def _ancestor_at(ref: ElementRef, depth: int) -> tuple[str, str] | None:
-    """`ref`'s ancestor `depth` steps up from its immediate parent.
-
-    None past the root -- different elements' paths are rarely the same
-    length.
-    """
-    return ref.path[-depth] if depth <= len(ref.path) else None
 
 
 def _literal(value: str | int | float | bool | None) -> str:
