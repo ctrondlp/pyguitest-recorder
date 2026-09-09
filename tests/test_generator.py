@@ -181,6 +181,23 @@ def test_wait_for_element_renders_a_role_constant():
     assert 'gui.wait_for_element(role="dialog", name="Save As", timeout=10)' in source
 
 
+def test_wait_for_an_ambiguous_element_is_scoped_too(window):
+    # The third element-rendering path (sync-inferred waits, alongside
+    # clicks and checks) needs the identical ancestry scoping: waiting for
+    # one of two same-named elements to appear is just as ambiguous as
+    # clicking or checking it.
+    in_import = ElementRef(role="push button", name="OK", path=(("dialog", "Import"),))
+    in_export = ElementRef(role="push button", name="OK", path=(("dialog", "Export"),))
+    source = render(
+        WaitForElement(element=in_import),
+        Click(target=Target(x=1, y=2, window=window, element=in_export)),
+    )
+    assert 'gui.element(role="dialog", name="Import")' in source
+    assert "gui.wait_for_element(" in source
+    assert "within=import_window" in source
+    assert validate(source) == []
+
+
 def test_a_drifting_title_is_dropped_for_the_app_id():
     drifting = WindowRef(
         title="Untitled - Editor", app_id="org.x.E", title_stable=False
@@ -501,6 +518,33 @@ def test_a_showing_check_is_the_floor_for_a_button():
     assert validate(source) == []
 
 
+def test_a_check_on_an_ambiguous_element_is_scoped_too(window):
+    # Ancestry disambiguation was built for clicked elements first; checks
+    # go through a separate rendering path (_expect, not _element_expr) and
+    # need the exact same scoping, not a parallel implementation that only
+    # clicks get to benefit from.
+    in_import = ElementRef(
+        role="check box", name="Read only", path=(("dialog", "Import"),)
+    )
+    in_export = ElementRef(
+        role="check box", name="Read only", path=(("dialog", "Export"),)
+    )
+    source = render(
+        Assertion(
+            check="checked",
+            target=Target(x=1, y=2, window=window, element=in_import),
+            expected=True,
+        ),
+        Click(target=Target(x=3, y=4, window=window, element=in_export)),
+    )
+    assert 'gui.element(role="dialog", name="Import")' in source
+    assert "expect_checked(" in source
+    # Long enough to be reformatted onto multiple lines by ruff, so check the
+    # pieces rather than one contiguous call string.
+    assert "within=import_window" in source
+    assert validate(source) == []
+
+
 def expect_window_pattern(source):
     """The regex the generated check will actually search titles with."""
     for node in ast.walk(ast.parse(source)):
@@ -620,6 +664,93 @@ def test_a_button_recorded_as_button_still_names_the_role_constant(window):
         Click(target=Target(x=1, y=2, window=window, element=element)),
     )
     assert "Role.PUSH_BUTTON" in source
+    assert validate(source) == []
+
+
+def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
+    # A "Save" button in a Save As dialog and one in Preferences: identical
+    # role+name, so an unscoped gui.element(role=..., name="Save") would
+    # match whichever pyguitest's search finds first. "dialog" has no Role
+    # constant, so the ancestor renders as a plain role= string -- only the
+    # ambiguous push-button role does.
+    save_as = ElementRef(role="push button", name="Save", path=(("dialog", "Save As"),))
+    preferences = ElementRef(
+        role="push button", name="Save", path=(("dialog", "Preferences"),)
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=save_as)),
+        Click(target=Target(x=3, y=4, window=window, element=preferences)),
+    )
+    assert 'gui.element(role="dialog", name="Save As")' in source
+    assert 'gui.element(role="dialog", name="Preferences")' in source
+    assert 'gui.element(role=Role.PUSH_BUTTON, name="Save", within=' in source
+    # No unscoped mention of the ambiguous pair -- every use of it is scoped.
+    assert 'gui.element(role=Role.PUSH_BUTTON, name="Save")' not in source
+    assert "could not be told apart" not in source
+    assert validate(source) == []
+
+
+def test_disambiguation_walks_past_a_shared_immediate_parent(window):
+    # Both buttons sit in a container named "Content" -- identical at the
+    # nearest level -- so the disambiguating ancestor has to be found one
+    # level further out, where the two dialogs' own names differ.
+    in_import = ElementRef(
+        role="push button",
+        name="OK",
+        path=(("frame", "Import"), ("panel", "Content")),
+    )
+    in_export = ElementRef(
+        role="push button",
+        name="OK",
+        path=(("frame", "Export"), ("panel", "Content")),
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=in_import)),
+        Click(target=Target(x=3, y=4, window=window, element=in_export)),
+    )
+    assert 'gui.element(role="frame", name="Import")' in source
+    assert 'gui.element(role="frame", name="Export")' in source
+    # The shared "Content" panel never gets bound -- it disambiguates nothing.
+    assert 'name="Content"' not in source
+    assert validate(source) == []
+
+
+def test_an_unresolvable_collision_warns_instead_of_guessing(window):
+    # Both elements sit only under unnamed ancestors, at different depths --
+    # their full (role, name, path) keys differ, so this is a real collision,
+    # but nothing in either path is nameable, so there is nothing left to
+    # disambiguate with. Must not silently emit two identical unscoped
+    # lookups that pyguitest's search would resolve arbitrarily.
+    #
+    # The warning is header-only (like the "check that resolved to nothing"
+    # warning), so this goes through generate() directly rather than the
+    # include_header=False test helper.
+    a = ElementRef(role="label", name="Status", path=(("panel", ""),))
+    b = ElementRef(role="label", name="Status", path=(("panel", ""), ("group", "")))
+    recording = Recording(
+        events=[
+            Click(target=Target(x=1, y=2, window=window, element=a)),
+            Click(target=Target(x=3, y=4, window=window, element=b)),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "WARNING: 2 elements named" in source
+    # The comment wraps, so match a phrase that survives the break.
+    assert "could not be told" in source
+    assert "within=" not in source
+    assert validate(source) == []
+
+
+def test_the_same_element_mentioned_twice_is_not_treated_as_a_collision(window):
+    # One widget, clicked twice -- same role, name AND path -- must still
+    # render as an ordinary unscoped lookup, not trigger scoping.
+    element = ElementRef(role="push button", name="Retry", path=(("dialog", "Sync"),))
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=element)),
+        Click(target=Target(x=3, y=4, window=window, element=element)),
+    )
+    assert "within=" not in source
+    assert "could not be told apart" not in source
     assert validate(source) == []
 
 

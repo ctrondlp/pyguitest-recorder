@@ -166,6 +166,38 @@ source.
 
 ### Fixed
 
+- **Two same-named elements in different containers were indistinguishable
+  in generated scripts.** `ElementRef.path` (the chain of named ancestors)
+  was recorded but never read by the generator, so a Save button in a Save
+  As dialog and one in Preferences both rendered as the identical
+  `gui.element(role=..., name="Save")`, matching whichever one pyguitest's
+  search happened to find first. The generator now scans the whole
+  recording once for (role, name) collisions and scopes each colliding
+  element to the nearest ancestor in its own path that is not shared by any
+  other member of the group, emitting `within=<ancestor>` (walking outward
+  past a shared immediate parent when needed, and skipping any ancestor
+  with no name -- a nameless container cannot be looked up either). Where
+  no named, unshared ancestor exists anywhere in the path -- two
+  identically structured panes, say -- the elements are left unscoped, but
+  the script now carries a header warning naming the collision instead of
+  silently guessing. Checks (`expect_text`/`expect_checked`/`expect_showing`)
+  and sync-inferred waits (`wait_for_element`) get the same scoping as
+  clicks -- both render through separate paths (`_expect` and
+  `_emit_waitforelement`, not `_element_expr`) that needed the identical
+  fix, and now take `within=` too.
+
+- **X11 keyboard capture only ever read Shift, ignoring CapsLock and
+  AltGr/group-2 layouts entirely.** `_key()` looked up a keysym at index 0
+  or 1 -- group 1, unshifted or shifted -- so a CapsLock-affected letter or
+  an AltGr-produced character (group 2, selected by whichever modifier the
+  server binds to Mode_switch/ISO_Level3_Shift) recorded whatever group 1
+  happened to hold at that keycode instead. `_resolve_keysym` now finds the
+  server's actual group-switch modifier once in `start()` (not assumed to
+  be Mod5 -- `xmodmap` can bind it to any of Mod1-Mod5, and a layout with
+  no third level leaves it unset, which reads as before this fix) and
+  treats Lock as a second Shift only for a keysym pair that is actually one
+  letter's two cases, matching `XLookupString`'s own interpretation rules.
+
 - **A malformed or hand-edited recording could leak a display connection, or
   fail with a bare `KeyError`/`TypeError` instead of a message naming what
   was wrong.** Three items from the external review batch, all real:

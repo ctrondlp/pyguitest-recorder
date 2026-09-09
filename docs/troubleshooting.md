@@ -129,10 +129,18 @@ different position than when it was recorded. That is the failure mode
 coordinates have; the fix is making the target findable by name — see
 [Why is my script all coordinates?](#why-is-my-script-all-coordinates).
 
-**If it clicked a named element and got the wrong one**, the name is ambiguous
-within that window — two "Remove" buttons, say. The recorder emits what it
-resolved, and matching picks the first. Disambiguate the generated call by
-hand:
+**If it clicked a named element and got the wrong one**, two elements shared a
+role and a name — two "Remove" buttons, say — and the generator could not
+tell them apart. It tries to on its own first: when the elements' recorded
+ancestry differs by a *named* container anywhere above them, it scopes each
+one to that container automatically, emitting `within=<ancestor>` with no
+edit needed.
+
+That only fails when nothing in either element's path is both named and
+unique to it — two identically structured, identically named panes, say. In
+that case the script header carries a warning naming the collision, and the
+generated calls are left unscoped, matching whichever pyguitest's search
+finds first. Disambiguate by hand:
 
 ```python
 gui.element(

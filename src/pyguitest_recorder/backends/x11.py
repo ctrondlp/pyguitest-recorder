@@ -43,6 +43,7 @@ _BUTTON_RELEASE = 5
 _MOTION = 6
 
 _SHIFT_MASK = 1 << 0
+_LOCK_MASK = 1 << 1
 
 # X11 reports the wheel as buttons. The signs here convert to pyguitest's
 # convention on the way in, so nothing downstream has to know X11's: `dy`
@@ -109,6 +110,7 @@ class X11CaptureBackend:
         self._thread: threading.Thread | None = None
         self._queue: queue.Queue[Any] = queue.Queue()
         self._keysyms: dict[int, str] = {}
+        self._group_mask: int | None = None
 
     def start(self) -> None:
         """Open both connections, create the record context and begin pumping.
@@ -131,6 +133,7 @@ class X11CaptureBackend:
                     "x11-xserver-utils / xorg-x11-server-extra package"
                 )
             self._keysyms = _keysym_names(xlib)
+            self._group_mask = _group_switch_mask(self._control, xlib)
             # Created on the pump connection because that is the one that will
             # enable it; see the module docstring.
             self._context = self._pump.record_create_context(
@@ -230,10 +233,7 @@ class X11CaptureBackend:
 
     def _key(self, event: Any, kind: int, now: float) -> RawEvent:
         """Convert a key event, resolving the keysym under the shift state."""
-        shifted = bool(event.state & _SHIFT_MASK)
-        keysym = self._control.keycode_to_keysym(event.detail, 1 if shifted else 0)
-        if keysym == 0:
-            keysym = self._control.keycode_to_keysym(event.detail, 0)
+        keysym = self._resolve_keysym(event.detail, event.state)
         return RawEvent(
             kind="key_press" if kind == _KEY_PRESS else "key_release",
             timestamp=now,
@@ -243,6 +243,42 @@ class X11CaptureBackend:
             keysym=self._keysyms.get(keysym, f"0x{keysym:x}"),
             text=_printable(keysym),
         )
+
+    def _resolve_keysym(self, keycode: int, state: int) -> int:
+        """Pick the one keysym this keycode+modifier state actually produces.
+
+        The old version only ever read index 0 or 1 -- group 1, unshifted or
+        shifted -- so an AltGr-produced character (group 2, selected by
+        whichever modifier the server binds to Mode_switch/ISO_Level3_Shift)
+        was recorded as whatever group 1 happens to hold at that keycode, and
+        CapsLock was ignored outright rather than treated as a latched Shift.
+        Both are core-protocol default-interpretation rules
+        (`XLookupString`'s documented behaviour with no per-key override,
+        which this server-side capture has no way to ask for anyway), not a
+        guess:
+
+        - Group 2 is active when `_group_mask` (found once in `start()`) is
+          set in `state`; group 1 otherwise. A layout with no third level
+          binds no modifier to either keysym, `_group_mask` is None, and this
+          always reads group 1 -- unchanged from before.
+        - Within a group, Shift and Lock combine by this identity: Lock only
+          matters for a keysym pair whose two members are the letter-case
+          pair of each other (`_is_case_pair`) -- CapsLock has no effect on
+          digits or punctuation -- and when it does, it acts as a second
+          Shift: `effective_shift = shift ^ (lock and case_pair)`, which is
+          why Shift+CapsLock on a letter types lowercase.
+        """
+        base_index = 2 if self._group_mask and (state & self._group_mask) else 0
+        unshifted = self._control.keycode_to_keysym(keycode, base_index)
+        shifted = self._control.keycode_to_keysym(keycode, base_index + 1)
+        if shifted == 0:
+            shifted = unshifted
+        lock_shifts = bool(state & _LOCK_MASK) and _is_case_pair(unshifted, shifted)
+        effective_shift = bool(state & _SHIFT_MASK) ^ lock_shifts
+        keysym = shifted if effective_shift else unshifted
+        if keysym == 0:
+            keysym = self._control.keycode_to_keysym(keycode, 0)
+        return int(keysym)
 
     def events(self) -> Iterator[RawEvent]:
         """Yield captured events until `stop` is called."""
@@ -332,6 +368,54 @@ def _keysym_names(xlib: dict[str, Any]) -> dict[int, str]:
         if attribute.startswith("XK_"):
             names.setdefault(getattr(XK, attribute), attribute[3:])
     return names
+
+
+def _group_switch_mask(display: Any, xlib: dict[str, Any]) -> int | None:
+    """The `event.state` bit that selects keyboard group 2 (AltGr), if any.
+
+    Not assumed to be Mod5: `xmodmap` can bind Mode_switch/ISO_Level3_Shift to
+    any of Mod1-Mod5, and a layout with no third level binds neither, in
+    which case group 2 is simply unreachable and this returns None -- the
+    caller then always reads group 1, unchanged from before this fix.
+    Requires `_keysym_names` to have already loaded the "xkb" keysym group:
+    `ISO_Level3_Shift` lives there, not in the sets `XK` loads by default
+    (see that function's own docstring).
+    """
+    XK = xlib["XK"]
+    targets = {
+        keysym
+        for keysym in (
+            getattr(XK, "XK_Mode_switch", None),
+            getattr(XK, "XK_ISO_Level3_Shift", None),
+        )
+        if keysym is not None
+    }
+    if not targets:
+        return None
+    with contextlib.suppress(Exception):
+        for index, keycodes in enumerate(display.get_modifier_mapping()):
+            if index < 3:  # Shift, Lock, Control are never the group switch
+                continue
+            for keycode in keycodes:
+                if keycode and display.keycode_to_keysym(keycode, 0) in targets:
+                    return 1 << index
+    return None
+
+
+def _is_case_pair(unshifted: int, shifted: int) -> bool:
+    """Whether two keysyms are the same letter's lower- and upper-case forms.
+
+    This is what CapsLock's own effect is conditioned on at the core-protocol
+    level: it acts as a second Shift for a cased letter and does nothing for
+    a digit or punctuation mark, which is not knowable from the keysym values
+    alone without checking the pair actually is a case pair. Limited to the
+    Latin-1 range `_printable` already covers -- this backend has no way to
+    case-fold a keysym its own `keysym_to_string` cannot turn into text.
+    """
+    if unshifted == shifted:
+        return False
+    lower, upper = _printable(unshifted), _printable(shifted)
+    return bool(lower and upper and lower != upper and lower.lower() == upper.lower())
 
 
 def _printable(keysym: int) -> str:
