@@ -1562,6 +1562,10 @@ def _bindings(node: ast.AST) -> set[str]:
     if isinstance(node, ast.arg):
         return {node.arg}
     if isinstance(node, ast.alias):
+        # `import a.b.c` binds only `a` in the enclosing scope (`a.b.c` is
+        # reached through it, never as its own name) -- split(".")[0] is
+        # that rule, not an arbitrary truncation. An `as` alias has no dots
+        # to strip, so it passes through unchanged either way.
         return {(node.asname or node.name).split(".")[0]}
     if isinstance(node, ast.ExceptHandler) and node.name:
         return {node.name}
