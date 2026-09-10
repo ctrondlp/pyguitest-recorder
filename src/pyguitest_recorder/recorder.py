@@ -20,6 +20,7 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 
 from .analyzer import (
@@ -113,6 +114,8 @@ def describe_environment(
     of a recording made on a private X server.
     """
     environment = Environment(capture_backend=backend_name)
+    now = datetime.now().astimezone()
+    environment.recorded_at = now.strftime("%Y-%m-%d %H:%M:%S %Z")
     try:
         import pyguitest
 
@@ -121,6 +124,7 @@ def describe_environment(
         detected = pyguitest.detect(env) if env else pyguitest.detect()
         environment.session_type = str(getattr(detected, "session_type", "") or "")
         environment.compositor = str(getattr(detected, "compositor", "") or "")
+        environment.desktop = str(getattr(detected, "desktop", "") or "")
     except Exception as exc:  # noqa: BLE001 - detection is diagnostic, not required
         environment.notes.append(f"environment detection failed: {exc}")
     environment.display = os.environ.get("DISPLAY", "")

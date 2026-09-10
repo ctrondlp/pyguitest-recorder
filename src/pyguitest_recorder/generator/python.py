@@ -752,7 +752,7 @@ class PythonGenerator:
         warning = (
             "typed text went to a field this recording could not identify, so "
             "it is in this script verbatim. Password fields are only withheld "
-            "when they can be recognised -- if any of this was a secret, "
+            "when they can be recognized -- if any of this was a secret, "
             "re-record with --sensitive and treat this file as credential-"
             "bearing until you have checked it"
         )
@@ -1265,11 +1265,13 @@ def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
     # calls were checked against, and this says which recorder wrote them --
     # which is the question asked first when a generated script turns out to
     # have a bug in its own shape rather than in the application.
+    parenthetical = ", ".join(p for p in (env.compositor, env.desktop) if p)
     detail = [
         f"Recorder:    pyguitest-recorder {env.recorder_version or 'unknown'}",
+        f"Recorded at: {env.recorded_at or 'unknown'}",
         f"Profile:     {PROFILE}",
         f"Recorded on: {env.session_type or 'unknown'} "
-        f"{('(' + env.compositor + ')') if env.compositor else ''}".rstrip(),
+        f"{('(' + parenthetical + ')') if parenthetical else ''}".rstrip(),
         f"Capture:     {env.capture_backend or 'unknown'}",
         f"pyguitest:   {env.pyguitest_version or 'unknown'}",
     ]
@@ -1485,6 +1487,7 @@ def _format(source: str) -> str:
             input=source,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=30,
             check=False,
         )
