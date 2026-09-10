@@ -191,12 +191,17 @@ cannot race a redraw. Full table in
 
 ## Install
 
+### From PyPI
+
 ```sh
 pip install 'pyguitest-recorder[x11,atspi]'
 ```
 
 `x11` brings `python-xlib`, which capture needs. `atspi` is what lets a click
 be recorded as a name instead of a coordinate.
+
+**Not on PyPI yet** — nothing has been released, so until then use the clone
+below.
 
 ### From a clone
 
