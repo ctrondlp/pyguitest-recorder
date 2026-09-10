@@ -91,3 +91,74 @@ jobs:
 
       - name: Record a real application and check what came out
         run: ./scripts/live-capture-check.py
+
+  build:
+    name: build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - run: pip install build twine
+      - run: python -m build
+
+      # A PyPI version number can never be reused, so a tag disagreeing with
+      # the packaged version has to fail here rather than ship. Read back out
+      # of the built artifact, not out of the source, so it checks what would
+      # actually be uploaded. Skipped on branch pushes, where there is no tag.
+      - name: Check the tag matches the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.tar.gz | sed -E 's|.*/pyguitest_recorder-(.+)\.tar\.gz|\1|')
+          echo "tag=$tag packaged=$built"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the packaged"
+            echo "::error::version $built -- fix __version__ in"
+            echo "::error::src/pyguitest_recorder/__init__.py or retag."
+            exit 1
+          fi
+
+      # Catches a README that renders on GitHub but not on PyPI, which is
+      # otherwise only discovered once the upload is already permanent.
+      - run: python -m twine check --strict dist/*
+
+      # Handed to the publish job below rather than rebuilt there, so what
+      # reaches PyPI is byte-for-byte what twine just checked.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Publishes to PyPI on a v* tag via Trusted Publishing (OIDC): PyPI is
+  # configured to trust this repo/workflow/environment, so there is no API
+  # token in secrets to leak or rotate. `id-token: write` is what lets the
+  # runner mint the short-lived credential; the action does the rest.
+  #
+  # Requires one-time setup on pypi.org first -- see "Releasing" in
+  # CONTRIBUTING.md. Until that exists, a tag push fails here rather than
+  # silently publishing nothing.
+  publish:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tests, lint, live, build]
+    runs-on: ubuntu-latest
+    # Must match the environment named in the PyPI publisher config. A
+    # required reviewer on it makes each publish a deliberate approval
+    # rather than a side effect of pushing a tag.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyguitest-recorder
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
