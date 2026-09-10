@@ -166,6 +166,24 @@ source.
 
 ### Fixed
 
+- **A click on a window's own titlebar/close button recorded as a click
+  inside a different, unrelated window.** pyguitest deliberately reports
+  only a window's client rectangle, never the window manager's own
+  decoration -- but `DesktopResolver`'s hit test used plain bounding-box
+  containment over that rectangle alone, so a click on a titlebar or its
+  close/minimize/shade buttons (which sit outside it) fell straight through
+  to whatever *other* window's rect happened to occupy that screen pixel,
+  which is nearly always something, since decorations hug a window's edge.
+  Found live on Xfce/xfwm4: closing "Application Finder" by its titlebar X
+  was recorded as a click deep inside a terminal window sitting behind it --
+  confirmed by computing that the recorded coordinates landed within a
+  couple pixels of the titlebar region twice, in two independent recordings.
+  `_window()` now prefers the active window over a plain hit-test match when
+  the point falls just outside the active window's rect (within the new
+  `DECORATION_SLACK`, sized from a live `_NET_FRAME_EXTENTS` reading) but the
+  plain match found something else -- the active window is almost always the
+  one whose chrome was just clicked.
+
 - **`Recorder.start()` leaked the pyguitest session if the capture backend
   failed to start after the session was already open.** The session opens
   before `self._backend.start()` is called, with no try/except around that
