@@ -46,6 +46,21 @@ manager reports, which is ordinary. Being *larger than the whole window* is
 not, and that is what this catches.
 """
 
+DECORATION_SLACK = 40
+"""Pixels outside a window's client rect still treated as that window's own.
+
+pyguitest reports only the client rectangle (X11::GUITest's own contract,
+kept deliberately thin since not every backend can even see decorations),
+but a reparenting window manager draws the titlebar and borders -- where the
+close/minimize/shade buttons live -- outside it. A click there falls
+through plain bounding-box containment to whatever *other* window's rect
+happens to occupy that screen pixel, which is nearly always something: a
+decoration sits right at a window's edge. Measured live on xfwm4:
+`_NET_FRAME_EXTENTS` of 29px (titlebar) and 5px (borders) for an ordinary
+dialog; 40 gives headroom for taller themes without reaching far enough to
+swallow a genuinely different window sitting flush against this one.
+"""
+
 
 @dataclass(frozen=True)
 class Observation:
@@ -536,6 +551,7 @@ class DesktopResolver:
         if self.session is None:
             return None
         window = self._window_at(x, y, screen)
+        window = self._prefer_decoration_owner(window, x, y)
         if window is None:
             window = self._plausible_active(x, y)
         if window is None:
@@ -543,6 +559,36 @@ class DesktopResolver:
         if window.pid in self.ignore_pids:
             return None
         return self._describe(window)
+
+    def _prefer_decoration_owner(self, window: Any, x: int, y: int) -> Any:
+        """Swap a plain hit-test match for the active window's own decoration.
+
+        Seen live: closing "Application Finder" by its titlebar X recorded a
+        click inside a terminal window sitting behind it, because the X sits
+        outside the client rect pyguitest reports and the terminal's own rect
+        happened to cover that pixel (see DECORATION_SLACK). The active
+        window is almost always the one whose chrome was just clicked -- you
+        do not usually reach past the focused window to close some other one
+        -- so it is preferred whenever the point falls just outside its rect
+        but the plain hit test landed on something else.
+        """
+        active = self._active_window()
+        if active is None or active == window:
+            return window
+        geometry = self._geometry(active)
+        if geometry is None:
+            return window
+        ax, ay, awidth, aheight = geometry
+        if ax <= x < ax + awidth and ay <= y < ay + aheight:
+            # Inside the active window's own client rect: the plain hit test
+            # already agrees, or disagrees for some other reason this slack
+            # is not about.
+            return window
+        near = (
+            ax - DECORATION_SLACK <= x < ax + awidth + DECORATION_SLACK
+            and ay - DECORATION_SLACK <= y < ay + aheight + DECORATION_SLACK
+        )
+        return active if near else window
 
     def _plausible_active(self, x: int, y: int) -> Any:
         """The focused window, but only if it could be the one under the point."""
