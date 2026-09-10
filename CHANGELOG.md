@@ -166,6 +166,48 @@ source.
 
 ### Fixed
 
+- **`Recorder.start()` leaked the pyguitest session if the capture backend
+  failed to start after the session was already open.** The session opens
+  before `self._backend.start()` is called, with no try/except around that
+  last step -- so RECORD being missing, the second X11 connection being
+  refused, or the capture thread failing to start left the session's
+  connections open with nothing to close them: the CLI's own
+  `except CaptureUnavailable: return 1` never reaches `Recorder.stop()`,
+  which only runs in the `finally` around `Recorder.run()` -- a path
+  `start()` failing never lets the caller reach. Fixed by wrapping
+  `self._backend.start()` and calling `self.stop()` before re-raising,
+  mirroring the identical try/except-then-`stop()` pattern
+  `X11CaptureBackend.start()` itself already uses one layer down. Found by
+  a repo-wide bug audit, not live.
+
+- **A `--header` value containing `"""` corrupted the generated file.** The
+  custom header text is spliced directly into the module's own
+  triple-quoted docstring with no escaping, so a licence block or a ticket
+  reference containing an embedded `"""` (a plausible value someone pastes
+  in) closed the docstring early -- the rest of the intended header became
+  bare top-level string statements, and the real closing `"""` further down
+  reopened an unterminated string that swallowed the remainder of the
+  module. `_header()` now escapes an embedded `"""` as `\"""`, which reads
+  as a literal `"""` inside the rendered docstring rather than closing it.
+  Found by a repo-wide bug audit, not live.
+
+- **Two windows launched independently could still collapse onto one
+  generated binding, the same failure class as the app_id-alone bug
+  below, just reopened one field over.** `_window_var`'s dedup key was
+  `(app_id, title)` -- safe against title drift (the resolver pins a
+  window's *first-seen* title and reuses it), but two windows that are
+  genuinely different can still be first seen with the identical title:
+  two "Open File" dialogs from different processes, or two freshly-opened
+  windows of one app with an unnumbered default title. `pid`, which
+  already survives on `WindowRef` for exactly this reason, is now part of
+  the key too, catching every case where the collision is between
+  different processes. It does not catch two windows of the *same*
+  process sharing both an app_id and a first-seen title (two dialogs from
+  one running instance) -- `WindowRef` deliberately carries no live handle
+  to distinguish those (see its own docstring), so they still collapse to
+  one binding; see `_window_var`'s docstring for the full reasoning. Found
+  by a repo-wide bug audit, not live.
+
 - **Generated window lookups would have started silently failing to match
   any title containing regex metacharacters, once pyguitest is upgraded.**
   `_title_pattern()` used to escape a recorded title before emitting it

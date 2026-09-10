@@ -205,7 +205,16 @@ class Recorder:
             resolver=self._resolver,
             started=_now(),
         )
-        self._backend.start()
+        try:
+            self._backend.start()
+        except Exception:
+            # The pyguitest session above is already open by this point --
+            # X11CaptureBackend.start() failing after it (RECORD missing,
+            # the second display connection refused, the thread failing to
+            # start) must not leak it. Mirrors that backend's own
+            # try/except-then-stop pattern one layer up.
+            self.stop()
+            raise
 
     def run(self) -> Recording:
         """Capture until the backend stops, returning the finished recording.

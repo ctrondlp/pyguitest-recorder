@@ -820,6 +820,34 @@ def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
     assert source.count("gui.wait_for_window") == 2
 
 
+def test_two_windows_with_the_same_first_seen_title_do_not_collapse_either():
+    # Found by a repo-wide bug audit, not live: (app_id, title) alone is not
+    # enough either -- two windows launched independently (two "Open File"
+    # dialogs from different processes, an unnumbered default title on two
+    # freshly-opened windows) can be first seen with the identical title,
+    # the same failure class as the app_id-alone bug above, just reopened
+    # one field over. pid, which already survives on WindowRef, is what
+    # distinguishes different processes; see _window_var's own docstring
+    # for the one case even pid cannot catch (two dialogs of one process).
+    first = WindowRef(
+        title="Open File",
+        app_id="org.gnome.TextEditor",
+        pid=100,
+        geometry=(0, 0, 400, 300),
+    )
+    second = WindowRef(
+        title="Open File",
+        app_id="org.gnome.TextEditor",
+        pid=200,
+        geometry=(500, 0, 400, 300),
+    )
+    source = render(
+        WindowActivate(window=first),
+        WindowActivate(window=second),
+    )
+    assert source.count("gui.wait_for_window") == 2
+
+
 def test_a_program_name_app_id_is_not_mistaken_for_reverse_dns():
     # One dot is not reverse-DNS: `check_app.py` was binding to `py`.
     window = WindowRef(title="", app_id="check_app.py")
@@ -889,6 +917,18 @@ def test_a_multi_line_custom_header_keeps_its_shape():
     source = full(KeyStroke(key="Return"), header="Line one.\nLine two.")
     assert '"""Line one.\nLine two.\n' in source
     assert validate(source) == []
+
+
+def test_a_header_containing_triple_quotes_does_not_corrupt_the_module():
+    # Found by a repo-wide bug audit, not live: a licence block or a ticket
+    # reference containing `"""` (a plausible --header value) used to close
+    # the module's own docstring early, turning the rest of the header into
+    # bare top-level string statements and leaving the real closing `"""`
+    # to reopen an unterminated string that swallowed the rest of the file.
+    source = full(KeyStroke(key="Return"), header='Ticket QA-1234"""')
+    assert validate(source) == []
+    assert 'gui.tap_key("Return")' in source
+    assert 'Ticket QA-1234\\"""' in source
 
 
 def test_a_three_key_combination_keeps_every_modifier():
