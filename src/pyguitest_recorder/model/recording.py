@@ -32,6 +32,10 @@ class Environment:
 
     session_type: str = ""
     compositor: str = ""
+    desktop: str = ""
+    """The XDG_CURRENT_DESKTOP name (e.g. "XFCE", "GNOME") -- the desktop
+    environment as branded, not the coarse Compositor family used for
+    backend selection."""
     display: str = ""
     screens: list[tuple[int, int, int, float]] = field(default_factory=list)
     """(index, width, height, scale) for each screen the session reported."""
@@ -41,12 +45,15 @@ class Environment:
     recorder_version: str = ""
     xwayland: bool = False
     notes: list[str] = field(default_factory=list)
+    recorded_at: str = ""
+    """Local date/time the recording started, formatted for display."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-safe dict."""
         return {
             "session_type": self.session_type,
             "compositor": self.compositor,
+            "desktop": self.desktop,
             "display": self.display,
             "screens": [list(s) for s in self.screens],
             "capture_backend": self.capture_backend,
@@ -55,6 +62,7 @@ class Environment:
             "recorder_version": self.recorder_version,
             "xwayland": self.xwayland,
             "notes": list(self.notes),
+            "recorded_at": self.recorded_at,
         }
 
     @classmethod
@@ -63,6 +71,7 @@ class Environment:
         return cls(
             session_type=data.get("session_type", ""),
             compositor=data.get("compositor", ""),
+            desktop=data.get("desktop", ""),
             display=data.get("display", ""),
             screens=[tuple(s) for s in data.get("screens", [])],
             capture_backend=data.get("capture_backend", ""),
@@ -71,6 +80,7 @@ class Environment:
             recorder_version=data.get("recorder_version", ""),
             xwayland=data.get("xwayland", False),
             notes=list(data.get("notes", [])),
+            recorded_at=data.get("recorded_at", ""),
         )
 
 
