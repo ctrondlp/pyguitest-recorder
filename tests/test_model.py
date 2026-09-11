@@ -133,6 +133,29 @@ def test_element_addressable_requires_a_name():
     assert not ElementRef(role="push button").addressable
 
 
+def test_element_clickable_matches_pyguitests_own_fallback():
+    # Element.click() falls back to whichever action is named "click" or
+    # "press", case-insensitively -- see AtspiBackend.Element.click().
+    assert ElementRef(role="push button", name="Save", actions=("click",)).clickable
+    assert ElementRef(role="push button", name="OK", actions=("Press",)).clickable
+    assert not ElementRef(role="label", name="Office", actions=()).clickable
+    assert not ElementRef(role="label", name="Status", actions=("expand",)).clickable
+
+
+def test_element_clickable_defaults_true_when_actions_were_never_recorded():
+    # None means "predates this field", not "confirmed no actions".
+    assert ElementRef(role="push button", name="Save").clickable
+    assert ElementRef(role="push button", name="Save", actions=None).clickable
+
+
+def test_element_actions_round_trip(window):
+    element = ElementRef(role="label", name="Office", actions=())
+    click = Click(target=Target(x=1, y=2, window=window, element=element))
+    rebuilt = event_from_dict(click.to_dict())
+    assert rebuilt.target.element.actions == ()
+    assert not rebuilt.target.element.clickable
+
+
 def test_a_check_round_trips(window, save_button):
     check = Assertion(
         timestamp=3.5,

@@ -105,6 +105,29 @@ def test_a_steady_title_stays_stable():
     assert context.resolve(3, 4).window.title_stable is True
 
 
+def test_a_title_is_stripped_of_surrounding_whitespace():
+    # Seen live on KDE: the same window's title came back with a trailing
+    # space from one backend and without one from another, so a recorded
+    # "Desktop @ QRect(0,0 1920x1080) " never matched the identical-looking
+    # window `wait_for_window` found at replay -- a meaningless whitespace
+    # difference should not be able to break a title match.
+    session = FakeSession(window=FakeWindow(title="  Desktop @ QRect(0,0 1920x1080) "))
+    window = resolver(session).resolve(1, 2).window
+    assert window.title == "Desktop @ QRect(0,0 1920x1080)"
+
+
+def test_whitespace_only_title_changes_do_not_count_as_drift():
+    session = FakeSession(window=FakeWindow(title="Example"))
+    context = resolver(session)
+    first = context.resolve(1, 2)
+    assert first.window.title_stable is True
+
+    session.window.title = "  Example  "
+    second = context.resolve(3, 4)
+    assert second.window.title_stable is True
+    assert second.window.title == "Example"
+
+
 # -- session leakage ---------------------------------------------------------
 
 
@@ -333,6 +356,7 @@ class FakeElement:
         text=None,
         checked=None,
         checkable=False,
+        actions=(),
     ):
         self.role = role
         self.name = name
@@ -343,6 +367,7 @@ class FakeElement:
         self.text = text
         self.checked = checked
         self.checkable = checkable
+        self.actions = list(actions)
 
 
 class ElementSession(FakeSession):
@@ -397,6 +422,23 @@ def test_an_element_is_described_from_what_the_session_says():
     assert target.element.description == "Save the file"
     assert target.element.pid == 77
     assert target.element.extents == (120, 120, 60, 24)
+
+
+def test_an_element_with_no_actions_is_described_as_unclickable():
+    # KDE's Kickoff menu categories are AT-SPI labels with an empty Action
+    # interface -- confirmed live, not a fake session's guess -- and the
+    # generator needs to see that to route around Element.click().
+    element = FakeElement("label", "Office", pid=77, actions=())
+    target = element_resolver(element=element).resolve(130, 130)
+    assert target.element.actions == ()
+    assert not target.element.clickable
+
+
+def test_an_element_with_a_click_action_is_described_as_clickable():
+    element = FakeElement("push button", "Save", pid=77, actions=("click",))
+    target = element_resolver(element=element).resolve(130, 130)
+    assert target.element.actions == ("click",)
+    assert target.element.clickable
 
 
 def test_the_ancestry_walks_the_elements_own_parents():
@@ -594,6 +636,32 @@ def test_a_session_that_raises_on_focus_degrades_quietly():
         raise RuntimeError("the tree went stale")
 
     made.session.focused = boom
+    assert made.focused() is None
+
+
+class _ElementReapedBetweenFocusAndRole:
+    """An element that `session.focused()` could still return, but is gone.
+
+    `.role` raises the way dogtail does for an accessible the bus has
+    already dropped (a real GLib.GError there, stood in for here so this
+    test needs no gi dependency).
+    """
+
+    @property
+    def role(self):
+        raise RuntimeError("atspi_error: No such object path '/org/a11y/x' (1)")
+
+
+def test_an_element_reaped_between_focus_and_its_role_degrades_quietly():
+    # `session.focused()` and `.role` are two separate live bus reads, not
+    # one atomic snapshot -- a menu closing (Escape, most often) between them
+    # is enough to make the second one ask about an accessible already gone.
+    # Seen live: recording stopped with Escape, Escape and the whole process
+    # crashed on this exact GError, losing the recording -- not caught by
+    # the try/except around `session.focused()` alone, since that call had
+    # already returned successfully.
+    made = element_resolver()
+    made.session.focused = lambda: _ElementReapedBetweenFocusAndRole()
     assert made.focused() is None
 
 

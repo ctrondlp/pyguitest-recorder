@@ -22,14 +22,26 @@ from pyguitest_recorder.model import (
 
 
 def window_pattern(source):
-    """The regex the generated script will actually search window titles with."""
+    """The regex the generated script will actually search window titles with.
+
+    A real call site has a literal title; `_expect_window`'s own definition
+    also calls `gui.wait_for_window` internally, but with its `title`
+    parameter, not a literal -- skipped rather than mistaken for the answer.
+    """
     for node in ast.walk(ast.parse(source)):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "wait_for_window"
-        ):
-            return node.args[0].value
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "wait_for_window":
+            title_arg = node.args[0] if node.args else None
+        elif isinstance(func, ast.Name) and func.id == "_expect_window":
+            # `_expect_window(gui, title, timeout=...)` -- title is the
+            # second positional argument, after `gui` itself.
+            title_arg = node.args[1] if len(node.args) > 1 else None
+        else:
+            continue
+        if isinstance(title_arg, ast.Constant):
+            return title_arg.value
     raise AssertionError("no wait_for_window call in the generated source")
 
 
@@ -289,6 +301,33 @@ def test_a_left_click_still_prefers_the_element(window, save_button):
     assert 'gui.button("Save").click()' in source
 
 
+def test_a_click_on_an_element_with_no_atspi_actions_falls_back_to_a_coordinate(
+    window,
+):
+    # KDE's QML-based Kickoff menu publishes its category labels with no
+    # AT-SPI Action interface at all. Element.click() falls back to it only
+    # after dogtail's own coordinate click fails needing GNOME's ponytail
+    # daemon -- absent on KDE -- so with no action either, this element was
+    # never clickable through the accessible tree and the recording should
+    # say so up front rather than emit a call guaranteed to raise at replay.
+    office = ElementRef(
+        role="label", name="Office", extents=(40, 300, 120, 24), actions=()
+    )
+    source = render(Click(target=Target(x=60, y=310, window=window, element=office)))
+    assert "gui.element(role=Role.LABEL, name='Office').click()" not in source
+    assert "gui.click()" in source
+    assert "offered AT-SPI no click or" in source
+
+
+def test_an_element_with_unrecorded_actions_still_prefers_the_element(window):
+    # A session saved before this field existed deserializes with
+    # actions=None -- unknown, not "confirmed none" -- and --regenerate on it
+    # should not downgrade elements that were working fine to coordinates.
+    save = ElementRef(role="push button", name="Save", actions=None)
+    source = render(Click(target=Target(x=180, y=90, window=window, element=save)))
+    assert 'gui.button("Save").click()' in source
+
+
 def test_a_scroll_puts_the_pointer_back_where_it_was_recorded(window):
     # The wheel acts on whatever is under the pointer, so a scroll emitted
     # without a move scrolled whichever widget the previous action left it on.
@@ -343,7 +382,7 @@ def test_wait_for_idle_takes_its_pid_from_the_window(window):
     # which compiles and then raises NameError on the first run.
     source = render(WaitForIdle(window=window, pid=99, timeout=30))
     assert "gui.wait_for_idle(example.pid, timeout=30)" in source
-    assert "example = gui.wait_for_window(" in source
+    assert "example = _expect_window(gui, " in source
     assert "Capability.WINDOW_PID" in source
     assert validate(source) == []
 
@@ -420,7 +459,7 @@ def test_a_window_nothing_uses_is_still_waited_for_but_not_bound(window, save_bu
 
 def test_a_window_a_coordinate_needs_keeps_its_name(window):
     source = render(Click(target=Target(x=180, y=90, window=window)))
-    assert "example = gui.wait_for_window" in source
+    assert "example = _expect_window(gui, " in source
 
 
 def test_the_header_says_why_a_recording_degraded():
@@ -784,7 +823,7 @@ def test_a_window_variable_is_named_from_the_title_a_reader_recognizes():
     # reporting app ids, a window titled "Recorder Check" bound to `zenity`.
     window = WindowRef(title="Recorder Check", app_id="Zenity")
     source = render(WindowActivate(window=window))
-    assert "recorder_check = gui.wait_for_window" in source
+    assert "recorder_check = _expect_window(gui, " in source
     assert "zenity = " not in source
 
 
@@ -801,7 +840,7 @@ def test_one_window_still_binds_once_however_it_is_named():
         WindowActivate(window=first),
         WindowActivate(window=second),
     )
-    assert source.count("gui.wait_for_window") == 1
+    assert source.count('_expect_window(gui, "') == 1
 
 
 def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
@@ -817,7 +856,7 @@ def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
         WindowActivate(window=first),
         WindowActivate(window=second),
     )
-    assert source.count("gui.wait_for_window") == 2
+    assert source.count('_expect_window(gui, "') == 2
 
 
 def test_two_windows_with_the_same_first_seen_title_do_not_collapse_either():
@@ -845,7 +884,7 @@ def test_two_windows_with_the_same_first_seen_title_do_not_collapse_either():
         WindowActivate(window=first),
         WindowActivate(window=second),
     )
-    assert source.count("gui.wait_for_window") == 2
+    assert source.count('_expect_window(gui, "') == 2
 
 
 def test_a_program_name_app_id_is_not_mistaken_for_reverse_dns():

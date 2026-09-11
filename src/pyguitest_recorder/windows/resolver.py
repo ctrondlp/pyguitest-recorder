@@ -324,9 +324,17 @@ class DesktopResolver:
             return None
         try:
             element = self.session.focused()
+            is_window = element is not None and element.role in WINDOW_ROLES
         except Exception:  # noqa: BLE001 - an unreadable tree is no answer
+            # `.role` reads the live bus same as `.focused()` did, and can go
+            # stale between the two calls -- reliably so right after a key
+            # like Escape, which is as likely to be closing the very menu
+            # that just had focus as it is to be recorded text. A GLib
+            # GError over "no such object path" here is dogtail asking the
+            # bus about an accessible that has already been reaped, not a
+            # bug worth stopping a recording for.
             return None
-        if element is None or element.role in WINDOW_ROLES:
+        if element is None or is_window:
             return None
         try:
             ref = self._describe_element(element)
@@ -656,13 +664,24 @@ class DesktopResolver:
         """
         key = self._identity_key(window)
         known = self._identity.get(key)
+        # Stripped, not just read raw: the same window's title has come back
+        # with and without a trailing space from different backends on this
+        # very desktop (KWin's own live caption, kdotool, and whatever X11
+        # property recording reads all agreeing on the visible text and
+        # disagreeing on trailing whitespace) -- confirmed live on KDE, where
+        # a recorded "Desktop @ QRect(0,0 1920x1080) " never matched the
+        # identical-looking window `wait_for_window` found at replay. A
+        # meaningless whitespace difference should not decide whether a
+        # lookup finds its window, or whether this counts as the title
+        # having drifted.
+        title = (window.title or "").strip()
         if known is None:
-            known = _Identity(app_id=window.app_id or "", title=window.title or "")
+            known = _Identity(app_id=window.app_id or "", title=title)
             self._identity[key] = known
             return known
         if not known.app_id and window.app_id:
             known.app_id = window.app_id
-        if window.title and window.title != known.title:
+        if title and title != known.title:
             # Warned once per window, not once per title. An editor retitles
             # itself on every keystroke, so naming the new title here put
             # eight near-identical notes in the header of one recording --
@@ -728,6 +747,7 @@ class DesktopResolver:
             path=_ancestry(element),
             extents=self._extents(element),
             pid=element.pid,
+            actions=tuple(element.actions or ()),
         )
 
     def _extents(self, element: Any) -> tuple[int, int, int, int] | None:

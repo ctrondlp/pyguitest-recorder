@@ -84,11 +84,39 @@ class ElementRef:
     """Which process published this element, for cross-checking it against the
     window under the same point. The accessibility bus is scoped to the login
     session rather than to one X display, so the two can disagree."""
+    actions: tuple[str, ...] | None = None
+    """The AT-SPI actions this element offered when recorded, e.g. ('click',).
+
+    Some toolkits (KDE's QML-based Kickoff menu, at least) publish plain
+    labels with no Action interface at all -- `Element.click()` has no
+    coordinate path that works without them on a non-GNOME Wayland
+    compositor, so a locator built from one would fail every time at replay.
+    Checked before the element path is offered for a click; not used to
+    gate other locators, which do not need the element to be actionable.
+
+    `None` rather than `()` means "not captured" -- a session saved before
+    this field existed -- and is treated as unknown, not as no actions, so
+    `--regenerate` on an old `.json` does not downgrade elements that were
+    working fine to coordinates just because this was never recorded."""
 
     @property
     def addressable(self) -> bool:
         """Whether this element can be located by name at replay time."""
         return bool(self.name)
+
+    @property
+    def clickable(self) -> bool:
+        """Whether AT-SPI offered an action `Element.click()` can invoke.
+
+        Mirrors pyguitest's own fallback match in `AtspiBackend`'s
+        `Element.click()` (`a.lower() in ("click", "press")`) -- anything
+        looser would claim clickability the replay side cannot make good on.
+        `actions is None` (unknown -- see its docstring) counts as clickable,
+        the same optimism this locator always had before actions existed.
+        """
+        if self.actions is None:
+            return True
+        return any(a.lower() in ("click", "press") for a in self.actions)
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -401,6 +429,7 @@ def _rebuild(cls: type, data: Any) -> Any:
             title_stable=data.get("title_stable", True),
         )
     extents = data.get("extents")
+    raw_actions = data.get("actions")
     return ElementRef(
         role=data["role"],
         name=data.get("name", ""),
@@ -408,6 +437,7 @@ def _rebuild(cls: type, data: Any) -> Any:
         path=tuple(tuple(step) for step in data.get("path", ())),
         extents=tuple(extents) if extents else None,
         pid=data.get("pid"),
+        actions=tuple(raw_actions) if raw_actions is not None else None,
     )
 
 

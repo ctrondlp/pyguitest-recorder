@@ -1,9 +1,74 @@
 # Changelog
 
-Notable changes, newest first. Dates are when the work landed, not when it was
-released; nothing has been released yet.
+Notable changes, newest first. Dates are when the work landed, not when it
+was released.
 
 ## Unreleased
+
+### Fixed
+
+- **A recorded window title could carry a trailing space real backends
+  never agreed it had, so a matching window still failed to be found at
+  replay.** Seen live on KDE: the same window's title came back as
+  `"Desktop @ QRect(0,0 1920x1080) "` from whatever backend recording
+  used, but neither kdotool nor KWin's own live `window.caption` scripting
+  property ever reported that trailing space when checked directly against
+  the running desktop -- confirmed both ways. Since `wait_for_window`
+  matches literally, that one invisible character was enough to make an
+  identical-looking window never match. Titles are now stripped of
+  surrounding whitespace where a window's identity is first captured, so a
+  whitespace-only difference can no longer decide a match, or register as
+  the title having drifted.
+
+- **A generated script assumed `wait_for_window` always finds its window,
+  so a timeout crashed with a raw error naming neither the window nor the
+  real cause.** `wait_for_window` returning `None` on timeout is documented,
+  correct behavior -- but every generated call site handed the result
+  straight to `gui.geometry()`/`gui.activate_window()`/etc. with no check,
+  so a `None` slipped through to whichever one ran first and crashed several
+  frames down inside that backend. Seen live on a KDE replay: the very first
+  `wait_for_window(...)` call fed straight into `gui.geometry(...)`, which
+  crashed with a bare `TypeError: expected str, bytes or os.PathLike object,
+  not NoneType` from deep inside `subprocess.run` -- nothing in that error
+  named the window, or said it had never appeared. Window lookups now go
+  through a new `_expect_window` helper, mirroring `_expect_element`'s
+  existing shape: a clear "expected a window matching ... but none
+  appeared" failure, at the point that actually went wrong.
+
+- **`Recorder.run()` could crash outright and lose the entire recording,
+  including anything `--save-session` would have kept, on nothing worse
+  than a menu closing at an unlucky moment.** `DesktopResolver.focused()`
+  read `session.focused()` inside a `try`/`except`, but the very next line
+  -- `element.role in WINDOW_ROLES` -- read the live accessibility bus
+  again, unguarded. The two are separate reads, not one atomic snapshot:
+  an element `focused()` could still hand back is not guaranteed to still
+  exist by the time `.role` is asked, and a menu closing (Escape, most
+  often) is exactly the kind of moment that un-existing happens in. Seen
+  live: stopping a KDE recording with Escape, Escape crashed the whole
+  process on a `gi.repository.GLib.GError` ("No such object path") that
+  had nothing to do with the recording itself, with no recording saved to
+  show for it. `.role` is now read inside the same guard as `focused()`.
+
+- **A click on an element AT-SPI offered no action for at all generated
+  `Element.click()`, which fails at replay on every non-GNOME Wayland
+  compositor.** *Elements lead, coordinates follow* took "AT-SPI can name
+  it" as reason enough to prefer the element path, without checking whether
+  AT-SPI actually offered a way to click it. `Element.click()` needs either
+  a `click`/`press` AT-SPI action or dogtail's own coordinate click, which
+  itself needs GNOME's `gnome-ponytail-daemon` -- absent everywhere else.
+  KDE's QML-based Kickoff menu (`Applications > Office`, `Development`, and
+  its other categories) exposes neither: confirmed live on a real KDE
+  session (`node.actions == {}`) after a recorded script crashed on exactly
+  this line, one click after the launcher opened. `ElementRef` now carries
+  the AT-SPI actions seen at record time, and the element path is offered
+  for a click only when one of them is usable -- otherwise this falls
+  straight to a coordinate, the same way it already did for a right click
+  `Element.click()` cannot express. `actions=None` (a session saved before
+  this field existed) is treated as unknown rather than "confirmed none", so
+  `--regenerate` on an old `.json` does not downgrade elements that were
+  working fine.
+
+## [0.1.0] — 2026-09-10
 
 The first working version. Records X11 input, resolves what each action
 pointed at, works out what every pause was waiting for, and writes pyguitest
