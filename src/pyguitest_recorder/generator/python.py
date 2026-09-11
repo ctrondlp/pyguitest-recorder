@@ -10,9 +10,13 @@ not have.
 Three emission rules carry the design.
 
 *Elements lead, coordinates follow.* A click on a widget AT-SPI could name
-becomes `gui.button("Save").click()`, not a coordinate. Coordinates are the
-last resort, in the order window-relative then absolute, because a coordinate
-is the one locator guaranteed to break when the window moves.
+becomes `gui.button("Save").click()`, not a coordinate -- unless AT-SPI named
+it but offered it no click or press action, the way KDE's QML-based Kickoff
+menu does, in which case `Element.click()` would fail at replay on every
+compositor without GNOME's ponytail daemon, so this falls straight to a
+coordinate instead. Coordinates are the last resort otherwise, in the order
+window-relative then absolute, because a coordinate is the one locator
+guaranteed to break when the window moves.
 
 *Scripts declare what they need.* Every generated file opens with
 `gui.require(...)` naming the capabilities it uses. A recording made on X11
@@ -143,6 +147,15 @@ _APP_ID_HELPER = "_window_by_app_id"
 
 _ELEMENT_HELPER = "_expect_element"
 """Name of the lookup the `expect_` helpers share."""
+
+_WINDOW_HELPER = "_expect_window"
+"""Name of the lookup that turns a timed-out `wait_for_window` into a clear
+failure, rather than the `None` a script goes on to call `geometry()` or
+`activate_window()` on -- both crash on it with an error that names neither
+the window nor the fact that it never appeared. `wait_for_window` returning
+`None` on timeout is documented, correct behavior, not a bug to work around;
+a generated script assuming success without checking is the actual gap,
+exactly the shape `_expect_element` already closes for elements."""
 
 _DOUBLE_CLICK_HELPER = "double_click_element"
 """Name of the emitted double click that `Element` itself cannot do."""
@@ -449,6 +462,7 @@ class PythonGenerator:
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON"})
         self._move(event.target, state)
         self._note_button_fallback(event, state)
+        self._note_unclickable_fallback(event, state)
         button = "" if event.button == 1 else str(event.button)
         if event.count == 2:
             state.lines.append(f"gui.double_click({button})")
@@ -503,6 +517,23 @@ class PythonGenerator:
             f"# {element.name!r} was named, but Element.click() takes no button,"
         )
         state.lines.append(f"# so this {button} click has to stay a coordinate")
+
+    def _note_unclickable_fallback(self, event: Click, state: _State) -> None:
+        """Explain a coordinate click on an element AT-SPI would not let click."""
+        element = event.target.element
+        if (
+            not self.options.comments
+            or event.button != 1
+            or element is None
+            or not element.addressable
+            or element.clickable
+            or self.options.locators != "element"
+        ):
+            return
+        state.lines.append(
+            f"# {element.name!r} was named, but offered AT-SPI no click or"
+        )
+        state.lines.append("# press action, so this has to stay a coordinate")
 
     def _note_repeat(self, event: Click, state: _State) -> None:
         """Explain a repeated click beyond a double.
@@ -883,7 +914,15 @@ class PythonGenerator:
     def _element_call(
         self, element: ElementRef | None, state: _State, action: str
     ) -> str | None:
-        """Return an element-based call, or None if no element can be named."""
+        """Return an element-based call, or None if no element can be named.
+
+        Checked before `_element_expr` is asked for a locator, not after: that
+        call can already emit a disambiguating `within=` line as a side
+        effect, and an element this is about to refuse for lacking a click
+        action should not leave that line behind for a call it never renders.
+        """
+        if element is not None and not element.clickable:
+            return None
         locator = self._element_expr(element, state)
         if locator is None:
             return None
@@ -1048,8 +1087,10 @@ class PythonGenerator:
                     " app id, so this match is fragile",
                     state,
                 )
+            state.helpers.add(_WINDOW_HELPER)
             return (
-                f"gui.wait_for_window({_title_pattern(window.title)}, timeout={wait:g})"
+                f"{_WINDOW_HELPER}(gui, {_title_pattern(window.title)}, "
+                f"timeout={wait:g})"
             )
         if not window.app_id:
             # Neither identity: callers guard on `addressable`, so this is
@@ -1347,6 +1388,16 @@ _HELPER_SOURCE = {
     x, y, width, height = gui.extents(element)
     gui.move_mouse(x + width // 2, y + height // 2)
     gui.double_click()
+''',
+    _WINDOW_HELPER: '''def _expect_window(gui, title, timeout):
+    """Return the window matching `title`, or fail saying it never appeared."""
+    window = gui.wait_for_window(title, timeout=timeout)
+    if window is None:
+        raise AssertionError(
+            f"expected a window matching {title!r} to be open, but none "
+            f"appeared within {timeout:g}s"
+        )
+    return window
 ''',
     _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout, within=None):
     """Return the named element, or fail saying it never appeared."""

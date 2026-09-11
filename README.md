@@ -30,10 +30,9 @@ python3 login_test.py                    # replay it
 > would not want in a file, and read [Privacy](#privacy) before recording
 > anything that touches a login.
 
-**Not on PyPI yet** — nothing has been released, so until then use the clone
-below. Recording needs X11 or XWayland; under a Wayland session it reaches
-XWayland clients and nothing else, and says so rather than producing a file
-with silent gaps. [Why that is permanent](docs/developers/architecture.md#why-recording-is-x11-only).
+Recording needs X11 or XWayland; under a Wayland session it reaches XWayland
+clients and nothing else, and says so rather than producing a file with
+silent gaps. [Why that is permanent](docs/developers/architecture.md#why-recording-is-x11-only).
 
 Three flags carry most of the value:
 
@@ -200,10 +199,9 @@ pip install 'pyguitest-recorder[x11,atspi]'
 `x11` brings `python-xlib`, which capture needs. `atspi` is what lets a click
 be recorded as a name instead of a coordinate.
 
-**Not on PyPI yet** — nothing has been released, so until then use the clone
-below.
-
 ### From a clone
+
+To work on the recorder itself, or track `main` ahead of a release:
 
 ```sh
 git clone https://github.com/ctrondlp/pyguitest-recorder
