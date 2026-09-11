@@ -7,6 +7,50 @@ was released.
 
 ### Fixed
 
+- **The terminal the recorder itself was running in was recorded as if it
+  were an application under test.** `ignore_pids` exists to keep the
+  recorder out of its own recording, but it only ever held `os.getpid()` --
+  and the recorder has no window of its own. It runs in a terminal, and it
+  is that *terminal's* pid the window carries, so the window the recorder
+  was being driven from looked like any other. Seen live on KDE: typing into
+  GTK4's Text Editor was attributed to the Konsole the recorder was running
+  in, because AT-SPI named a focused text field owned by that terminal and
+  the resolver was happy to match it. The generated script then waited for a
+  window titled after that terminal's foreground process -- reading
+  `pyguitest-recorder` while recording and `python3` while replaying -- so it
+  matched nothing and aborted the run on a window the typing never needed.
+  The nearest ancestor process that owns a window is now ignored too. It
+  stops at the *first* such ancestor rather than ignoring the whole
+  ancestry: a desktop-launched chain reaches the session's own shell a few
+  steps further up, and ignoring `plasmashell`/`gnome-shell` would blind the
+  recorder to the panels and menus it most needs to see. An ancestry with no
+  window-owning process in it -- the recorder driven over SSH -- contributes
+  nothing, and the process table is read through `ps` rather than `/proc`,
+  which FreeBSD does not have without linprocfs.
+
+- **A drag that ended in a different window than it began in made the *next*
+  click look like a return to that window, and the `activate_window` emitted
+  for it dismissed whatever popup the recording was working in.** Seen live
+  on KDE: a press-drag-to-scroll inside the Kickoff menu began inside the
+  Xwayland Video Bridge's rectangle -- the capture apparatus, which happened
+  to sit under the pointer -- and ended below it, on the desktop. Kickoff
+  itself is a native-Wayland popup with no X11 window at all, so hit-testing
+  cannot see the thing actually being scrolled and answers with whatever is
+  behind it. Since a drag's window is tracked by its *start*, the click that
+  followed read as "back on the desktop", and the generated script raised
+  the desktop between the scroll and the click that depended on it: the
+  scroll replayed at exactly the right screen coordinates, the raise closed
+  the menu, and the click landed on bare desktop, so the application it was
+  supposed to open never opened. Note that the coordinates were never wrong
+  -- both endpoints reconstruct to the recorded screen positions -- which is
+  why this looked like a failed scroll rather than a spurious window raise.
+  A drag whose ends disagree about the window now changes neither the
+  current window nor what counts as visited, since it says nothing
+  trustworthy about where the recording *is*. Tracking the end instead would
+  only move the same failure to drags that cross the other way; refusing to
+  guess holds in both directions, and a genuine drag between two windows
+  still gets its raise from the next event that acts in one of them.
+
 - **A recorded window title could carry a trailing space real backends
   never agreed it had, so a matching window still failed to be found at
   replay.** Seen live on KDE: the same window's title came back as

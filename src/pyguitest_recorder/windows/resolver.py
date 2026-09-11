@@ -20,12 +20,19 @@ generates a working script, just a more fragile one.
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ..model import ElementRef, Target, WindowRef
 
 __all__ = ["ContextResolver", "NullResolver", "DesktopResolver", "Observation"]
+
+MAX_ANCESTRY = 8
+"""How far up the process tree to look for the terminal the recorder runs in.
+
+Far enough for python -> shell -> terminal with room to spare, short enough
+that a deep chain cannot wander into the session's own shell."""
 
 MAX_DEPTH = 24
 """Descent limit, so a malformed accessible tree cannot spin forever."""
@@ -147,10 +154,47 @@ class DesktopResolver:
     _scaled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        """Add this process to the ignore set and settle what can be asked."""
+        """Add this process and its terminal to the ignore set."""
         self.ignore_pids.add(os.getpid())
+        self.ignore_pids.update(self._own_terminal_pids())
         self._scaled = self._any_screen_scaled()
         self._resolves_elements = self.elements and self._can_resolve_elements()
+
+    def _own_terminal_pids(self) -> set[int]:
+        """The window-owning process the recorder is being driven from, if any.
+
+        `os.getpid()` alone is not the recorder's footprint on the desktop.
+        The recorder has no window of its own -- it runs in a terminal, and
+        it is that *terminal's* pid the window carries -- so ignoring only
+        this process leaves the window it is being driven from looking like
+        an ordinary application to record.
+
+        Seen live on KDE: typing into GTK4's Text Editor was attributed to
+        the Konsole the recorder was running in, because AT-SPI named a
+        focused text field owned by that terminal and `_window_owning` was
+        happy to match it. The recording then waited for a window titled
+        after that terminal's foreground process -- `pyguitest-recorder`
+        while recording, `python3` while replaying -- so it matched nothing
+        and the replay aborted on a window the typing never needed.
+
+        Stops at the *first* ancestor that owns a window, which is the
+        terminal, rather than ignoring the whole ancestry: walk far enough up
+        and a desktop-launched chain reaches the session's own shell, and
+        ignoring `plasmashell`/`gnome-shell` would blind the recorder to the
+        panels and menus it most needs to see. An ancestry with no
+        window-owning process in it -- the recorder driven over SSH, say --
+        contributes nothing.
+        """
+        if self.session is None:
+            return set()
+        try:
+            owners = {window.pid for window in self.session.windows() if window.pid}
+        except Exception:  # noqa: BLE001 - no window list is no terminal to find
+            return set()
+        for pid in _ancestor_pids():
+            if pid in owners:
+                return {pid}
+        return set()
 
     def _can_resolve_elements(self) -> bool:
         """Whether this session can name what is under a point, and say so.
@@ -760,6 +804,40 @@ class DesktopResolver:
             return None
         x, y, width, height = (int(v) for v in rect)
         return (x, y, width, height)
+
+
+def _ancestor_pids(limit: int = MAX_ANCESTRY) -> list[int]:
+    """This process's ancestors, nearest first, up to `limit` of them.
+
+    Read from `ps` rather than `/proc`, in one call: FreeBSD without
+    linprocfs has no `/proc` at all, and this runs once at startup where a
+    subprocess costs nothing. An unreadable process table is not fatal --
+    the caller still ignores this process itself, as it always has.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    parents: dict[int, int] = {}
+    for line in (result.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            parents[int(fields[0])] = int(fields[1])
+    chain: list[int] = []
+    pid = os.getpid()
+    while len(chain) < limit:
+        pid = parents.get(pid, 0)
+        if pid <= 1:
+            break
+        chain.append(pid)
+    return chain
 
 
 def _ancestry(element: Any) -> tuple[tuple[str, str], ...]:
