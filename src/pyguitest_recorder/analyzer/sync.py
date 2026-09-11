@@ -164,6 +164,26 @@ class _Inferencer:
         """
         if not self.options.activation or not isinstance(event, _POINTER_EVENTS):
             return []
+        if _spans_two_windows(event):
+            # A drag whose ends landed in different windows says nothing
+            # trustworthy about where the recording now *is*, so it is left to
+            # change neither the current window nor what counts as visited.
+            #
+            # Seen live on KDE: a press-drag-to-scroll inside the Kickoff menu
+            # began inside the Xwayland Video Bridge's rectangle (the capture
+            # apparatus, which happened to sit under the pointer) and ended
+            # below it, on the desktop. Kickoff itself is a native-Wayland
+            # popup with no X11 window, so hit-testing cannot see the thing
+            # actually being scrolled and answers with whatever is behind it.
+            # Tracking the start left the next click looking like a return to
+            # the desktop, which emitted an `activate_window` that raised the
+            # desktop and dismissed the very menu the rest of the script then
+            # tried to click in. Tracking the end instead only moves the same
+            # failure to drags that cross the other way; refusing to guess is
+            # what holds in both directions -- and a genuine drag *between*
+            # two windows still gets its raise from the next event acting in
+            # one of them, exactly as before.
+            return []
         target = _target_of(event)
         window = target.window if target is not None else None
         key = _window_key(window)
@@ -300,6 +320,18 @@ def _target_of(event: Event) -> Target | None:
         return event.start
     target = getattr(event, "target", None)
     return target if isinstance(target, Target) else None
+
+
+def _spans_two_windows(event: Event) -> bool:
+    """Whether a drag began in one window and ended in another.
+
+    Both ends having been resolved is part of the question: a drag with a
+    window at one end and nothing at the other is just as ambiguous about
+    where it left the recording, and is treated the same way.
+    """
+    if not isinstance(event, Drag):
+        return False
+    return _window_key(event.start.window) != _window_key(event.end.window)
 
 
 def _activated(event: Event) -> WindowRef | None:

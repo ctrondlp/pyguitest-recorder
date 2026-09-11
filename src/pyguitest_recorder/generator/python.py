@@ -72,7 +72,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.7"
+PROFILE = "pyguitest-0.8"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually

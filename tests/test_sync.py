@@ -9,6 +9,7 @@ from pyguitest_recorder.analyzer import SyncOptions, infer_synchronization
 from pyguitest_recorder.model import (
     Assertion,
     Click,
+    Drag,
     ElementRef,
     KeyStroke,
     Pause,
@@ -204,6 +205,68 @@ def test_a_window_seen_for_the_first_time_is_waited_for_not_raised():
 def test_staying_in_one_window_raises_nothing():
     out = infer_synchronization([click(1.0), click(2.0), click(3.0)])
     assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_a_drag_ending_in_another_window_does_not_make_the_next_click_a_return():
+    # Found live on KDE. A press-drag-to-scroll inside the Kickoff menu began
+    # inside the Xwayland Video Bridge's rectangle (the capture apparatus,
+    # which happened to sit under the pointer) and ended below it on the
+    # desktop -- Kickoff itself is a native-Wayland popup with no X11 window,
+    # so hit-testing answers with whatever is behind it. Tracking the drag's
+    # start left the following click looking like a return to the desktop,
+    # which raised the desktop and dismissed the very menu the rest of the
+    # script went on to click in: the recording replayed the scroll correctly
+    # and then clicked on bare desktop.
+    events = [
+        click(1.0, window=MAIN),
+        Drag(
+            timestamp=2.0,
+            start=Target(x=652, y=602, window=DIALOG),
+            end=Target(x=653, y=927, window=MAIN),
+        ),
+        click(3.0, window=MAIN),
+    ]
+    out = infer_synchronization(events)
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_a_drag_between_two_windows_still_lets_the_next_click_raise_its_own():
+    # The other half of the rule above: refusing to guess where an ambiguous
+    # drag left the recording must not cost a genuine drag-and-drop its raise
+    # -- the click that acts in the drop target still asks for one.
+    events = [
+        click(1.0, window=MAIN),
+        click(1.5, window=DIALOG),
+        click(1.8, window=MAIN),
+        Drag(
+            timestamp=2.0,
+            start=Target(x=10, y=10, window=MAIN),
+            end=Target(x=20, y=20, window=DIALOG),
+        ),
+        click(3.0, window=DIALOG),
+    ]
+    raised = [e for e in infer_synchronization(events) if isinstance(e, WindowActivate)]
+    assert [e.window.app_id for e in raised] == [
+        "org.x.Editor",
+        "org.x.Editor.Dialog",
+    ]
+
+
+def test_a_drag_inside_one_window_still_tracks_that_window():
+    # An unambiguous drag is unchanged: it still counts as acting in its
+    # window, so a click back in another one is still a return.
+    events = [
+        click(1.0, window=MAIN),
+        click(1.5, window=DIALOG),
+        Drag(
+            timestamp=2.0,
+            start=Target(x=10, y=10, window=DIALOG),
+            end=Target(x=20, y=20, window=DIALOG),
+        ),
+        click(3.0, window=MAIN),
+    ]
+    raised = [e for e in infer_synchronization(events) if isinstance(e, WindowActivate)]
+    assert [e.window.app_id for e in raised] == ["org.x.Editor"]
 
 
 def test_activation_can_be_declined():

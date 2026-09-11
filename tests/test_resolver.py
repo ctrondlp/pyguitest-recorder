@@ -2,6 +2,7 @@ import os
 
 from pyguitest_recorder.model import ElementRef
 from pyguitest_recorder.windows import DesktopResolver, NullResolver
+from pyguitest_recorder.windows import resolver as resolver_module
 
 
 class FakeWindow:
@@ -86,6 +87,53 @@ def test_the_recorders_own_window_is_never_the_target():
 def test_extra_ignored_pids_are_honoured():
     session = FakeSession(window=FakeWindow(pid=4321))
     assert resolver(session, ignore_pids={4321}).resolve(1, 2).window is None
+
+
+class ListingSession(FakeSession):
+    """A session that can also list every window, which `windows()` needs."""
+
+    def __init__(self, windows, **kwargs):
+        super().__init__(window=windows[0], **kwargs)
+        self._windows = windows
+
+    def windows(self):
+        return list(self._windows)
+
+
+def test_the_terminal_the_recorder_runs_in_is_never_the_target(monkeypatch):
+    # The recorder has no window of its own: it runs in a terminal, and that
+    # terminal's pid is what the window carries. Seen live on KDE -- typing
+    # into Text Editor was attributed to the Konsole the recorder was running
+    # in, and the script then waited for a window titled after that terminal's
+    # foreground process, which reads differently at replay.
+    terminal = FakeWindow(title="pyguitest-recorder : bash", pid=4649)
+    monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [4649])
+    made = resolver(ListingSession([terminal]))
+    assert 4649 in made.ignore_pids
+    assert made.resolve(1, 2).window is None
+
+
+def test_the_walk_stops_at_the_terminal_and_never_reaches_the_shell(monkeypatch):
+    # Walking the whole ancestry would reach the session's own shell, and
+    # ignoring plasmashell/gnome-shell would blind the recorder to the panels
+    # and menus it most needs to see.
+    terminal = FakeWindow(title="Konsole", pid=4649)
+    shell = FakeWindow(title="plasmashell", pid=3131)
+    monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [4649, 3131])
+    made = resolver(ListingSession([terminal, shell]))
+    assert 4649 in made.ignore_pids
+    assert 3131 not in made.ignore_pids
+
+
+def test_an_ancestry_owning_no_window_is_ignored_no_further(monkeypatch):
+    # The recorder driven over SSH has no terminal on this desktop at all.
+    window = FakeWindow(title="Example", pid=999)
+    monkeypatch.setattr(
+        resolver_module, "_ancestor_pids", lambda *a, **k: [111, 222, 333]
+    )
+    made = resolver(ListingSession([window]))
+    assert made.ignore_pids == {os.getpid()}
+    assert made.resolve(1, 2).window is not None
 
 
 def test_a_drifting_title_is_marked_unstable():
