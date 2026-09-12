@@ -5,6 +5,34 @@ was released.
 
 ## Unreleased
 
+### Fixed
+
+- **Four documentation pages still described the release before 0.2.0,
+  including two code samples and the key users are told to press to record a
+  check.** The private `expect_*` helpers stopped being written into generated
+  scripts in 0.2.0 — they are pyguitest `Session` methods now — but `README.md`,
+  `docs/getting-started.md` and `docs/recipes.md` still showed the old
+  free-function call `expect_text(gui, ...)` and still explained that the
+  helpers were "written into the generated file". The same pages and
+  `docs/troubleshooting.md` also told users to press **Ctrl+F1**, which was the
+  default until 0.2.0 moved it to **Ctrl+1** — precisely because a laptop's bare
+  F1 commonly sends `XF86_AudioMute` rather than `F1`, so the press is never
+  matched and is silently recorded as an ordinary keystroke. The instructions
+  were therefore describing the exact failure the change existed to remove. Two
+  pages also stated a pyguitest floor of 0.5.0 against `pyproject.toml`'s
+  0.9.0, and both copies of the sample generated file still opened
+  `Profile: pyguitest-0.5` against a generator `PROFILE` of `pyguitest-0.9`.
+
+  `tests/test_docs.py` is the new guard. It compares the prose against the real
+  code rather than grepping for words: the stated floor against `pyproject.toml`,
+  the sample header against `PROFILE`, the documented check key against
+  `Settings.check_key`, and every documented `--flag` against the CLI parser —
+  plus that every relative link and every entry in a page's own table of
+  contents still resolves. pyguitest's `test_docs.py` and python-libei's
+  `test_documentation_shape.py`/`test_documented_examples.py` were already
+  doing this; this repo's suite was all code and no prose, which is how a
+  release could land with four pages describing the one before it.
+
 ## [0.2.0] — 2026-09-12
 
 Everything here came out of recording real applications and replaying what
@@ -131,7 +159,7 @@ that did the wrong thing on a real desktop.
 
 - **A generated script's pointer actions had no synchronization at all when
   a click resolved to no window at all -- not even the desktop -- leaving
-  it to a human's own recorded pause, which was too short to notice on a
+  it to the user's own recorded pause, which was too short to notice on a
   fast, confident click.** Same live KDE reproduction as the resolver retry
   below: dismissing GNOME Text Editor's own in-window "Discard changes?"
   sheet with two clicks close together in time meant `normalize.py`'s
@@ -140,7 +168,7 @@ that did the wrong thing on a real desktop.
   animating in. `target.window is None` is the one case a generated script
   has nothing else grounding the point in, so it is now also the one case
   that gets a small (0.3s) unconditional settle wait before the pointer
-  moves there, regardless of what the recording human happened to notice.
+  moves there, regardless of what the recording user happened to notice.
 
 - **A click resolving to no window at all -- not even the active-window
   fallback -- gave up permanently on the first empty answer, even when the

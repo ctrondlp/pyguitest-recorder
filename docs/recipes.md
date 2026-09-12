@@ -12,6 +12,7 @@ see [troubleshooting.md](troubleshooting.md).
 - [Forcing coordinates, or forcing elements](#forcing-coordinates-or-forcing-elements)
 - [Turning off inference](#turning-off-inference)
 - [Putting your own header on the file](#putting-your-own-header-on-the-file)
+- [Quieting warnings you already know about](#quieting-warnings-you-already-know-about)
 - [Recording a specific display](#recording-a-specific-display)
 - [Configuration file](#configuration-file)
 - [Running without installing](#running-without-installing)
@@ -47,16 +48,16 @@ those flags actually change without re-performing the interaction.
 ## Checks: what makes it a test
 
 A recording of actions alone passes as long as nothing raises. Press
-**Ctrl+F1** while recording, pointing at whatever should have changed, and the
+**Ctrl+1** while recording, pointing at whatever should have changed, and the
 recorder reads what is under the pointer *and what it currently says*:
 
 ```python
 # Check: 'Status' reads 'Saved'
-expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")
+gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
 # Check: 'Read only' is checked
-expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)
+gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True)
 # Check: 'Undo' is showing
-expect_showing(gui, role=Role.PUSH_BUTTON, name="Undo")
+gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo")
 ```
 
 What gets checked depends on what was under the pointer, most specific first,
@@ -70,14 +71,16 @@ because the value of a check is exactly how much it would notice:
 | No element, but a window | `expect_window(...)` |
 | Neither | nothing, and the script's header says so |
 
-**The `expect_` functions are written into the generated file**, not imported
-from this package: a generated script is plain pyguitest source and depends on
-nothing but pyguitest. They exist rather than bare `assert` statements for two
-reasons. A failing `assert gui.element(...).text == "Saved"` reports an
-`AssertionError` and a line number, where these say which element was wrong,
-what it should have read and what it actually reads. And each one retries
-until its timeout — a check recorded the instant an action returns would
-otherwise race an application that has not finished redrawing.
+**These are pyguitest `Session` methods**, added in pyguitest 0.9, so a generated
+script is plain pyguitest source and depends on nothing but pyguitest. Earlier
+versions of this recorder wrote a private copy of each one into every script that
+needed it; that stopped when pyguitest grew them, which is what raised the floor
+to 0.9.0. They exist rather than bare `assert` statements for two reasons. A
+failing `assert gui.element(...).text == "Saved"` reports an `AssertionError` and
+a line number, where these say which element was wrong, what it should have read
+and what it actually reads. And each one retries until its timeout — a check
+recorded the instant an action returns would otherwise race an application that
+has not finished redrawing.
 
 A check that could not be resolved to anything is reported in the header
 rather than dropped, so a script never looks like it verifies something it
@@ -95,11 +98,18 @@ pyguitest-recorder --stop-key Pause --stop-presses 1
 pyguitest-recorder --check-key ctrl+shift+F1
 ```
 
-The defaults are chosen around what laptops actually have. Pause is not on
-many keyboards any more, so Escape stands in — twice, because a single Escape
-belongs to the application. A key nothing else wants can drop the repeat, as
-above. The check key carries a modifier for the same reason: a bare F9 is a
-screenshot key on some laptops, and a bare F1 is help nearly everywhere.
+The defaults are chosen around what laptops actually have. Pause is not on many
+keyboards any more, so Escape stands in — twice, because a single Escape belongs
+to the application. A key nothing else wants can drop the repeat, as above.
+
+The check key is `ctrl+1` rather than a function key for a blunter reason: a
+laptop's bare F1 commonly sends a hardware media keysym (`XF86_AudioMute`) rather
+than the `F1` X11 calls it, which the matcher never sees — so a function-key
+default fails *silently*, recording an ordinary keystroke instead of a check and
+never saying so. `ctrl+F1` was this default until that was measured live. A plain
+digit is not remapped that way, and the `ctrl+` makes it a chord no ordinary
+typing produces — which matters, because any unmodified printable character used
+as the check key can then never be typed into the recorded application again.
 
 ## Recording hovers and menus
 

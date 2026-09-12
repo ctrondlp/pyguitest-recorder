@@ -15,11 +15,27 @@ pip install -e '.[x11,dev]'
 ## Lint, types, tests
 
 ```sh
-python -m pytest -q
-ruff check .
-ruff format --check .
-mypy
+./scripts/pre-commit-test.sh
 ```
+
+That is the gate — `scripts/pre-commit-test.sh` — and it mirrors
+`.github/workflows/ci.yml` rather than inventing a house style: ruff lint,
+ruff format, mypy and the suite, in CI's order and over the same paths, with
+a pass/fail summary and a non-zero exit when anything failed.
+
+`--full` adds CI's `build` job so far as it is checkable here: the sdist and
+wheel built into a temporary directory, `twine check --strict` over them, and
+the tag-matches-the-packaged-version check when HEAD is a `v*` tag. An
+interpreter without the build and twine packages reports SKIP, not a pass.
+`-k NAME` narrows to the checks matching a name, `-v` streams output, `-q`
+prints the summary only, `-x` stops at the first failure, and `--help` lists
+them. It checks the working tree, not the index.
+
+It wants the `[x11,dev]` extra in the interpreter it points at (`PYTHON=...`
+to point it elsewhere), and checks four of those packages up front: without
+pytest, ruff or mypy there is nothing to run, and without pyguitest the
+generator's own checks pass vacuously — which is worse than failing, so its
+absence is a setup problem rather than a skip.
 
 `.github/workflows/ci.yml` is the reference for what "green" means, including
 the `live` job, which records a real application on a real X server — the
