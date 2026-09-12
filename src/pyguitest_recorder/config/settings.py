@@ -81,7 +81,7 @@ class Settings:
     application's own become likely to be mistaken for a deliberate run.
     """
 
-    check_key: str = "ctrl+F1"
+    check_key: str = "ctrl+1"
     """Key that records a check on whatever the pointer is over.
 
     This is what makes a recording a test rather than a replay: without it a
@@ -92,9 +92,31 @@ class Settings:
     must match exactly -- `ctrl+F9` does not fire on `ctrl+shift+F9`, so the
     combinations near it stay usable in the application being recorded. A
     bare `F9` is still accepted and then fires only with no modifier held.
-    The default carries a modifier because plain function keys are commonly
-    taken by the desktop -- F9 is a screenshot key on some laptops -- and F1
-    because a bare F1 is help almost everywhere while `ctrl+F1` rarely is.
+
+    `ctrl+F1` was the old default and is no longer used: measured live, a
+    laptop's bare F1 key commonly sends a hardware media keysym
+    (`XF86_AudioMute`, confirmed live) rather than the literal `F1` X11
+    calls it, which the matcher never sees -- silently making the check key
+    unusable with no error at all, every single press recorded as an
+    ordinary keystroke instead. Function keys generally carry this risk, so
+    the default moved to a plain digit, which keyboards do not remap.
+    Setting `check_key` to an unmodified printable character (a bare letter
+    or digit) has its own real cost either way: that character can then
+    never be typed into the recorded application again, since every press
+    of it is swallowed as a check instead of text -- `ctrl+1` sidesteps that
+    by being a chord no ordinary typing produces.
+    """
+
+    announce_checks: bool = True
+    """Print each check to the terminal the moment it is recorded.
+
+    Pressing `check_key` has no other visible effect at all, so without this
+    the only way to find out whether a check actually recorded something
+    useful -- rather than nothing being identified under the pointer -- is
+    to read the generated script afterward. On by default for the same
+    reason `on_stop_progress` exists: silent success and silent failure look
+    identical while recording, and there is no cost to saying which one just
+    happened.
     """
 
     sync_inference: bool = True

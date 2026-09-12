@@ -131,7 +131,7 @@ class NormalizerOptions:
     sensitive: bool = False
     """Treat all typed text as sensitive, whatever the focused element is."""
 
-    check_key: str = "ctrl+F1"
+    check_key: str = "ctrl+1"
     """Key that records a check on whatever the pointer is over.
 
     Swallowed like the stop key is, so an application that binds this exact
@@ -140,6 +140,13 @@ class NormalizerOptions:
     time one is needed -- and the reason the default carries a modifier and
     matches exactly, which keeps the neighbouring combinations usable. Empty
     disables checks entirely and the key records normally.
+
+    A bare function key is riskier than it looks here: measured live, a
+    laptop's F1 commonly sends a hardware media keysym (`XF86_AudioMute`)
+    rather than the literal `F1` this matches against, so the check key
+    silently never fires -- every press recorded as an ordinary keystroke
+    instead, with nothing to say why. `ctrl+1` avoids that; keyboards do not
+    remap plain digits.
     """
 
 

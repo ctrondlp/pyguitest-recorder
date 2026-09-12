@@ -11,9 +11,88 @@ from pyguitest_recorder.model import (
     Target,
     TextInput,
     WindowRef,
+    describe_assertion,
     event_from_dict,
 )
 from pyguitest_recorder.model.recording import FORMAT_VERSION
+
+
+def test_describe_assertion_text_reads_the_recorded_value():
+    element = ElementRef(role="label", name="Status")
+    assertion = Assertion(
+        check="text", target=Target(x=1, y=2, element=element), expected="Saved"
+    )
+    assert describe_assertion(assertion) == "'Status' reads 'Saved'"
+
+
+def test_describe_assertion_text_redacts_a_sensitive_value_by_default():
+    element = ElementRef(role="password text", name="Password")
+    assertion = Assertion(
+        check="text",
+        target=Target(x=1, y=2, element=element),
+        expected="hunter2",
+        sensitive=True,
+    )
+    described = describe_assertion(assertion)
+    assert described == "'Password' matches the recorded value"
+    assert "hunter2" not in described
+
+
+def test_describe_assertion_text_can_show_a_sensitive_value_when_asked():
+    element = ElementRef(role="password text", name="Password")
+    assertion = Assertion(
+        check="text",
+        target=Target(x=1, y=2, element=element),
+        expected="hunter2",
+        sensitive=True,
+    )
+    described = describe_assertion(assertion, redact_sensitive=False)
+    assert described == "'Password' reads 'hunter2'"
+
+
+def test_describe_assertion_checked():
+    element = ElementRef(role="check box", name="Read only")
+    on = Assertion(
+        check="checked", target=Target(x=1, y=2, element=element), expected=True
+    )
+    off = Assertion(
+        check="checked", target=Target(x=1, y=2, element=element), expected=False
+    )
+    assert describe_assertion(on) == "'Read only' is checked"
+    assert describe_assertion(off) == "'Read only' is not checked"
+
+
+def test_describe_assertion_showing():
+    element = ElementRef(role="push button", name="Undo")
+    assertion = Assertion(check="showing", target=Target(x=1, y=2, element=element))
+    assert describe_assertion(assertion) == "'Undo' is showing"
+
+
+def test_describe_assertion_window(window):
+    assertion = Assertion(check="window", target=Target(x=1, y=2, window=window))
+    assert describe_assertion(assertion) == f"the {window.title!r} window is open"
+
+
+def test_describe_assertion_nothing_identified():
+    assertion = Assertion(check="nothing", target=Target(x=7, y=8))
+    described = describe_assertion(assertion)
+    assert "(7, 8)" in described
+    assert "neither an element nor a window" in described
+
+
+def test_describe_assertion_with_no_element_names_the_check_type():
+    for check in ("text", "checked", "showing"):
+        assertion = Assertion(check=check, target=Target(x=1, y=2))
+        assert "had no element to make it against" in describe_assertion(assertion)
+
+
+def test_describe_assertion_window_with_no_window_or_title():
+    no_window = Assertion(check="window", target=Target(x=1, y=2))
+    blank_title = Assertion(
+        check="window", target=Target(x=1, y=2, window=WindowRef(title=""))
+    )
+    assert "had no window to make it against" in describe_assertion(no_window)
+    assert "had no window to make it against" in describe_assertion(blank_title)
 
 
 def test_target_relative_uses_window_origin(window):

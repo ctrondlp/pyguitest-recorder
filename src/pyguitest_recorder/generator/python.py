@@ -62,6 +62,7 @@ from ..model import (
     WaitForWindow,
     WindowActivate,
     WindowRef,
+    describe_assertion,
 )
 
 __all__ = [
@@ -628,24 +629,25 @@ class PythonGenerator:
         """Render a check that an element still reads what it read when recorded."""
         element = event.target.element
         if element is None:
-            state.warnings.append("a text check had no element to make it against")
+            state.warnings.append(describe_assertion(event))
             return
         if event.sensitive and self.options.redact_sensitive:
             expected = self._secret_name(state)
-            self._check_comment(f"{element.name!r} matches the recorded value", state)
         else:
             expected = _literal(str(event.expected))
-            self._check_comment(f"{element.name!r} reads {event.expected!r}", state)
+        self._check_comment(
+            describe_assertion(event, redact_sensitive=self.options.redact_sensitive),
+            state,
+        )
         self._expect("expect_text", element, state, f"equals={expected}")
 
     def _check_checked(self, event: Assertion, state: _State) -> None:
         """Render a check on a checkbox, radio button or toggle."""
         element = event.target.element
         if element is None:
-            state.warnings.append("a checked check had no element to make it against")
+            state.warnings.append(describe_assertion(event))
             return
-        word = "is checked" if event.expected else "is not checked"
-        self._check_comment(f"{element.name!r} {word}", state)
+        self._check_comment(describe_assertion(event), state)
         self._expect(
             "expect_checked", element, state, f"checked={bool(event.expected)}"
         )
@@ -659,18 +661,18 @@ class PythonGenerator:
         """
         element = event.target.element
         if element is None:
-            state.warnings.append("a showing check had no element to make it against")
+            state.warnings.append(describe_assertion(event))
             return
-        self._check_comment(f"{element.name!r} is showing", state)
+        self._check_comment(describe_assertion(event), state)
         self._expect("expect_showing", element, state)
 
     def _check_window(self, event: Assertion, state: _State) -> None:
         """Render a check that a window is open, where no element could be named."""
         window = event.target.window
         if window is None or not window.title:
-            state.warnings.append("a window check had no window to make it against")
+            state.warnings.append(describe_assertion(event))
             return
-        self._check_comment(f"the {window.title!r} window is open", state)
+        self._check_comment(describe_assertion(event), state)
         state.capabilities.add("WINDOW_LIST")
         state.helpers.add("expect_window")
         state.lines.append(f"expect_window(gui, {_title_pattern(window.title)})")
@@ -683,11 +685,7 @@ class PythonGenerator:
         than one it admits it could not make: the script would otherwise look
         like it verifies something it never does.
         """
-        state.warnings.append(
-            f"a check was recorded at ({event.target.x}, {event.target.y}), where "
-            "neither an element nor a window could be identified; nothing was "
-            "generated for it"
-        )
+        state.warnings.append(describe_assertion(event))
 
     def _expect(
         self, helper: str, element: ElementRef, state: _State, extra: str = ""

@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from unittest import mock
 
+from conftest import FakeResolver
+from pyguitest_recorder.analyzer import Normalizer
 from pyguitest_recorder.backends.base import CaptureUnavailable, RawEvent
 from pyguitest_recorder.config import Settings
+from pyguitest_recorder.model import ElementRef
 from pyguitest_recorder.recorder import Recorder
 from pyguitest_recorder.windows import NullResolver
 
@@ -157,8 +160,63 @@ class TestStopProgress:
         assert calls == [(1, 3)]
 
 
+class TestOnCheck:
+    """`on_check`, fired the moment an Assertion is added to the recording."""
+
+    def _recorder_with_normalizer(self, resolver) -> Recorder:
+        recorder = Recorder(settings=Settings())
+        recorder._normalizer = Normalizer(resolver=resolver, started=0.0)
+        return recorder
+
+    def _check_chord(self):
+        return [
+            RawEvent(kind="key_press", timestamp=1.0, keysym="Control_L", x=10, y=10),
+            RawEvent(kind="key_press", timestamp=1.05, keysym="1", x=10, y=10),
+        ]
+
+    def test_fires_for_a_recorded_check(self):
+        calls = []
+        resolver = FakeResolver(
+            elements=[((0, 0, 100, 100), ElementRef(role="label", name="Status"))],
+            text="Saved",
+        )
+        recorder = self._recorder_with_normalizer(resolver)
+        recorder.on_check = calls.append
+        recorder._consume(self._check_chord())
+        assert len(calls) == 1
+        assert calls[0].check == "text"
+        assert calls[0].expected == "Saved"
+
+    def test_does_not_fire_for_an_ordinary_keystroke(self):
+        calls = []
+        recorder = self._recorder_with_normalizer(FakeResolver())
+        recorder.on_check = calls.append
+        recorder._consume(
+            [RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a", x=0, y=0)]
+        )
+        recorder._consume([RawEvent(kind="key_release", timestamp=1.05, keysym="a")])
+        assert calls == []
+
+    def test_none_is_the_default_and_nothing_calls_it(self):
+        recorder = self._recorder_with_normalizer(FakeResolver())
+        assert recorder.on_check is None
+        # Must not raise with no listener attached.
+        recorder._consume(self._check_chord())
+
+
 def test_stop_key_interval_default_is_loosened_from_the_original_1_0():
     # 1.0 measured live as too tight for a natural press-pause-press cadence
     # with no feedback that the first press registered -- a real capture
     # showed a 1.333s gap between two presses meant as one deliberate run.
     assert Settings().stop_key_interval == 2.0
+
+
+def test_check_key_default_moved_off_a_bare_function_key():
+    # ctrl+F1 measured live as unusable on a real laptop: its F1 sends the
+    # XF86_AudioMute hardware keysym instead of the literal F1 the matcher
+    # looks for, so the check silently never fires.
+    assert Settings().check_key == "ctrl+1"
+
+
+def test_announce_checks_defaults_on():
+    assert Settings().announce_checks is True
