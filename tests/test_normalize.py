@@ -248,8 +248,8 @@ def test_hesitation_inside_a_word_is_not_a_pause(key):
 
 
 def check_chord(key, t=1.0):
-    """The default check key, ctrl+F1, as the two presses it really is."""
-    return [key(t, "Control_L"), key(t + 0.05, "F1")]
+    """The default check key, ctrl+1, as the two presses it really is."""
+    return [key(t, "Control_L"), key(t + 0.05, "1")]
 
 
 def observed(role, name, text=None, checked=None, window=None):
@@ -276,24 +276,24 @@ def test_the_check_key_can_be_switched_off(key):
     normalizer = Normalizer(options=NormalizerOptions(check_key=""))
     events = drain(normalizer, check_chord(key))
     assert [type(e).__name__ for e in events] == ["HotKey"]
-    assert events[0].keys == ("ctrl", "F1")
+    assert events[0].keys == ("ctrl", "1")
 
 
 def test_the_check_key_needs_its_modifier(key):
-    # A bare F1 is help almost everywhere; only the exact combination fires.
+    # A bare 1 belongs to the application; only the exact combination fires.
     events = drain(
         Normalizer(resolver=observed("label", "Status", text="Saved")),
-        [key(1.0, "F1")],
+        [key(1.0, "1")],
     )
     assert [type(e).__name__ for e in events] == ["KeyStroke"]
 
 
 def test_a_larger_combination_is_not_the_check_key(key):
-    # Exact matching keeps ctrl+shift+F1 usable in the application being
-    # recorded, rather than swallowing everything built on ctrl+F1.
+    # Exact matching keeps ctrl+shift+1 usable in the application being
+    # recorded, rather than swallowing everything built on ctrl+1.
     events = drain(
         Normalizer(resolver=observed("label", "Status", text="Saved")),
-        [key(1.0, "Control_L"), key(1.05, "Shift_L"), key(1.1, "F1")],
+        [key(1.0, "Control_L"), key(1.05, "Shift_L"), key(1.1, "1")],
     )
     assert [type(e).__name__ for e in events] == ["HotKey"]
 

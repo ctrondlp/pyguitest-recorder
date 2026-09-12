@@ -79,6 +79,7 @@ def test_unset_flags_stay_none_so_the_config_file_wins():
     assert args.record_raw is None
     assert args.suppress_keymap_warning is None
     assert args.suppress_atspi_chatter is None
+    assert args.announce_checks is None
 
 
 def test_suppress_flags_are_parsed():
@@ -87,6 +88,11 @@ def test_suppress_flags_are_parsed():
     )
     assert args.suppress_keymap_warning is True
     assert args.suppress_atspi_chatter is True
+
+
+def test_no_check_feedback_flag_is_parsed():
+    args = build_parser().parse_args(["--no-check-feedback"])
+    assert args.announce_checks is False
 
 
 def test_regenerate_writes_a_script_without_recording(saved, tmp_path, capsys):

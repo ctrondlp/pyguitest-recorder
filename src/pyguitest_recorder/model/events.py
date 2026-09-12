@@ -39,6 +39,7 @@ __all__ = [
     "TextInput",
     "HotKey",
     "Assertion",
+    "describe_assertion",
     "CHECKS",
     "WindowActivate",
     "WaitForWindow",
@@ -315,6 +316,46 @@ class Assertion(Event):
     target: Target
     expected: str | bool | None = None
     sensitive: bool = False
+
+
+def describe_assertion(assertion: Assertion, *, redact_sensitive: bool = True) -> str:
+    """Plain-language description of one check.
+
+    Shared by the generator's own "Check: ..." comments and live console
+    feedback while recording, so the two always say the same thing rather
+    than risking drift between two independent copies of this wording.
+    `redact_sensitive` defaults on because a live terminal is exactly the
+    kind of place a password's actual value should not appear -- the
+    generator passes its own `redact_sensitive` option through instead.
+    """
+    element = assertion.target.element
+    if assertion.check == "text":
+        if element is None:
+            return "a text check had no element to make it against"
+        if assertion.sensitive and redact_sensitive:
+            return f"{element.name!r} matches the recorded value"
+        return f"{element.name!r} reads {assertion.expected!r}"
+    if assertion.check == "checked":
+        if element is None:
+            return "a checked check had no element to make it against"
+        word = "is checked" if assertion.expected else "is not checked"
+        return f"{element.name!r} {word}"
+    if assertion.check == "showing":
+        if element is None:
+            return "a showing check had no element to make it against"
+        return f"{element.name!r} is showing"
+    if assertion.check == "window":
+        window = assertion.target.window
+        if window is None or not window.title:
+            return "a window check had no window to make it against"
+        return f"the {window.title!r} window is open"
+    if assertion.check == "nothing":
+        x, y = assertion.target.x, assertion.target.y
+        return (
+            f"a check was recorded at ({x}, {y}), where neither an element "
+            "nor a window could be identified; nothing was generated for it"
+        )
+    return f"an unrecognized check {assertion.check!r} was recorded"
 
 
 @dataclass(kw_only=True)

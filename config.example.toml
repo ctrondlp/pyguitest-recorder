@@ -20,8 +20,13 @@ stop_key_presses = 2      # ...pressed this many times in a row. Two, because
                           # passed through and recorded. Use 1 with a key
                           # nothing else wants, such as Pause.
 stop_key_interval = 2.0   # seconds within which those presses must arrive
-check_key = "ctrl+F1"     # records a check on what is under the pointer;
-                          # "" records none and lets the key through
+check_key = "ctrl+1"      # records a check on what is under the pointer;
+                          # "" records none and lets the key through. A bare
+                          # function key is risky here: many laptops send a
+                          # hardware media keysym for it instead of the
+                          # literal name (F1 -> XF86_AudioMute, confirmed
+                          # live), which the matcher never sees.
+announce_checks = true    # print each check to the terminal as it happens
 window_context = true     # open a pyguitest session to identify windows
 element_context = true    # resolve clicks to AT-SPI elements
 

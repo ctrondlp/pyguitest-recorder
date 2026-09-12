@@ -22,6 +22,7 @@ from .events import (
     WaitForWindow,
     WindowActivate,
     WindowRef,
+    describe_assertion,
     event_from_dict,
 )
 from .recording import Environment, Recording
@@ -50,5 +51,6 @@ __all__ = [
     "WaitForWindow",
     "WindowActivate",
     "WindowRef",
+    "describe_assertion",
     "event_from_dict",
 ]

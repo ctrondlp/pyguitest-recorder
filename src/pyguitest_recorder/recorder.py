@@ -32,7 +32,7 @@ from .analyzer import (
 )
 from .backends.base import CaptureBackend, CaptureUnavailable
 from .config import Settings
-from .model import Environment, Recording
+from .model import Assertion, Environment, Recording
 from .windows import ContextResolver, DesktopResolver, NullResolver
 
 __all__ = [
@@ -181,6 +181,19 @@ class Recorder:
     to know how to print anything.
     """
 
+    on_check: Callable[[Assertion], None] | None = None
+    """Called with each `Assertion` the moment it is added to the recording.
+
+    Pressing `check_key` has no other visible effect at all, so without this
+    the only way to find out whether a check actually recorded something
+    useful is to read the generated script afterward -- and a check that
+    silently found nothing under the pointer looks, live, identical to one
+    that worked. `None` (the default) reports nothing, matching
+    `on_stop_progress`'s reasoning: `Recorder` has no UI concerns of its
+    own, so a caller wanting live feedback (the CLI does, by default) sets
+    this rather than `Recorder` needing to know how to print anything.
+    """
+
     _backend: CaptureBackend | None = field(default=None, init=False)
     _session: Any = field(default=None, init=False)
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
@@ -282,6 +295,8 @@ class Recorder:
                 self.recording.raw.append(raw.to_dict())
             for event in self._normalizer.feed(raw):
                 self.recording.add(event)
+                if self.on_check is not None and isinstance(event, Assertion):
+                    self.on_check(event)
 
     def _collect_warnings(self) -> None:
         """Carry what the resolver learned while recording into the notes.

@@ -19,7 +19,7 @@ from .analyzer import SyncOptions, infer_synchronization
 from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
-from .model import Event, Origin, Recording
+from .model import Event, Origin, Recording, describe_assertion
 from .recorder import (
     ContextReport,
     Recorder,
@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-key",
         metavar="KEY",
         help="key that records a check on whatever the pointer is over,"
-        " e.g. ctrl+F1 (default: ctrl+F1)",
+        " e.g. ctrl+F9 (default: ctrl+1)",
     )
     capture.add_argument(
         "--no-checks",
@@ -78,6 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const="",
         help="record no checks; the check key types into the application instead",
+    )
+    capture.add_argument(
+        "--no-check-feedback",
+        dest="announce_checks",
+        action="store_false",
+        default=None,
+        help="don't print each check to the terminal as it is recorded",
     )
     capture.add_argument(
         "--record-motion",
@@ -264,6 +271,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "stop_key",
         "stop_key_presses",
         "check_key",
+        "announce_checks",
         "record_motion",
         "window_context",
         "element_context",
@@ -325,6 +333,10 @@ def _record(
         recorder.on_stop_progress = lambda got, needed: print(
             _stop_progress_message(settings, got, needed), file=sys.stderr
         )
+        if settings.announce_checks:
+            recorder.on_check = lambda assertion: print(
+                f"Check: {describe_assertion(assertion)}", file=sys.stderr
+            )
         recorder.start()
     except CaptureUnavailable as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)

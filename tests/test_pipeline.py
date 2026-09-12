@@ -20,7 +20,7 @@ def test_example_config_parses_and_sets_only_known_keys():
     assert source == EXAMPLE_CONFIG
     assert settings.stop_key == "Escape"
     assert settings.stop_key_presses == 2
-    assert settings.check_key == "ctrl+F1"
+    assert settings.check_key == "ctrl+1"
     assert settings.locators == "element"
 
 
@@ -115,7 +115,7 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
         RawEvent(kind="button_press", timestamp=1.0, x=430, y=115, button=1),
         RawEvent(kind="button_release", timestamp=1.05, x=430, y=115, button=1),
         RawEvent(kind="key_press", timestamp=3.4, keysym="Control_L", x=100, y=505),
-        RawEvent(kind="key_press", timestamp=3.5, keysym="F1", x=100, y=505),
+        RawEvent(kind="key_press", timestamp=3.5, keysym="1", x=100, y=505),
     ]
 
     recording = Recording(environment=Environment(session_type="x11"))
@@ -132,7 +132,7 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     assert 'gui.button("Save").click()' in source
     assert 'expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")' in source
     # The check key itself is not part of the interaction being replayed.
-    assert "F1" not in source
+    assert "send_keys" not in source
 
 
 def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
@@ -147,7 +147,7 @@ def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
     recording = Recording()
     for raw in (
         RawEvent(kind="key_press", timestamp=1.0, keysym="Control_L", x=10, y=10),
-        RawEvent(kind="key_press", timestamp=1.05, keysym="F1", x=10, y=10),
+        RawEvent(kind="key_press", timestamp=1.05, keysym="1", x=10, y=10),
     ):
         for event in normalizer.feed(raw):
             recording.add(event)
