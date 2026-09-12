@@ -130,7 +130,7 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     compile(source, "<pipeline>", "exec")
 
     assert 'gui.button("Save").click()' in source
-    assert 'expect_text(gui, role=Role.LABEL, name="Status", equals="Saved")' in source
+    assert 'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")' in source
     # The check key itself is not part of the interaction being replayed.
     assert "send_keys" not in source
 
@@ -156,7 +156,7 @@ def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
     recording.save(path)
     source = generate(Recording.load(path))
     assert (
-        'expect_checked(gui, role=Role.CHECK_BOX, name="Read only", checked=True)'
+        'gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True)'
         in source
     )
 
@@ -237,5 +237,5 @@ def test_an_editor_that_renames_itself_while_typing_stays_one_window():
     recording.events = infer_synchronization(recording.events)
     source = generate(recording)
     assert validate(source) == []
-    assert source.count("gui.wait_for_window") == 1
+    assert source.count("gui.expect_window") == 1
     assert "New Document" in source

@@ -126,7 +126,31 @@ class NormalizerOptions:
     """Seconds of inactivity that become an explicit Pause event."""
 
     record_motion: bool = False
-    """Emit pointer motion in its own right, not only as part of a drag."""
+    """Emit pointer motion in its own right, not only as part of a drag.
+
+    Off by default because emitting *every* motion event resolves the window
+    and element under each one -- hundreds of resolver calls a second, some
+    of them subprocesses -- and renders a wall of `gui.move_mouse(...)` no
+    one wants to read. `hover_threshold` below is the cheap half of the same
+    idea: the pointer is tracked either way, but only where it *rested* is
+    resolved and emitted.
+    """
+
+    hover_threshold: float = 0.3
+    """Seconds the pointer must rest somewhere for that to be a hover.
+
+    A hover is an input, not an accident of moving: it opens submenus, shows
+    tooltips, and starts the auto-scroll on a long menu. None of that is a
+    click, so without this a recording of it replays as a pointer that
+    teleports straight to a coordinate which is only valid *because* of the
+    hover that never happened. Found live on MATE: the Applications menu's
+    categories open their submenu on hover, so the recorded click on 'Text
+    Editor' at (226, 368) landed on bare desktop -- the submenu containing
+    it was never opened -- and the replay dismissed the menu instead.
+
+    Above the incidental slowing-down that happens while aiming at a target,
+    below a deliberate rest. Set to 0 to disable hover detection entirely.
+    """
 
     sensitive: bool = False
     """Treat all typed text as sensitive, whatever the focused element is."""
@@ -187,6 +211,10 @@ class Normalizer:
     _click_at: float = field(default=0.0, init=False)
     _clicked: Target | None = field(default=None, init=False)
     _last_input: float | None = field(default=None, init=False)
+    _rest: tuple[tuple[int, int], float] | None = field(default=None, init=False)
+    """Where the pointer has been sitting, and since when. Set only by real
+    motion, so a pointer that simply has not moved since a click is not
+    mistaken for someone hovering. See `_dwell`."""
 
     def feed(self, raw: RawEvent) -> list[Event]:
         """Consume one raw event, returning whatever became final.
@@ -208,6 +236,12 @@ class Normalizer:
             out.append(gap)
         elif raw.kind not in ("button_press", "button_release", "motion"):
             out.extend(self._flush_click())
+        if raw.kind in ("button_press", "scroll"):
+            # A hover ends where the next pointer action begins, and has to
+            # be emitted before it. Keyboard events deliberately do not end
+            # one: the pointer is wherever it was left while typing, which
+            # is not someone hovering anything.
+            out.extend(self._flush_dwell(raw))
         handler = getattr(self, f"_on_{raw.kind}")
         out.extend(handler(raw))
         self._last_input = raw.timestamp
@@ -227,18 +261,81 @@ class Normalizer:
     # -- pointer -------------------------------------------------------------
 
     def _on_motion(self, raw: RawEvent) -> list[Event]:
-        """Track motion; emit it only when it is meaningful on its own."""
+        """Track motion; emit it only when it is meaningful on its own.
+
+        Two ways it can be meaningful. `record_motion` emits every event, for
+        a recording that wants the whole path. Otherwise the pointer is still
+        followed -- cheaply, position and time only, no resolver -- so that
+        somewhere it *rested* can be emitted as the hover it was. See
+        `hover_threshold`.
+        """
         for pending in self._held.values():
             if _distance(pending.last, (raw.x, raw.y)) >= self.options.motion_threshold:
                 pending.moved = True
             pending.last = (raw.x, raw.y)
-        if not self.options.record_motion or self._held:
+        if self._held:
+            # Motion under a held button is a drag being dragged, not a rest.
+            self._rest = None
             return []
+        if self.options.record_motion:
+            return [
+                MouseMove(
+                    timestamp=self._at(raw),
+                    target=self._target(raw),
+                )
+            ]
+        here = (raw.x, raw.y)
+        if self._rest is None:
+            self._rest = (here, raw.timestamp)
+            return []
+        where, since = self._rest
+        if _distance(where, here) < self.options.motion_threshold:
+            # Still resting. The arrival time deliberately stays the earliest
+            # one, so a hand that trembles over a menu entry still reads as
+            # one rest rather than restarting the clock on every jitter.
+            return []
+        self._rest = (here, raw.timestamp)
+        return self._dwell(where, since, raw.timestamp, raw.screen)
+
+    def _flush_dwell(self, raw: RawEvent) -> list[Event]:
+        """Emit the hover the pointer was in the middle of, if it was one."""
+        if self._rest is None:
+            return []
+        where, since = self._rest
+        self._rest = None
+        if _distance(where, (raw.x, raw.y)) < self.options.motion_threshold:
+            # The action is happening where the pointer already was: whatever
+            # renders it will move there itself, so a move saying the same
+            # thing would only be noise.
+            return []
+        return self._dwell(where, since, raw.timestamp, raw.screen)
+
+    def _dwell(
+        self, where: tuple[int, int], since: float, until: float, screen: int
+    ) -> list[Event]:
+        """A MouseMove for a point the pointer rested at long enough to mean it.
+
+        The only place hover detection pays the resolver, and it pays it once
+        per hover rather than once per motion event -- which is the whole
+        reason the pointer can be followed at all without `record_motion`'s
+        cost.
+        """
+        rested = until - since
+        if not self.options.hover_threshold or rested < self.options.hover_threshold:
+            return []
+        # Whatever is still buffered happened *before* this hover -- a click
+        # waiting out its double-click window, a run of typing waiting for
+        # the keyboard to go quiet -- so it has to come out ahead of it.
+        # Events carry their own timestamps, but a recording is a list, and
+        # emitting the hover first would put it in the wrong place in it.
         return [
+            *self._flush_click(),
+            *self._flush_text(),
             MouseMove(
-                timestamp=self._at(raw),
-                target=self._target(raw),
-            )
+                timestamp=max(0.0, since - self.started),
+                target=self.resolver.resolve(where[0], where[1], screen),
+                dwell=round(rested, 2),
+            ),
         ]
 
     def _on_button_press(self, raw: RawEvent) -> list[Event]:

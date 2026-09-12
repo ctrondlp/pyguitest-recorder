@@ -301,7 +301,9 @@ def test_the_raise_survives_into_the_generated_script():
     events = [click(1.0, MAIN), click(2.0, DIALOG), click(3.0, MAIN)]
     recording = Recording(events=infer_synchronization(events))
     source = generate(recording)
-    assert "gui.activate_window(" in source
+    # focus_window, not activate_window: the raise confirms it took, and is
+    # emitted only here, where the recording says the person switched.
+    assert "gui.focus_window(" in source
     assert validate(source) == []
 
 

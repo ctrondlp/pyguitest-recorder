@@ -36,9 +36,19 @@ click_interval = 0.5        # seconds a button may be held and still be a click
 double_click_interval = 0.4 # seconds within which clicks merge
 text_idle = 1.5             # seconds of silence that end a run of typed text
 pause_threshold = 1.0       # seconds of inactivity that become a Pause event
-record_motion = false       # emit pointer motion in its own right. Needed for
-                            # anything driven by hovering -- opening a menu
-                            # without clicking it records as nothing without it.
+hover_threshold = 0.3       # seconds the pointer must rest somewhere for that
+                            # to record as a hover. This is what makes anything
+                            # driven by hovering replayable -- a menu category
+                            # that opens its submenu when the pointer sits on
+                            # it is not a click, and without this the recording
+                            # keeps only the click that followed, which then
+                            # replays onto whatever is there with no submenu
+                            # open. Set to 0 for clicks, drags and keys only.
+record_motion = false       # emit *every* pointer motion, not just the rests.
+                            # Full fidelity, and expensive: each one resolves
+                            # the window and element under it, and renders a
+                            # line of its own. hover_threshold above covers the
+                            # case this used to be needed for.
 
 # Synchronization inference: work out what each pause was waiting for, and
 # emit that instead of a sleep. A window that opened becomes wait_for_window,

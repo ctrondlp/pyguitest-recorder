@@ -73,7 +73,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.8"
+PROFILE = "pyguitest-0.9"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -143,24 +143,6 @@ _BUTTONS = {2: "middle", 3: "right"}
 _SENDKEYS_SPECIAL = frozenset("^%+~#&(){}")
 """Characters send_keys reads as syntax; braced when one is the key itself."""
 
-_APP_ID_HELPER = "_window_by_app_id"
-"""Name of the emitted lookup that finds a window by application id."""
-
-_ELEMENT_HELPER = "_expect_element"
-"""Name of the lookup the `expect_` helpers share."""
-
-_WINDOW_HELPER = "_expect_window"
-"""Name of the lookup that turns a timed-out `wait_for_window` into a clear
-failure, rather than the `None` a script goes on to call `geometry()` or
-`activate_window()` on -- both crash on it with an error that names neither
-the window nor the fact that it never appeared. `wait_for_window` returning
-`None` on timeout is documented, correct behavior, not a bug to work around;
-a generated script assuming success without checking is the actual gap,
-exactly the shape `_expect_element` already closes for elements."""
-
-_DOUBLE_CLICK_HELPER = "double_click_element"
-"""Name of the emitted double click that `Element` itself cannot do."""
-
 _UNATTRIBUTED_SETTLE = 0.3
 """Seconds waited before a pointer action whose target resolved to no window
 at all.
@@ -177,16 +159,57 @@ margin rather than trusting the point is already valid the instant it is
 used.
 """
 
-_HELPER_NEEDS = {
-    "expect_text": {_ELEMENT_HELPER},
-    "expect_checked": {_ELEMENT_HELPER},
-    "expect_showing": {_ELEMENT_HELPER},
-}
-"""Helpers that call other helpers, so requesting one emits both.
+_SEPARATES_CLICKS = (
+    Pause,
+    WaitForIdle,
+    Sync,
+    TextInput,
+    KeyStroke,
+    HotKey,
+    Drag,
+    Scroll,
+    WindowActivate,
+)
+"""Events that genuinely put time between two clicks, for the settle below.
 
-One level deep, and deliberately not a general dependency graph: the moment
-a generated file needs one of those, the thing to do is stop generating
-these and put them in a library the script imports.
+Deliberately a list of what *does* separate rather than "anything that is
+not a click". Binding a window does not: `gui.expect_window(...)` for a
+window that is already open -- the desktop, a panel -- returns immediately,
+and a `WaitForWindow` for one is rendered as that same instant lookup.
+Treating it as separation is what left a MATE Applications menu with no
+pause at all between the click that opens it and the click meant to pick an
+item out of it: the second click landed before the menu had drawn, the menu
+took the click as a dismiss, and the application never started. Found live.
+A comment is not separation either, for the same reason -- it emits no code.
+"""
+
+_HOVER_WAIT_CAP = 2.0
+"""Longest wait a recorded hover is replayed as, in seconds.
+
+A hover only has to last until the interface responds to it -- a submenu
+opens in a fraction of a second. Past that the pointer was resting because
+the person was reading, or thinking, or answering the door, and replaying
+that faithfully would only make the script slow.
+"""
+
+_COORDINATE_CLICK_SETTLE = 0.5
+"""Seconds inserted between two coordinate clicks `normalize.py` recorded as
+separate, back to back, with nothing rendered in between.
+
+Reproduced live on GhostBSD/MATE: `double_click_interval` (0.4s) is how
+close together two clicks have to be for `normalize.py` to merge them into
+one double click, but only a gap of `pause_threshold` (1.0s) or more becomes
+an explicit `Pause`/`gui.wait(...)`. A real gap in between -- long enough
+that two clicks were genuinely separate, too short to be worth a comment --
+falls through both and is silently dropped, so the generated script issues
+them back to back. Replayed against a real recording of clicking a GNOME
+Text Editor window's close button three times, that turned into a
+double-click on the *app's own* header bar a fraction of a second later than
+intended -- close was never given a chance to register before the pair
+after it read as one gesture, and it toggled maximize instead. Fixed here,
+not in `normalize.py`: the dropped gap is real but its exact duration is not
+worth reconstructing, only that replay must not let two clicks the recording
+already decided were separate collapse back into one on replay.
 """
 
 _MODULE_DUNDERS = frozenset({"__name__", "__file__", "__doc__", "__spec__"})
@@ -267,7 +290,13 @@ class _State:
     geometry_for: str | None = None
     geometry_origin: tuple[int, int] | None = None
     pointer: str | None = None
-    helpers: set[str] = field(default_factory=set)
+    focused_window: str | None = None
+    """The window variable the script has most recently focused, so keyboard
+    input can confirm focus once per switch rather than before every key.
+    See `_focus_before_typing`."""
+    bare_click_pending: bool = False
+    """Whether the last line emitted was a coordinate click with nothing --
+    no wait, no other action -- after it. See _COORDINATE_CLICK_SETTLE."""
     secrets: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     element_scopes: dict[_ElementKey, tuple[str, str]] = field(default_factory=dict)
@@ -455,6 +484,8 @@ class PythonGenerator:
             return
         if self.options.comments and event.note:
             state.lines.append(f"# {event.note}")
+        if isinstance(event, _SEPARATES_CLICKS):
+            state.bare_click_pending = False
         handler(event, state)
 
     def _emit_comment(self, event: Comment, state: _State) -> None:
@@ -475,9 +506,23 @@ class PythonGenerator:
         state.lines.append("gui.sync()")
 
     def _emit_mousemove(self, event: MouseMove, state: _State) -> None:
-        """Render meaningful pointer motion."""
+        """Render meaningful pointer motion, and the hover if it was one."""
         state.capabilities.add("POINTER_MOVE")
         self._move(event.target, state)
+        if not event.dwell:
+            return
+        # The wait is the point of a hover, not decoration: the interface
+        # reacts to the pointer having *stayed*, and a replay that arrives
+        # and leaves in the same instant gets no submenu, no tooltip, and
+        # then clicks a coordinate that only exists because of them.
+        state.capabilities.add("TIMING")
+        self._comment(
+            "the pointer rested here long enough for the interface to react"
+            " -- a hover, not a move on the way somewhere",
+            state,
+        )
+        state.lines.append(f"gui.wait({min(event.dwell, _HOVER_WAIT_CAP):.2f})")
+        state.bare_click_pending = False
 
     def _emit_click(self, event: Click, state: _State) -> None:
         """Render a click, preferring the element under the pointer.
@@ -488,14 +533,25 @@ class PythonGenerator:
         cleanly and does the wrong thing, which is the worst outcome here.
         """
         if event.button == 1 and event.count == 2 and self._double_click(event, state):
+            state.bare_click_pending = False
             return
         if event.button == 1:
             call = self._element_call(event.target.element, state, "click()")
             if call is not None:
                 state.lines.extend([call] * event.count)
                 state.pointer = None
+                state.bare_click_pending = False
                 self._note_element_repeat(event, state)
                 return
+        if state.bare_click_pending:
+            state.capabilities.add("TIMING")
+            self._comment(
+                "spaced out from the click before it: whatever that one"
+                " opened may not have drawn yet, and two clicks with no gap"
+                " can also read as one double-click to the application",
+                state,
+            )
+            state.lines.append(f"gui.wait({_COORDINATE_CLICK_SETTLE:g})")
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON"})
         self._move(event.target, state)
         self._note_button_fallback(event, state)
@@ -506,6 +562,7 @@ class PythonGenerator:
         else:
             state.lines.extend([f"gui.click({button})"] * event.count)
             self._note_repeat(event, state)
+        state.bare_click_pending = True
 
     def _double_click(self, event: Click, state: _State) -> bool:
         """Render a double click on a named element that stays a double click.
@@ -533,8 +590,7 @@ class PythonGenerator:
         state.capabilities.update(
             {"ELEMENT_TREE", "ELEMENT_GEOMETRY", "POINTER_MOVE", "POINTER_BUTTON"}
         )
-        state.helpers.add(_DOUBLE_CLICK_HELPER)
-        state.lines.append(f"{_DOUBLE_CLICK_HELPER}(gui, {locator})")
+        state.lines.append(f"gui.double_click_element({locator})")
         state.pointer = None
         return True
 
@@ -674,8 +730,7 @@ class PythonGenerator:
             return
         self._check_comment(describe_assertion(event), state)
         state.capabilities.add("WINDOW_LIST")
-        state.helpers.add("expect_window")
-        state.lines.append(f"expect_window(gui, {_title_pattern(window.title)})")
+        state.lines.append(f"gui.expect_window({_title_pattern(window.title)})")
 
     def _check_nothing(self, event: Assertion, state: _State) -> None:
         """Record that a check was asked for where nothing could be identified.
@@ -698,7 +753,6 @@ class PythonGenerator:
         warning when ancestry cannot tell them apart.
         """
         state.capabilities.add("ELEMENT_TREE")
-        state.helpers.add(helper)
         args = self._role_arg(element.role, state)
         key: _ElementKey = (element.role, element.name, element.path)
         scope = state.element_scopes.get(key)
@@ -706,9 +760,7 @@ class PythonGenerator:
         if scope is not None:
             within = self._ancestor_var(scope, state)
             tail += f", within={within}"
-        state.lines.append(
-            f"{helper}(gui, {args}, name={_literal(element.name)}{tail})"
-        )
+        state.lines.append(f"gui.{helper}({args}, name={_literal(element.name)}{tail})")
 
     def _check_comment(self, what: str, state: _State) -> None:
         """Label a check in the words of the person who will read it."""
@@ -791,6 +843,7 @@ class PythonGenerator:
                 f"gui.text_field({_literal(element.name)}).set_text({text})"
             )
             return
+        self._focus_before_typing(event.target, state)
         state.capabilities.add("TEXT_ENTRY")
         self._note_unidentified_text(event, state)
         state.lines.append(f"gui.type_text({text})")
@@ -836,8 +889,37 @@ class PythonGenerator:
         state.secrets.append(name)
         return name
 
+    def _focus_before_typing(self, target: Target | None, state: _State) -> None:
+        """Confirm the window about to be typed into actually holds focus.
+
+        Keyboard input is the one thing that goes somewhere invisible when it
+        goes wrong: a click lands at a coordinate whether or not the window
+        was ready, but a keystroke goes to whatever *does* hold focus, and a
+        freshly-opened window can exist -- `expect_window` has already
+        returned it -- a moment before the window manager gives it focus.
+        Reproduced live twice: typed text landing in the terminal the replay
+        script was itself running in.
+
+        So focus is confirmed here, immediately before typing, and nowhere
+        else. It deliberately does not happen when a window is merely bound:
+        raising a window as a side effect of looking it up is what dismissed
+        an open menu by lifting the desktop out from under it, also live.
+        Emitted once per switch -- typing two runs into one window without
+        leaving it confirms focus once.
+        """
+        window = target.window if target else None
+        if window is None or not window.addressable:
+            return
+        name = self._window_var(window, state)
+        if name == state.focused_window:
+            return
+        state.capabilities.add("WINDOW_ACTIVATE")
+        state.lines.append(f"gui.focus_window({name})")
+        state.focused_window = name
+
     def _emit_keystroke(self, event: KeyStroke, state: _State) -> None:
         """Render a single key tap."""
+        self._focus_before_typing(event.target, state)
         state.capabilities.add("KEY_EVENT")
         state.lines.append(f"gui.tap_key({_literal(event.key)})")
 
@@ -849,6 +931,7 @@ class PythonGenerator:
         required TEXT_ENTRY could pass `require()` on a backend that cannot
         press a modifier at all.
         """
+        self._focus_before_typing(event.target, state)
         state.capabilities.add("KEY_EVENT")
         state.lines.append(f"gui.send_keys({_literal(_hotkey_string(event.keys))})")
 
@@ -862,7 +945,14 @@ class PythonGenerator:
             return
         name = self._window_var(event.window, state)
         state.capabilities.add("WINDOW_ACTIVATE")
-        state.lines.append(f"gui.activate_window({name})")
+        # focus_window, not activate_window: it waits for the window to stop
+        # moving, asks more than once, and confirms the request was honored.
+        # This is the one place a generated script should do that -- where
+        # the recording says the person deliberately switched windows --
+        # rather than on every window it happens to bind, which is what
+        # dismissed an open menu by raising the desktop underneath it.
+        state.lines.append(f"gui.focus_window({name})")
+        state.focused_window = name
         # Raising a window can move it, so both the cached origin and the
         # pointer position stop being trustworthy here.
         state.geometry_for = None
@@ -1121,13 +1211,15 @@ class PythonGenerator:
         """Render the call that finds `window` again at replay time.
 
         `wait_for_window` matches a plain-string title literally, as a
-        substring -- see `_title_pattern`.
+        substring -- see `_title_pattern`. `expect_window` raises
+        `WindowNotFound` in place of `wait_for_window`'s `None`, and settles
+        the window (focus, geometry) before handing it back -- see its
+        docstring in pyguitest.
 
         A title seen to drift during the recording is not used at all. Titles
         drift constantly, an editor appending its document name being the
         documented case, and matching on one is the most common reason a
-        generated script stops finding its window. pyguitest has no lookup by
-        application id, so this emits the small one it needs.
+        generated script stops finding its window.
         """
         if window.title and (window.title_stable or not window.app_id):
             if not window.title_stable:
@@ -1136,11 +1228,8 @@ class PythonGenerator:
                     " app id, so this match is fragile",
                     state,
                 )
-            state.helpers.add(_WINDOW_HELPER)
-            state.capabilities.add("WINDOW_ACTIVATE")
             return (
-                f"{_WINDOW_HELPER}(gui, {_title_pattern(window.title)}, "
-                f"timeout={wait:g})"
+                f"gui.expect_window({_title_pattern(window.title)}, timeout={wait:g})"
             )
         if not window.app_id:
             # Neither identity: callers guard on `addressable`, so this is
@@ -1153,9 +1242,8 @@ class PythonGenerator:
                 " matching on the app id instead",
                 state,
             )
-        state.helpers.add(_APP_ID_HELPER)
         app_id = _literal(window.app_id)
-        return f"{_APP_ID_HELPER}(gui, {app_id}, {wait:g})"
+        return f"gui.expect_window(app_id={app_id}, timeout={wait:g})"
 
     # -- assembly ------------------------------------------------------------
 
@@ -1186,9 +1274,6 @@ class PythonGenerator:
             out.append("        pass")
         out.append("")
         out.append("")
-        for helper in _helpers_needed(state.helpers):
-            out.extend(_HELPER_SOURCE[helper].splitlines())
-            out.append("")
         out.append('if __name__ == "__main__":')
         out.append(f"    {self.options.function_name}()")
         if self.options.include_header:
@@ -1254,36 +1339,8 @@ def _dragged_its_own_window(event: Drag) -> bool:
     return start.geometry[:2] != end.geometry[:2]
 
 
-def _helpers_needed(requested: set[str]) -> list[str]:
-    """Every helper the file needs, in parent -> child -> child order.
-
-    A helper the script's body actually calls is listed before whatever
-    *that* helper calls in turn, so a reader meets each one only after
-    something already introduced explains why it is there, never as a
-    forward reference to a name not yet used. Roots (the helpers actually
-    requested) are ordered alphabetically among themselves for a stable
-    diff; a shared child (e.g. `_expect_element`, needed by all three
-    `expect_*` helpers) is placed once, right after the first root that
-    needs it.
-    """
-    ordered: list[str] = []
-    seen: set[str] = set()
-
-    def visit(helper: str) -> None:
-        if helper in seen:
-            return
-        seen.add(helper)
-        ordered.append(helper)
-        for child in sorted(_HELPER_NEEDS.get(helper, ())):
-            visit(child)
-
-    for helper in sorted(requested):
-        visit(helper)
-    return ordered
-
-
 _BINDING = re.compile(
-    r"^(\w+) = (?:gui\.wait_for_window|gui\.active_window|_window_by_app_id)\("
+    r"^(\w+) = (?:gui\.wait_for_window|gui\.active_window|gui\.expect_window)\("
 )
 """A generated line that binds a window handle, for the unused-name pass."""
 
@@ -1325,10 +1382,8 @@ def _require_lines(capabilities: set[str]) -> list[str]:
 def _imports(state: _State, options: GeneratorOptions) -> list[str]:
     """Render the import block the generated body actually needs."""
     lines: list[str] = []
-    stdlib = (
-        (["os"] if state.secrets else [])
-        + (["time"] if _APP_ID_HELPER in state.helpers else [])
-        + (["warnings"] if options.suppress_keymap_warning else [])
+    stdlib = (["os"] if state.secrets else []) + (
+        ["warnings"] if options.suppress_keymap_warning else []
     )
     if stdlib:
         lines.extend(f"import {name}" for name in stdlib)
@@ -1473,150 +1528,6 @@ def _footer(recording: Recording, state: _State) -> list[str]:
         lines.append(f"#   - {wrapped[0]}")
         lines.extend(f"#     {rest}" for rest in wrapped[1:])
     return lines
-
-
-_HELPER_SOURCE = {
-    _APP_ID_HELPER: '''def _window_by_app_id(gui, app_id, timeout=10.0):
-    """Return the first window with this application id, waiting for it.
-
-    pyguitest finds windows by title regex only, and this recording's window
-    changed its title while it was being made. Application ids do not drift,
-    so the lookup is done here instead.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        for window in gui.windows():
-            if window.app_id == app_id:
-                return window
-        if time.monotonic() >= deadline:
-            raise LookupError(f"no window with app_id {app_id!r} appeared")
-        gui.wait(0.25)
-''',
-    _DOUBLE_CLICK_HELPER: '''def double_click_element(gui, element):
-    """Double-click a named element, which Element cannot do for itself.
-
-    Two `element.click()` calls are not a double click: each is a separate
-    round trip over the accessibility bus, which is slower than any toolkit's
-    double-click interval, so the pair arrives as two single clicks and a
-    double-clicked folder icon simply does not open.
-
-    The element is still the locator -- its rectangle is read here, at replay,
-    rather than baked in when the recording was made -- and only the gesture
-    falls back to the pointer, because that is where pyguitest's real
-    double_click lives.
-    """
-    x, y, width, height = gui.extents(element)
-    gui.move_mouse(x + width // 2, y + height // 2)
-    gui.double_click()
-''',
-    _WINDOW_HELPER: '''def _expect_window(gui, title, timeout):
-    """Return the window matching `title`, or fail saying it never appeared."""
-    window = gui.wait_for_window(title, timeout=timeout)
-    if window is None:
-        raise AssertionError(
-            f"expected a window matching {title!r} to be open, but none "
-            f"appeared within {timeout:g}s"
-        )
-    # A freshly-opened window can be found to exist, and even have settled
-    # geometry, before it actually holds keyboard focus, or before the
-    # window manager considers it ready to receive it -- seen live as typed
-    # text landing in the terminal the script itself was running in while
-    # the real window was still coming up. Geometry is given a moment to
-    # stop changing first (a still-animating window can otherwise be
-    # clicked at a position it is about to leave); activation is then
-    # retried a few times, confirming it actually took, rather than trusted
-    # to one call -- or the click that follows -- to transfer focus as a
-    # side effect. All of this is best-effort: nothing here raises if it
-    # does not fully succeed, since a script that got this far already has
-    # a real window to hand back.
-    try:
-        last = gui.geometry(window)
-        for _ in range(3):
-            gui.wait(0.1)
-            current = gui.geometry(window)
-            if current == last:
-                break
-            last = current
-    except Exception:
-        pass
-    for _ in range(5):
-        try:
-            gui.activate_window(window)
-            if gui.active_window() == window:
-                break
-        except Exception:
-            break
-        gui.wait(0.1)
-    return window
-''',
-    _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout, within=None):
-    """Return the named element, or fail saying it never appeared."""
-    element = gui.wait_for_element(role=role, name=name, within=within, timeout=timeout)
-    if element is None:
-        raise AssertionError(
-            f"expected an element named {name!r} with role {role!r} to be "
-            f"showing, but none appeared within {timeout:g}s"
-        )
-    return element
-''',
-    "expect_text": '''def expect_text(
-    gui, role, name, equals, timeout=5.0, within=None
-):
-    """Fail unless the named element reads `equals`.
-
-    Re-read until `timeout` rather than checked once. A check recorded right
-    after the action it verifies would otherwise race the application, which
-    has not necessarily finished redrawing by the time the click returns.
-    """
-    element = _expect_element(gui, role, name, timeout, within)
-    if gui.wait_until(lambda: element.text == equals, timeout=timeout):
-        return
-    raise AssertionError(
-        f"expected {name!r} to read {equals!r}, but it reads {element.text!r}"
-    )
-''',
-    "expect_checked": '''def expect_checked(
-    gui, role, name, checked, timeout=5.0, within=None
-):
-    """Fail unless the named checkbox, radio button or toggle is in `checked`."""
-    element = _expect_element(gui, role, name, timeout, within)
-    if gui.wait_until(lambda: element.checked == checked, timeout=timeout):
-        return
-    wanted = "checked" if checked else "unchecked"
-    actual = "checked" if element.checked else "unchecked"
-    raise AssertionError(f"expected {name!r} to be {wanted}, but it is {actual}")
-''',
-    "expect_showing": '''def expect_showing(gui, role, name, timeout=5.0, within=None):
-    """Fail unless the named element is present and visible."""
-    element = _expect_element(gui, role, name, timeout, within)
-    if gui.wait_until(lambda: element.visible, timeout=timeout):
-        return
-    raise AssertionError(f"expected {name!r} to be showing, but it is not visible")
-''',
-    "expect_window": '''def expect_window(gui, title, timeout=5.0):
-    """Fail unless a window whose title matches `title` is open.
-
-    `title` is matched the same way `wait_for_window` takes it: a plain
-    string matches literally, as a substring; pass a compiled regex for
-    pattern matching.
-    """
-    if gui.wait_for_window(title, timeout=timeout) is not None:
-        return
-    raise AssertionError(
-        f"expected a window matching {title!r} to be open, but none "
-        f"appeared within {timeout:g}s"
-    )
-''',
-}
-"""Functions the generated module carries when it needs them.
-
-The `expect_` family is what makes a recorded check readable to whoever
-inherits the script. `assert gui.element(...).text == "Saved"` says nothing
-when it fails -- an `AssertionError` and a line number -- where these name
-the element, what it was supposed to read and what it actually reads. The
-retry is the other half: a check is written the instant the action returns,
-which is earlier than the application finishes responding to it.
-"""
 
 
 def _title_pattern(title: str) -> str:

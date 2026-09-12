@@ -505,6 +505,7 @@ class Recorder:
             text_idle=self.settings.text_idle,
             pause_threshold=self.settings.pause_threshold,
             record_motion=self.settings.record_motion,
+            hover_threshold=self.settings.hover_threshold,
             sensitive=self.settings.sensitive,
             check_key=self.settings.check_key,
         )

@@ -214,6 +214,16 @@ class MouseMove(Event):
 
     target: Target
 
+    dwell: float = 0.0
+    """Seconds the pointer rested here, when this move *is* a hover.
+
+    Zero for motion recorded in its own right (`record_motion`), which is a
+    position and nothing more. Non-zero says the pointer arrived and stayed,
+    long enough for the interface to treat it as an input -- a submenu
+    opening being the case this was built for -- so a replay has to stay
+    there too, not just pass through the coordinate.
+    """
+
 
 @dataclass(kw_only=True)
 class Click(Event):
