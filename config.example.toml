@@ -19,7 +19,7 @@ stop_key_presses = 2      # ...pressed this many times in a row. Two, because
                           # recorded; presses that do not complete a run are
                           # passed through and recorded. Use 1 with a key
                           # nothing else wants, such as Pause.
-stop_key_interval = 1.0   # seconds within which those presses must arrive
+stop_key_interval = 2.0   # seconds within which those presses must arrive
 check_key = "ctrl+F1"     # records a check on what is under the pointer;
                           # "" records none and lets the key through
 window_context = true     # open a pyguitest session to identify windows

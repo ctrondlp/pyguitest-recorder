@@ -1,6 +1,12 @@
 import pytest
 
-from pyguitest_recorder.cli import _trimmed_events, build_parser, main
+from pyguitest_recorder.cli import (
+    _stop_progress_message,
+    _trimmed_events,
+    build_parser,
+    main,
+)
+from pyguitest_recorder.config import Settings
 from pyguitest_recorder.model import Click, Recording, Target, WindowRef
 
 
@@ -113,6 +119,12 @@ def test_regenerate_honours_absolute_coordinates(saved, tmp_path):
 def test_regenerate_writes_to_stdout_without_output(saved, tmp_path, capsys):
     main(["--regenerate", str(saved), "--config", str(_empty(tmp_path))])
     assert "import pyguitest" in capsys.readouterr().out
+
+
+def test_stop_progress_message_names_the_configured_key_and_interval():
+    settings = Settings(stop_key="ctrl+Escape", stop_key_interval=2.0)
+    message = _stop_progress_message(settings, 1, 2)
+    assert message == "ctrl+Escape (1/2) -- press again within 2s to stop."
 
 
 def test_suppress_flags_default_off_and_emit_nothing(saved, tmp_path):
