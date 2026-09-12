@@ -74,6 +74,41 @@ def test_total_window_failure_degrades_to_coordinates():
     assert (target.x, target.y) == (7, 8)
 
 
+def test_a_transient_total_miss_is_retried_and_can_still_resolve(monkeypatch):
+    # Seen live on KDE: dismissing GNOME Text Editor's own in-window "Discard
+    # changes?" sheet -- two clicks close together in time -- came back with
+    # no window attribution at all, every time, even though the window was
+    # real and already active moments later. Most likely a slow kdotool
+    # subprocess round trip racing a fast second click, not a genuinely
+    # missing window -- a short, bounded retry on a total miss should
+    # recover from that instead of giving up on the first empty answer.
+    monkeypatch.setattr(resolver_module.time, "sleep", lambda seconds: None)
+    session = FakeSession(fail={"window_at"})
+    attempts = []
+    real_active_window = session.active_window
+
+    def flaky_active_window():
+        attempts.append(None)
+        if len(attempts) < 2:
+            raise RuntimeError("kdotool timed out")
+        return real_active_window()
+
+    session.active_window = flaky_active_window
+    target = resolver(session).resolve(150, 100)
+    assert target.window is not None
+    assert target.window.title == "Example"
+    assert len(attempts) == 2
+
+
+def test_the_retry_gives_up_after_a_bounded_number_of_attempts(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(resolver_module.time, "sleep", sleeps.append)
+    target = resolver(FakeSession(fail={"window_at", "active_window"})).resolve(7, 8)
+    assert target.window is None
+    # One initial attempt plus two retries -- not retried forever.
+    assert sleeps == [0.05, 0.05]
+
+
 def test_no_session_means_no_window_context():
     target = resolver(None).resolve(7, 8)
     assert target.window is None
@@ -134,6 +169,41 @@ def test_an_ancestry_owning_no_window_is_ignored_no_further(monkeypatch):
     made = resolver(ListingSession([window]))
     assert made.ignore_pids == {os.getpid()}
     assert made.resolve(1, 2).window is not None
+
+
+def test_app_id_shared_by_another_open_window_is_flagged_ambiguous():
+    # Seen live on KDE: a desktop shell's own desktop, panels, and popups can
+    # all report the same app_id ("plasmashell"), so finding a window by that
+    # alone can silently land on the wrong one of several.
+    popup = FakeWindow(title="", app_id="plasmashell", pid=555)
+    panel = FakeWindow(title="plasmashell", app_id="plasmashell", pid=555)
+    target = resolver(ListingSession([popup, panel])).resolve(1, 2)
+    assert target.window.app_id_ambiguous is True
+
+
+def test_app_id_unique_among_open_windows_is_not_ambiguous():
+    window = FakeWindow(app_id="org.example.App", pid=555)
+    other = FakeWindow(title="Other", app_id="org.other.App", pid=777)
+    target = resolver(ListingSession([window, other])).resolve(1, 2)
+    assert target.window.app_id_ambiguous is False
+
+
+def test_app_id_ambiguity_ignores_windows_owned_by_ignored_pids():
+    # The recorder's own terminal (or another ignored process) sharing an
+    # app_id with the real target should not taint the target as ambiguous.
+    window = FakeWindow(app_id="konsole", pid=555)
+    own_terminal = FakeWindow(title="recorder", app_id="konsole", pid=os.getpid())
+    target = resolver(ListingSession([window, own_terminal])).resolve(1, 2)
+    assert target.window.app_id_ambiguous is False
+
+
+def test_windows_listing_failure_during_ambiguity_check_defaults_to_not_ambiguous():
+    class NoListing(FakeSession):
+        def windows(self):
+            raise RuntimeError("no WINDOW_LIST on this backend")
+
+    target = resolver(NoListing()).resolve(1, 2)
+    assert target.window.app_id_ambiguous is False
 
 
 def test_a_drifting_title_is_marked_unstable():

@@ -186,6 +186,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="omit explanatory comments from the generated script",
     )
+    render.add_argument(
+        "--suppress-keymap-warning",
+        action="store_true",
+        default=None,
+        help="silence uinput's keyboard-layout caveat at replay (real signal"
+        " the first time, noise on repeat runs)",
+    )
+    render.add_argument(
+        "--suppress-atspi-chatter",
+        action="store_true",
+        default=None,
+        help="silence GLib's unrelated AT-SPI/dbind log noise at replay"
+        " (a process-wide log handler, so off by default)",
+    )
 
     privacy = parser.add_argument_group("privacy")
     privacy.add_argument(
@@ -259,6 +273,8 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "comments",
         "include_header",
         "header",
+        "suppress_keymap_warning",
+        "suppress_atspi_chatter",
         "sync_inference",
         "infer_idle",
         "sensitive",
@@ -292,6 +308,8 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         format_output=settings.format_output,
         include_header=settings.include_header,
         header=settings.header,
+        suppress_keymap_warning=settings.suppress_keymap_warning,
+        suppress_atspi_chatter=settings.suppress_atspi_chatter,
     )
 
 

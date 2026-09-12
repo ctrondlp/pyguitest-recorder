@@ -41,6 +41,27 @@ def test_event_round_trip_preserves_context(window, save_button):
     assert rebuilt.target.element == save_button
 
 
+def test_window_with_ambiguous_app_id_round_trips(save_button):
+    ambiguous = WindowRef(app_id="plasmashell", app_id_ambiguous=True)
+    click = Click(timestamp=0, delay=0, target=Target(x=1, y=2, window=ambiguous))
+    rebuilt = event_from_dict(click.to_dict())
+    assert rebuilt.target.window.app_id_ambiguous is True
+
+
+def test_ambiguous_app_id_alone_is_not_addressable():
+    assert not WindowRef(app_id="plasmashell", app_id_ambiguous=True).addressable
+
+
+def test_ambiguous_app_id_with_a_title_is_still_addressable():
+    assert WindowRef(
+        title="Kickoff", app_id="plasmashell", app_id_ambiguous=True
+    ).addressable
+
+
+def test_unambiguous_app_id_is_addressable():
+    assert WindowRef(app_id="plasmashell", app_id_ambiguous=False).addressable
+
+
 def test_hotkey_keys_round_trip_as_tuple():
     rebuilt = event_from_dict(HotKey(keys=("ctrl", "s")).to_dict())
     assert rebuilt.keys == ("ctrl", "s")

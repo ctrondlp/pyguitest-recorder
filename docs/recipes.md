@@ -191,6 +191,26 @@ it — a licence line or a ticket number should not silently drop the record of
 which versions and which desktop produced the file. A multi-line `header` in
 the config file works the same way.
 
+## Quieting warnings you already know about
+
+```sh
+pyguitest-recorder --suppress-keymap-warning
+pyguitest-recorder --suppress-atspi-chatter
+```
+
+Both default off, and both are about noise on a *replay* you already trust,
+not about recording. `--suppress-keymap-warning` silences pyguitest's own
+`KeymapWarning` (uinput injects raw scancodes, so replaying on a machine with
+a different keyboard layout than the one recorded on can type the wrong
+characters entirely silently otherwise) — real signal worth seeing at least
+once, so leave it on until you have actually checked layouts match. If your
+terminal is full of `dbind-WARNING **: AT-SPI: Error in GetItems ...` lines
+that have nothing to do with your script, `--suppress-atspi-chatter` silences
+GLib's own "dbind" log domain instead; this is native library chatter, not
+something pyguitest itself emits, so silencing it installs a process-wide
+GLib log handler for the whole replay -- harmless in practice, but the reason
+it is not the default.
+
 ## Recording a specific display
 
 ```sh

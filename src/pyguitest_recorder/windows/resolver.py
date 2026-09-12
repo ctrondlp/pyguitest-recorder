@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -132,6 +133,9 @@ class _Identity:
     """The *first* title this window was seen with -- see `_identify`."""
 
     stable: bool = True
+    app_id_ambiguous: bool = False
+    """Whether another window open at the moment this was identified shared
+    this app_id -- see `_app_id_ambiguous`."""
 
 
 @dataclass
@@ -599,18 +603,40 @@ class DesktopResolver:
         window occupying (-160, 0, 310, 263), which does not contain the point
         by 610 pixels. Every coordinate under it then came out relative to the
         wrong origin, in a script that validated clean.
+
+        A short, bounded retry on a total miss (neither the hit test nor the
+        active-window fallback found anything at all) is new: seen live and
+        reproduced repeatedly on KDE, dismissing GNOME Text Editor's own
+        in-window "Discard changes?" sheet -- two clicks landing barely a
+        moment apart -- came back with no window attribution every single
+        time, on a click that a live re-check moments later resolves
+        correctly. The window is real and already the active one; only the
+        live subprocess round trip queried for it (kdotool, via KWin's
+        scripting interface) is what is occasionally too slow to answer in
+        time for a fast second click, not the window itself being unfindable.
         """
         if self.session is None:
             return None
-        window = self._window_at(x, y, screen)
-        window = self._prefer_decoration_owner(window, x, y)
+        window = self._resolve_window(x, y, screen)
         if window is None:
-            window = self._plausible_active(x, y)
+            for _ in range(2):
+                time.sleep(0.05)
+                window = self._resolve_window(x, y, screen)
+                if window is not None:
+                    break
         if window is None:
             return None
         if window.pid in self.ignore_pids:
             return None
         return self._describe(window)
+
+    def _resolve_window(self, x: int, y: int, screen: int) -> Any:
+        """One attempt at the hit-test / decoration / active-window chain."""
+        window = self._window_at(x, y, screen)
+        window = self._prefer_decoration_owner(window, x, y)
+        if window is None:
+            window = self._plausible_active(x, y)
+        return window
 
     def _prefer_decoration_owner(self, window: Any, x: int, y: int) -> Any:
         """Swap a plain hit-test match for the active window's own decoration.
@@ -683,6 +709,7 @@ class DesktopResolver:
             pid=window.pid,
             geometry=self._geometry(window),
             title_stable=identity.stable,
+            app_id_ambiguous=identity.app_id_ambiguous,
         )
 
     def _identify(self, window: Any) -> _Identity:
@@ -720,11 +747,16 @@ class DesktopResolver:
         # having drifted.
         title = (window.title or "").strip()
         if known is None:
-            known = _Identity(app_id=window.app_id or "", title=title)
+            known = _Identity(
+                app_id=window.app_id or "",
+                title=title,
+                app_id_ambiguous=self._app_id_ambiguous(window),
+            )
             self._identity[key] = known
             return known
         if not known.app_id and window.app_id:
             known.app_id = window.app_id
+            known.app_id_ambiguous = self._app_id_ambiguous(window)
         if title and title != known.title:
             # Warned once per window, not once per title. An editor retitles
             # itself on every keystroke, so naming the new title here put
@@ -752,6 +784,31 @@ class DesktopResolver:
         except TypeError:
             return f"{window.app_id}\x00{window.title}"
         return window
+
+    def _app_id_ambiguous(self, window: Any) -> bool:
+        """Whether another currently open window shares this app_id.
+
+        A single process can own several toplevels sharing one app_id -- a
+        desktop shell's own desktop, panels, and popups, seen live all
+        reporting "plasmashell" on KDE. When that is true, app_id alone
+        cannot tell this window apart from the others, and a script matching
+        on it would find whichever one happens to be listed first, silently,
+        rather than the one actually meant. A live list is used rather than
+        anything cached, because the answer is about what else is open right
+        now, not what this window itself reports.
+        """
+        if not window.app_id or self.session is None:
+            return False
+        try:
+            live = self.session.windows()
+        except Exception:  # noqa: BLE001 - fails open, to app_id trusted as before
+            return False
+        return any(
+            other != window
+            and other.app_id == window.app_id
+            and other.pid not in self.ignore_pids
+            for other in live
+        )
 
     def _geometry(self, window: Any) -> tuple[int, int, int, int] | None:
         """Read the window rectangle, where the backend has one."""
