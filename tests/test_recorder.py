@@ -10,10 +10,14 @@ from __future__ import annotations
 
 from unittest import mock
 
-from pyguitest_recorder.backends.base import CaptureUnavailable
+from pyguitest_recorder.backends.base import CaptureUnavailable, RawEvent
 from pyguitest_recorder.config import Settings
 from pyguitest_recorder.recorder import Recorder
 from pyguitest_recorder.windows import NullResolver
+
+
+def _key(kind: str, ts: float, keysym: str = "Escape") -> RawEvent:
+    return RawEvent(kind=kind, timestamp=ts, keysym=keysym)
 
 
 class FakeBackend:
@@ -87,3 +91,74 @@ def test_the_session_is_not_leaked_when_the_backend_fails_to_start() -> None:
             raise AssertionError("expected CaptureUnavailable")
     assert session.closed
     assert backend.stopped
+
+
+class TestStopProgress:
+    """`on_stop_progress`, and the interval that decides when a run resets.
+
+    Exercises `_stop_sequence` directly -- it only reads `self.settings` and
+    `self._stop_pending`, so a bare `Recorder` needs no backend or session at
+    all to test the stop-key state machine in isolation.
+    """
+
+    def _recorder(self, **settings_kwargs):
+        return Recorder(settings=Settings(**settings_kwargs))
+
+    def test_fires_on_a_press_that_does_not_yet_complete_the_run(self):
+        calls = []
+        recorder = self._recorder()
+        recorder.on_stop_progress = lambda got, needed: calls.append((got, needed))
+        recorder._stop_sequence(_key("key_press", 0.0))
+        assert calls == [(1, 2)]
+
+    def test_does_not_fire_on_the_press_that_completes_the_run(self):
+        calls = []
+        recorder = self._recorder()
+        recorder.on_stop_progress = lambda got, needed: calls.append((got, needed))
+        recorder._stop_sequence(_key("key_press", 0.0))
+        recorder._stop_sequence(_key("key_release", 0.05))
+        _, stop = recorder._stop_sequence(_key("key_press", 0.1))
+        assert stop is True
+        assert calls == [(1, 2)]
+
+    def test_does_not_fire_on_a_release(self):
+        calls = []
+        recorder = self._recorder()
+        recorder.on_stop_progress = lambda got, needed: calls.append((got, needed))
+        recorder._stop_sequence(_key("key_press", 0.0))
+        calls.clear()
+        recorder._stop_sequence(_key("key_release", 0.05))
+        assert calls == []
+
+    def test_fires_again_after_a_too_slow_reset_starts_a_new_run(self):
+        # Seen live: a first press outside the interval does not just vanish
+        # silently -- it starts a fresh run of its own, which should also
+        # tell the user their (now first) press registered.
+        calls = []
+        recorder = self._recorder(stop_key_interval=1.0)
+        recorder.on_stop_progress = lambda got, needed: calls.append((got, needed))
+        recorder._stop_sequence(_key("key_press", 0.0))
+        recorder._stop_sequence(_key("key_release", 0.05))
+        calls.clear()
+        recorder._stop_sequence(_key("key_press", 2.0))
+        assert calls == [(1, 2)]
+
+    def test_none_is_the_default_and_nothing_calls_it(self):
+        recorder = self._recorder()
+        assert recorder.on_stop_progress is None
+        # Must not raise with no listener attached.
+        recorder._stop_sequence(_key("key_press", 0.0))
+
+    def test_reflects_a_custom_stop_key_presses_setting(self):
+        calls = []
+        recorder = self._recorder(stop_key_presses=3)
+        recorder.on_stop_progress = lambda got, needed: calls.append((got, needed))
+        recorder._stop_sequence(_key("key_press", 0.0))
+        assert calls == [(1, 3)]
+
+
+def test_stop_key_interval_default_is_loosened_from_the_original_1_0():
+    # 1.0 measured live as too tight for a natural press-pause-press cadence
+    # with no feedback that the first press registered -- a real capture
+    # showed a 1.333s gap between two presses meant as one deliberate run.
+    assert Settings().stop_key_interval == 2.0

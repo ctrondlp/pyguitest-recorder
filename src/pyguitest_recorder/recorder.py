@@ -18,7 +18,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -167,6 +167,20 @@ class Recorder:
     settings: Settings
     recording: Recording = field(default_factory=Recording)
 
+    on_stop_progress: Callable[[int, int], None] | None = None
+    """Called with (presses so far, presses needed) on a stop-key press that
+    registers but does not yet complete the run.
+
+    `None` (the default) reports nothing -- `Recorder` itself has no UI
+    concerns, matching `unstopped_presses` being read after the fact rather
+    than printed here. Seen live: someone presses the stop key once, sees no
+    visible effect, and naturally pauses to check before pressing again --
+    long enough to exceed `stop_key_interval` and have the first press
+    discarded as the recorded application's. A caller wanting to head that
+    off in real time (the CLI does) sets this rather than `Recorder` needing
+    to know how to print anything.
+    """
+
     _backend: CaptureBackend | None = field(default=None, init=False)
     _session: Any = field(default=None, init=False)
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
@@ -313,13 +327,28 @@ class Recorder:
             # application's and this one starts a new run of its own.
             pending, self._stop_pending = self._stop_pending, [raw]
             self._stop_passed += sum(1 for e in pending if e.kind == "key_press")
+            self._report_stop_progress(raw)
             return (pending, False)
         self._stop_pending.append(raw)
         presses = sum(1 for e in self._stop_pending if e.kind == "key_press")
         if presses >= max(1, self.settings.stop_key_presses):
             self._stop_pending = []
             return ([], True)
+        self._report_stop_progress(raw)
         return ([], False)
+
+    def _report_stop_progress(self, raw: Any) -> None:
+        """Tell `on_stop_progress` how many stop-key presses have registered.
+
+        Only on a press, not a release: a release enters `_stop_pending` too
+        (see `_is_stop_event`), but what someone waiting to see whether their
+        press was seen wants counted is presses, not the release in between
+        them.
+        """
+        if self.on_stop_progress is None or raw.kind != "key_press":
+            return
+        presses = sum(1 for e in self._stop_pending if e.kind == "key_press")
+        self.on_stop_progress(presses, max(1, self.settings.stop_key_presses))
 
     def _is_stop_event(self, raw: Any, held: set[str]) -> bool:
         """Whether this event belongs to a run of stop-key presses.

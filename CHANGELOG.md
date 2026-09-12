@@ -5,6 +5,29 @@ was released.
 
 ## Unreleased
 
+### Added
+
+- **`Recorder.on_stop_progress(got, needed)`**, called on a stop-key press
+  that registers but does not yet complete the run. Pressing the stop key
+  once has no visible effect at all, so the natural response is to pause
+  and check before pressing again -- long enough, live, to exceed
+  `stop_key_interval` and have the first press discarded as the recorded
+  application's own keystroke. The CLI now wires this up to print
+  `Escape (1/2) -- press again within 2s to stop.` (using whatever key and
+  interval are actually configured), so there is no need to guess whether a
+  press was seen.
+
+### Changed
+
+- **`stop_key_interval`'s default is now 2.0s, not 1.0.** 1.0 measured live
+  as too tight for how people actually press it: a real capture showed
+  1.333s between the release of a first Escape press and the start of a
+  second meant as the same deliberate run -- comfortably past the old
+  default, so the first press was discarded and a third press was needed to
+  actually stop. Paired with the progress feedback above rather than
+  instead of it, since a wider window alone does not tell anyone whether
+  their first press was seen.
+
 ### Fixed
 
 - **A generated script's pointer actions had no synchronization at all when

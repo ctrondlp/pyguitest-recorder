@@ -113,6 +113,21 @@ pyguitest-recorder --stop-key Pause --stop-presses 1
 Any chord works (`ctrl+Escape`, `ctrl+shift+F12`), and matching is exact, so a
 bound `ctrl+F1` leaves `ctrl+shift+F1` to the application.
 
+## Pressing the stop key does not seem to stop it
+
+Pressing it once has no visible effect at all — by design, a single press
+belongs to the application being recorded — so the natural response is to
+pause and check before pressing again. That pause has to land within
+`stop_key_interval` (2.0s by default) for the two presses to count as one
+run; slower than that, the first press is handed on as a keystroke and the
+count restarts. Recording now prints `Escape (1/2) — press again within
+2s to stop.` the moment the first press registers, precisely so there is no
+need to guess whether it was seen. If it is still happening with presses
+close together in time, check what has focus: capture is XRecord/X11-only,
+so a press landing on a genuinely native-Wayland surface (no XWayland
+presence at all) never reaches the recorder in the first place — see
+`docs/developers/architecture.md#why-recording-is-x11-only`.
+
 ## Ctrl+F1 typed into the application instead of recording a check
 
 The check key matches *exactly*. `ctrl+F1` is not matched by `ctrl+shift+F1`

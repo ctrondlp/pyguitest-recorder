@@ -322,6 +322,9 @@ def _record(
     """Record until the stop key or Ctrl-C, then generate."""
     try:
         recorder = Recorder(settings=settings)
+        recorder.on_stop_progress = lambda got, needed: print(
+            _stop_progress_message(settings, got, needed), file=sys.stderr
+        )
         recorder.start()
     except CaptureUnavailable as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
@@ -534,6 +537,20 @@ def _stop_hint(settings: Settings) -> str:
         settings.stop_key_presses, f" {settings.stop_key_presses} times"
     )
     return f"Press {settings.stop_key}{times}"
+
+
+def _stop_progress_message(settings: Settings, got: int, needed: int) -> str:
+    """What to print when a stop-key press registers but does not yet stop.
+
+    Without this, pressing the stop key once has no visible effect at all,
+    so the natural response is to pause and check before pressing again --
+    long enough, live, to exceed `stop_key_interval` and have the first
+    press discarded as the recorded application's own keystroke instead.
+    """
+    return (
+        f"{settings.stop_key} ({got}/{needed}) -- press again within "
+        f"{settings.stop_key_interval:g}s to stop."
+    )
 
 
 def _verdict(capture_ok: bool, context: ContextReport) -> str:

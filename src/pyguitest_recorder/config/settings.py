@@ -68,8 +68,18 @@ class Settings:
     the recording, so a lone Escape is still captured as one.
     """
 
-    stop_key_interval: float = 1.0
-    """Seconds within which those presses have to arrive to count as a run."""
+    stop_key_interval: float = 2.0
+    """Seconds within which those presses have to arrive to count as a run.
+
+    1.0 measured live as too tight for how people actually press it:
+    pressing once, seeing no visible effect, and pausing to check before
+    pressing again is a natural response with no feedback that the first
+    press was seen -- and that pause reliably lands just over 1 second (a
+    real capture: 1.333s between the release of the first press and the
+    start of the second). 2.0 gives that unhurried cadence real room without
+    opening the window so wide that two genuinely unrelated presses of the
+    application's own become likely to be mistaken for a deliberate run.
+    """
 
     check_key: str = "ctrl+F1"
     """Key that records a check on whatever the pointer is over.
