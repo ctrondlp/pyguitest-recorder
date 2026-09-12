@@ -5,7 +5,38 @@ was released.
 
 ## Unreleased
 
+## [0.2.0] — 2026-09-12
+
+Everything here came out of recording real applications and replaying what
+came back: MATE's Applications menu, a GNOME Text Editor window on
+GhostBSD, KDE's Kickoff. Recording was already right in each case — what
+the generated script did with it was not, and each fix below is a replay
+that did the wrong thing on a real desktop.
+
 ### Added
+
+- **Hovering is recorded now**, as a `MouseMove` carrying how long the
+  pointer rested (`hover_threshold`, default 0.3s). A hover is an input:
+  it opens submenus, shows tooltips, and starts the auto-scroll on a long
+  menu — and none of it is a click, so a recording that kept only clicks
+  replayed a pointer teleporting to a coordinate that was only valid
+  *because* of a hover that never happened. Found live on MATE: the
+  Applications menu opens a category's submenu on hover, so a recorded
+  click on "Text Editor" at (226, 368) replayed onto bare desktop — the
+  submenu holding it was never opened — and dismissed the menu instead.
+  The generated script now renders the hover as the move plus the wait
+  that makes it one, capped at 2s.
+
+  Deliberately not built as menu detection: menus are override-redirect
+  windows that do not appear in the window list at all (confirmed live —
+  `windows()` showed nothing while a menu was open, and `window_at()` on a
+  menu entry returned the desktop), so recognizing them means dropping to
+  raw X11 for something Wayland has no equivalent of, and it would only
+  ever solve menus. Resting the pointer is observable everywhere.
+
+  The pointer is tracked for this without paying `record_motion`'s price:
+  position and time only, with the resolver consulted once per hover
+  rather than once per motion event.
 
 - **`Recorder.on_stop_progress(got, needed)`**, called on a stop-key press
   that registers but does not yet complete the run. Pressing the stop key
@@ -17,7 +48,35 @@ was released.
   interval are actually configured), so there is no need to guess whether a
   press was seen.
 
+- **Two new, off-by-default flags for quieting warnings on a replay you
+  already trust**: `--suppress-keymap-warning`/`suppress_keymap_warning`
+  silences pyguitest's own `KeymapWarning` (uinput can type the wrong
+  characters entirely silently when record and replay machines have
+  different keyboard layouts -- real signal the first time, noise on
+  repeat runs of a script you have already checked), and
+  `--suppress-atspi-chatter`/`suppress_atspi_chatter` silences GLib's
+  "dbind" log domain (native AT-SPI registry chatter that never goes
+  through Python's `warnings` module at all -- confirmed unrelated
+  background noise on a desktop where the accessibility bus is not scoped
+  to one display, not a signal of anything wrong with the script). Both
+  emit a one-line comment in the generated script explaining why the
+  suppression is there. See `docs/recipes.md`'s "Quieting warnings you
+  already know about".
+
 ### Changed
+
+- **Generated scripts no longer carry a private copy of `expect_window`,
+  `expect_element`, `expect_text`, `expect_checked`, `expect_showing`, or
+  `double_click_element` -- they call the pyguitest `Session` methods of the
+  same names instead** (new in pyguitest 0.9; see its changelog). A window
+  binding used to read `window = _expect_window(gui, "Title", timeout=10)`
+  followed, at the bottom of the file, by a ~30-line function definition
+  duplicated into *every* script that needed one; it now reads
+  `window = gui.expect_window("Title", timeout=10)` and nothing else, with
+  the exact same behavior (settle, retry-focus, raise on timeout) living
+  once in pyguitest instead of once per generated script. Raises the
+  minimum pyguitest version accordingly (see the dependency comment in
+  `pyproject.toml`).
 
 - **`stop_key_interval`'s default is now 2.0s, not 1.0.** 1.0 measured live
   as too tight for how people actually press it: a real capture showed
@@ -29,6 +88,46 @@ was released.
   their first press was seen.
 
 ### Fixed
+
+- **Binding a window raised and focused it, which dismissed any menu that
+  was open.** Found live on MATE: a script that only wanted the desktop's
+  origin to offset a menu click by got `gui.expect_window("Desktop", ...)`,
+  which activated the desktop — raising it over the open Applications menu,
+  dismissing it, and leaving every click that followed landing on bare
+  desktop. The replay opened the menu, closed it, and did nothing else.
+  A lookup is now a lookup: `expect_window` finds a window and does not
+  touch it. The settle-and-confirm-focus behavior moved to pyguitest's new
+  `Session.focus_window()`, which a generated script now calls in the two
+  places that actually need it — where the recording carries a
+  `WindowActivate`, and immediately before typing into a window — rather
+  than on every window it happens to bind. Typing is the case that matters:
+  a click lands at its coordinate whether or not the window was ready, but
+  a keystroke goes to whatever *does* hold focus, and a freshly-opened
+  window can exist before the window manager has focused it. Confirming
+  focus on every bind was the overcorrection in the other direction, and
+  dropping it entirely was this fix's own first overcorrection: it sent
+  `type_text` into whatever had focus, usually the terminal running the
+  replay. Generated scripts no longer declare `Capability.WINDOW_ACTIVATE`
+  unless they actually focus something.
+
+- **Two clicks the recording made close together but not close enough to
+  merge into a double-click could replay fast enough to trigger the target
+  app's own double-click gesture -- toggling a window's maximize state
+  instead of the plain close it was recorded as.** Root cause in
+  `normalize.py`: clicks under `double_click_interval` (0.4s) apart merge
+  into one double-click event, and only a gap of `pause_threshold` (1.0s)
+  or more becomes an explicit `gui.wait(...)`; a real gap in between --
+  long enough to be genuinely separate, too short to be worth a comment --
+  fell through both and was silently dropped, so the generated script
+  issued the two clicks back to back. Reproduced live on GhostBSD/MATE:
+  three real, separately-timed clicks near a GNOME Text Editor window's
+  close button replayed as a fast pair that read as a double-click on the
+  header bar, toggling maximize instead of closing. Fixed in the
+  generator, not `normalize.py` -- the dropped gap's exact duration is not
+  worth reconstructing, only that two clicks the recording already decided
+  were separate must not collapse back into one on replay -- by inserting
+  a fixed 0.5s `gui.wait(...)` between any two coordinate clicks rendered
+  with nothing else in between.
 
 - **A generated script's pointer actions had no synchronization at all when
   a click resolved to no window at all -- not even the desktop -- leaving
@@ -59,38 +158,6 @@ was released.
   genuinely missing window. Bounded and best-effort: a click that truly has
   no window still degrades to a coordinate exactly as before, just after a
   fair chance to resolve first.
-
-### Added
-
-- **Two new, off-by-default flags for quieting warnings on a replay you
-  already trust**: `--suppress-keymap-warning`/`suppress_keymap_warning`
-  silences pyguitest's own `KeymapWarning` (uinput can type the wrong
-  characters entirely silently when record and replay machines have
-  different keyboard layouts -- real signal the first time, noise on
-  repeat runs of a script you have already checked), and
-  `--suppress-atspi-chatter`/`suppress_atspi_chatter` silences GLib's
-  "dbind" log domain (native AT-SPI registry chatter that never goes
-  through Python's `warnings` module at all -- confirmed unrelated
-  background noise on a desktop where the accessibility bus is not scoped
-  to one display, not a signal of anything wrong with the script). Both
-  emit a one-line comment in the generated script explaining why the
-  suppression is there. See `docs/recipes.md`'s "Quieting warnings you
-  already know about".
-
-### Changed
-
-- **Emitted helper functions (`_expect_window`, `expect_text`, and the rest)
-  now come after `def main():` instead of before it, and in parent -> child
-  -> child order rather than alphabetical.** A generated script is about the
-  recorded interaction; a reader should meet `main()` first and only reach a
-  helper's own definition after something in the body already called it,
-  not scroll past every helper to find where the script actually starts.
-  When one helper calls another (`expect_text` calling `_expect_element`,
-  say), the caller is now listed first and the callee right after it, so a
-  dependency reads as an explanation of something already introduced rather
-  than a forward reference to a name not yet used.
-
-### Fixed
 
 - **A freshly-opened window's geometry could be read before it finished
   animating into its final position, so a click computed from it could

@@ -40,8 +40,8 @@ wheel and `pyguitest_recorder.__version__` cannot drift apart.
 A release is an annotated, `v`-prefixed tag:
 
 ```sh
-git tag -a v0.1.0 -m "0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "0.2.0"
+git push origin v0.2.0
 ```
 
 Publishing runs from CI on that tag using PyPI

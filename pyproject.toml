@@ -25,7 +25,7 @@ keywords = ["gui", "testing", "recorder", "automation", "x11", "pyguitest"]
 # setuptools>=77 rejects the distribution if both are present. Same reason
 # pyguitest's list omits one.
 classifiers = [
-    # 0.1.0, never tagged, and "record more real applications" is still an
+    # 0.2.0, never tagged, and "record more real applications" is still an
     # open item. Every piece works end to end, but the coverage 4-Beta claims
     # is not one this tree can make yet; pyguitest is 4-Beta because it can.
     "Development Status :: 3 - Alpha",
@@ -72,7 +72,7 @@ dependencies = [
     # it no longer does, since escaping here too would now double-escape and
     # break matching on any title with regex metacharacters.
     #
-    # 0.8.0 (exact number pending that release) raises it again:
+    # 0.8.0 raised it again:
     # `UinputBackend.press_key`/`tap_key` used to derive an evdev key name
     # from the X11 keysym names this generator emits (`tap_key("Return")`,
     # `"Escape"`, the lock keys, ...) as a bare `KEY_<NAME>`, which is only
@@ -84,7 +84,17 @@ dependencies = [
     # an older pyguitest would misbehave the same quiet way `validate()`'s
     # own check is meant to catch loudly -- so this floor stays load-bearing,
     # not routine, the same reason the last bump was one.
-    "pyguitest>=0.8.0",
+    #
+    # 0.9.0 raises it again:
+    # `expect_window`, `expect_element`, `expect_text`, `expect_checked`,
+    # `expect_showing`, and `double_click_element` used to each be a private
+    # function this generator wrote into every script that needed one --
+    # `_HELPER_SOURCE` in generator/python.py, now gone. They are
+    # `pyguitest.Session` methods instead, so an older pyguitest lacking them
+    # hits exactly the failure this floor exists to prevent: `validate()`
+    # passes a call to a method that is not there, and it is only found at
+    # replay, not at generation time.
+    "pyguitest>=0.9.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

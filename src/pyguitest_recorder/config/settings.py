@@ -49,6 +49,13 @@ class Settings:
     text_idle: float = 1.5
     pause_threshold: float = 1.0
     record_motion: bool = False
+    hover_threshold: float = 0.3
+    """Seconds the pointer must rest somewhere for that to record as a hover.
+
+    Hovering is how menus open their submenus and how tooltips appear, and
+    none of it is a click -- see NormalizerOptions.hover_threshold. Set to 0
+    to record nothing but clicks, drags and keys, as this did before.
+    """
     stop_key: str = "Escape"
     """Key that ends the recording, so stopping never needs the terminal.
 

@@ -15,6 +15,6 @@ from .config import Settings
 from .model import Event, Recording
 from .recorder import Recorder
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["Event", "Recorder", "Recording", "Settings", "__version__"]

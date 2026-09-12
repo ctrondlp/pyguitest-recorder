@@ -9,6 +9,7 @@ from pyguitest_recorder.model import (
     ElementRef,
     HotKey,
     KeyStroke,
+    MouseMove,
     Origin,
     Pause,
     Scroll,
@@ -648,3 +649,84 @@ def test_focus_on_an_ordinary_field_is_not_secret(key):
     plain = Target(x=0, y=0, element=ElementRef(role="entry", name="Search"))
     events = drain(Normalizer(resolver=FakeResolver(focus=plain)), [key(1.0, "p", "p")])
     assert [e for e in events if isinstance(e, TextInput)][0].sensitive is False
+
+
+def motion(t, x, y):
+    return RawEvent(kind="motion", timestamp=t, x=x, y=y)
+
+
+def test_a_hover_becomes_a_mouse_move_carrying_how_long_it_lasted():
+    # Found live on MATE: the Applications menu opens a category's submenu on
+    # hover, so a recording of "hover Accessories, click Text Editor" that
+    # kept only the click replayed as a click on bare desktop.
+    events = drain(Normalizer(), [motion(1.0, 65, 47), motion(1.9, 400, 400)])
+    assert len(events) == 1
+    assert isinstance(events[0], MouseMove)
+    assert (events[0].target.x, events[0].target.y) == (65, 47)
+    assert events[0].dwell == pytest.approx(0.9)
+
+
+def test_passing_through_a_point_is_not_a_hover():
+    events = drain(Normalizer(), [motion(1.0, 65, 47), motion(1.1, 400, 400)])
+    assert events == []
+
+
+def test_jitter_does_not_restart_the_clock():
+    # A hand resting on a menu entry still moves a pixel or two. That is one
+    # rest, not a series of arrivals that never lasts long enough to count.
+    events = drain(
+        Normalizer(),
+        [
+            motion(1.0, 65, 47),
+            motion(1.3, 66, 48),
+            motion(1.6, 67, 47),
+            motion(2.0, 400, 400),
+        ],
+    )
+    assert len(events) == 1
+    assert events[0].dwell == pytest.approx(1.0)
+
+
+def test_a_click_where_the_pointer_already_rested_adds_no_move(press, release):
+    # Whatever renders the click moves there itself; a move saying the same
+    # thing would only be noise.
+    events = drain(Normalizer(), [motion(1.0, 200, 200), press(1.8), release(1.85)])
+    assert [type(e).__name__ for e in events] == ["Click"]
+
+
+def test_a_hover_before_a_click_elsewhere_comes_out_first(press, release):
+    # Ordering: the click is buffered for its double-click window, so the
+    # hover must not overtake it in the recording.
+    events = drain(
+        Normalizer(),
+        [
+            press(1.0, x=47, y=16),
+            release(1.05, x=47, y=16),
+            motion(1.4, 65, 47),
+            motion(2.3, 226, 368),
+            press(2.5, x=226, y=368),
+            release(2.55, x=226, y=368),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["Click", "MouseMove", "Click"]
+
+
+def test_motion_under_a_held_button_is_a_drag_not_a_hover(press, release):
+    events = drain(
+        Normalizer(),
+        [
+            press(1.0, x=10, y=10),
+            motion(1.3, 10, 10),
+            motion(1.9, 300, 300),
+            release(2.2, x=300, y=300),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["Drag"]
+
+
+def test_hover_detection_can_be_switched_off():
+    options = NormalizerOptions(hover_threshold=0)
+    events = drain(
+        Normalizer(options=options), [motion(1.0, 65, 47), motion(1.9, 400, 400)]
+    )
+    assert events == []
