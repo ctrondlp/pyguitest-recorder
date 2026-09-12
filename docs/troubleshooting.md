@@ -8,7 +8,7 @@ that specific recording.
 - [`--doctor` says element resolution is off](#doctor-says-element-resolution-is-off)
 - [Nothing was captured at all](#nothing-was-captured-at-all)
 - [The recording stopped when I did not mean it to](#the-recording-stopped-when-i-did-not-mean-it-to)
-- [Ctrl+F1 typed into the application instead of recording a check](#ctrlf1-typed-into-the-application-instead-of-recording-a-check)
+- [The check key typed into the application instead of recording a check](#the-check-key-typed-into-the-application-instead-of-recording-a-check)
 - [The script clicked the wrong thing](#the-script-clicked-the-wrong-thing)
 - [The script fails at replay](#the-script-fails-at-replay)
 - [The script waits too long, or not long enough](#the-script-waits-too-long-or-not-long-enough)
@@ -128,11 +128,17 @@ so a press landing on a genuinely native-Wayland surface (no XWayland
 presence at all) never reaches the recorder in the first place — see
 `docs/developers/architecture.md#why-recording-is-x11-only`.
 
-## Ctrl+F1 typed into the application instead of recording a check
+## The check key typed into the application instead of recording a check
 
-The check key matches *exactly*. `ctrl+F1` is not matched by `ctrl+shift+F1`
-— which is deliberate, so the application can still have the shifted chord —
-but it does mean a held Shift silently turns a check into a keystroke.
+The check key matches *exactly*, so a held Shift silently turns a check into a
+keystroke: `ctrl+1` is not matched by `ctrl+shift+1`. That is deliberate — the
+application can still have the shifted chord.
+
+A key that is *remapped by the hardware* fails the same silent way, which is why
+the default is a plain digit. A laptop's bare F1 commonly sends
+`XF86_AudioMute` rather than the `F1` X11 calls it, and the matcher never sees
+that — so every press is recorded as an ordinary keystroke and nothing says so.
+`ctrl+F1` was the default until that was measured live.
 
 `--no-checks` turns the key off entirely and passes it through, and
 `--check-key` rebinds it.
@@ -164,7 +170,7 @@ gui.element(
 ```
 
 Generated scripts are meant to be edited; this is one of the places where a
-human adds something the recording could not know.
+user adds something the recording could not know.
 
 ## The script fails at replay
 
@@ -180,9 +186,11 @@ appeared yet. Adding a wait is usually the fix, and the recorder's inference
 did not add one because nothing observable changed at that moment.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.5.0 or newer is required
-outright** — generated scripts call `gui.button(...)`, which finds nothing on
-a current at-spi2 before that release.
+older than the recording expects. **pyguitest 0.9.0 or newer is required
+outright** — generated scripts call the `expect_` family and
+`double_click_element` as `Session` methods, which do not exist before that
+release. Older floors matter as well: `gui.button(...)` finds nothing on a
+current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
 

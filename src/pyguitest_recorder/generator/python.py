@@ -150,7 +150,7 @@ at all.
 Reproduced live on KDE: dismissing GNOME Text Editor's own in-window
 "Discard changes?" sheet with two clicks close together in time recorded
 with zero window attribution both times -- the *recording's* resolver came
-up with nothing, and a human's own recorded pause was too short to notice
+up with nothing, and a user's own recorded pause was too short to notice
 (under `normalize.py`'s `pause_threshold`), so nothing told the generator
 this transition needed a moment. `target.window is None` is the one case a
 generated script has *nothing* grounding the point in -- not a window, not

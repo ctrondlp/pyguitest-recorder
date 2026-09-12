@@ -1,7 +1,7 @@
 """What each recorded pause was actually waiting for.
 
 The rules under test are the recorder's whole reason to exist: a script that
-sleeps for as long as the human did is a macro, and a macro is slow when the
+sleeps for as long as the user did is a macro, and a macro is slow when the
 machine is fast and broken when it is slow.
 """
 
@@ -64,7 +64,7 @@ def test_a_long_wait_gets_a_timeout_scaled_to_what_it_took():
     assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 75.0
 
 
-def test_the_timeout_is_capped_however_long_the_human_took():
+def test_the_timeout_is_capped_however_long_the_user_took():
     events = [click(1.0), Pause(timestamp=1.1, seconds=600.0), click(602.0, DIALOG)]
     options = SyncOptions(max_timeout=120.0)
     out = infer_synchronization(events, options)
