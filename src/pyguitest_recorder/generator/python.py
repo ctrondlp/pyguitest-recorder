@@ -160,6 +160,22 @@ exactly the shape `_expect_element` already closes for elements."""
 _DOUBLE_CLICK_HELPER = "double_click_element"
 """Name of the emitted double click that `Element` itself cannot do."""
 
+_UNATTRIBUTED_SETTLE = 0.3
+"""Seconds waited before a pointer action whose target resolved to no window
+at all.
+
+Reproduced live on KDE: dismissing GNOME Text Editor's own in-window
+"Discard changes?" sheet with two clicks close together in time recorded
+with zero window attribution both times -- the *recording's* resolver came
+up with nothing, and a human's own recorded pause was too short to notice
+(under `normalize.py`'s `pause_threshold`), so nothing told the generator
+this transition needed a moment. `target.window is None` is the one case a
+generated script has *nothing* grounding the point in -- not a window, not
+an element -- so it is also the one case worth a small unconditional safety
+margin rather than trusting the point is already valid the instant it is
+used.
+"""
+
 _HELPER_NEEDS = {
     "expect_text": {_ELEMENT_HELPER},
     "expect_checked": {_ELEMENT_HELPER},
@@ -199,6 +215,26 @@ class GeneratorOptions:
 
     format_output: bool = True
     """Run `ruff format` over the result. Silently skipped when ruff is absent."""
+
+    suppress_keymap_warning: bool = False
+    """Silence pyguitest's own `KeymapWarning` at replay.
+
+    uinput text injection depends on the replay machine's keyboard layout
+    matching the one it was recorded on -- real signal worth seeing at
+    least once, so this defaults off. On, the generated script filters it
+    out via the standard `warnings` module.
+    """
+
+    suppress_atspi_chatter: bool = False
+    """Silence GLib's "dbind" log domain -- AT-SPI's own registry chatter,
+    not pyguitest's, e.g. a stray "GetItems ... Object does not exist" about
+    an unrelated application's stale accessible object. Confirmed background
+    noise on a desktop where the accessibility bus is not scoped to one
+    display, not a signal of anything wrong with the replay -- but this
+    installs a process-wide GLib log handler with no way to undo it, so it
+    defaults off rather than silencing a domain a caller might want to see
+    messages from for an unrelated reason.
+    """
 
 
 _ElementKey = tuple[str, str, tuple[tuple[str, str], ...]]
@@ -821,7 +857,10 @@ class PythonGenerator:
     def _emit_windowactivate(self, event: WindowActivate, state: _State) -> None:
         """Render raising a window, binding it to a variable first."""
         if not event.window.addressable:
-            self._comment("a window with no title and no app id was activated", state)
+            self._comment(
+                f"a window with {_unaddressable_reason(event.window)} was activated",
+                state,
+            )
             return
         name = self._window_var(event.window, state)
         state.capabilities.add("WINDOW_ACTIVATE")
@@ -835,7 +874,10 @@ class PythonGenerator:
     def _emit_waitforwindow(self, event: WaitForWindow, state: _State) -> None:
         """Render waiting for a window to appear."""
         if not event.window.addressable:
-            self._comment("waited for a window with no title and no app id", state)
+            self._comment(
+                f"waited for a window with {_unaddressable_reason(event.window)}",
+                state,
+            )
             return
         self._window_var(event.window, state, timeout=event.timeout)
 
@@ -907,6 +949,15 @@ class PythonGenerator:
         point = self._point(target, state)
         if point == state.pointer:
             return
+        if target.window is None:
+            self._comment(
+                "nothing resolved a window for this point when it was "
+                "recorded, so whatever is about to receive it gets a moment "
+                "to finish appearing first",
+                state,
+            )
+            state.capabilities.add("TIMING")
+            state.lines.append(f"gui.wait({_UNATTRIBUTED_SETTLE:g})")
         screen = f", screen={target.screen}" if target.screen else ""
         state.lines.append(f"gui.move_mouse({point}{screen})")
         state.pointer = point
@@ -1088,6 +1139,7 @@ class PythonGenerator:
                     state,
                 )
             state.helpers.add(_WINDOW_HELPER)
+            state.capabilities.add("WINDOW_ACTIVATE")
             return (
                 f"{_WINDOW_HELPER}(gui, {_title_pattern(window.title)}, "
                 f"timeout={wait:g})"
@@ -1114,13 +1166,14 @@ class PythonGenerator:
         out: list[str] = []
         if self.options.include_header:
             out.extend(_header(recording, state, self.options.header))
-        out.extend(_imports(state))
+        out.extend(_imports(state, self.options))
         out.append("")
+        suppression = _warning_suppression(self.options)
+        if suppression:
+            out.extend(suppression)
+            out.append("")
         out.extend(_secret_bindings(state))
         out.append("")
-        for helper in _helpers_needed(state.helpers):
-            out.extend(_HELPER_SOURCE[helper].splitlines())
-            out.append("")
         out.append(f"def {self.options.function_name}() -> None:")
         out.append('    """Replay the recorded interaction."""')
         out.append("    with pyguitest.connect() as gui:")
@@ -1128,10 +1181,16 @@ class PythonGenerator:
         if self.options.capability_preamble and state.capabilities:
             body = _require_lines(state.capabilities) + [""] + body
         out.extend(f"        {line}" if line else "" for line in body)
-        if not body:
+        if not any(line and not line.startswith("#") for line in body):
+            # A body of comments alone (every event turned out unaddressable)
+            # is not a statement -- Python needs one after `with`, or this
+            # does not even parse.
             out.append("        pass")
         out.append("")
         out.append("")
+        for helper in _helpers_needed(state.helpers):
+            out.extend(_HELPER_SOURCE[helper].splitlines())
+            out.append("")
         out.append('if __name__ == "__main__":')
         out.append(f"    {self.options.function_name}()")
         if self.options.include_header:
@@ -1198,11 +1257,31 @@ def _dragged_its_own_window(event: Drag) -> bool:
 
 
 def _helpers_needed(requested: set[str]) -> list[str]:
-    """Every helper the file needs, including the ones helpers call themselves."""
-    needed = set(requested)
-    for helper in requested:
-        needed |= _HELPER_NEEDS.get(helper, set())
-    return sorted(needed)
+    """Every helper the file needs, in parent -> child -> child order.
+
+    A helper the script's body actually calls is listed before whatever
+    *that* helper calls in turn, so a reader meets each one only after
+    something already introduced explains why it is there, never as a
+    forward reference to a name not yet used. Roots (the helpers actually
+    requested) are ordered alphabetically among themselves for a stable
+    diff; a shared child (e.g. `_expect_element`, needed by all three
+    `expect_*` helpers) is placed once, right after the first root that
+    needs it.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(helper: str) -> None:
+        if helper in seen:
+            return
+        seen.add(helper)
+        ordered.append(helper)
+        for child in sorted(_HELPER_NEEDS.get(helper, ())):
+            visit(child)
+
+    for helper in sorted(requested):
+        visit(helper)
+    return ordered
 
 
 _BINDING = re.compile(
@@ -1245,11 +1324,13 @@ def _require_lines(capabilities: set[str]) -> list[str]:
     return lines
 
 
-def _imports(state: _State) -> list[str]:
+def _imports(state: _State, options: GeneratorOptions) -> list[str]:
     """Render the import block the generated body actually needs."""
     lines: list[str] = []
-    stdlib = (["os"] if state.secrets else []) + (
-        ["time"] if _APP_ID_HELPER in state.helpers else []
+    stdlib = (
+        (["os"] if state.secrets else [])
+        + (["time"] if _APP_ID_HELPER in state.helpers else [])
+        + (["warnings"] if options.suppress_keymap_warning else [])
     )
     if stdlib:
         lines.extend(f"import {name}" for name in stdlib)
@@ -1262,6 +1343,47 @@ def _imports(state: _State) -> list[str]:
         names.append("Role")
     if names:
         lines.append(f"from pyguitest import {', '.join(names)}")
+    return lines
+
+
+def _warning_suppression(options: GeneratorOptions) -> list[str]:
+    """Render the module-level statements silencing configured warning noise.
+
+    Two independent, independently-off-by-default switches: `KeymapWarning`
+    is pyguitest's own, filtered the ordinary way through the `warnings`
+    module; the AT-SPI "dbind" chatter is native GLib log output that never
+    goes through Python's warnings machinery at all, so silencing it needs
+    GLib's own log handler instead -- best-effort, since not every replay
+    target has PyGObject installed.
+    """
+    lines: list[str] = []
+    if options.suppress_keymap_warning:
+        lines.extend(
+            [
+                "# --suppress-keymap-warning: uinput's keyboard-layout caveat is",
+                "# silenced below; typed text still depends on the layout matching.",
+                "from pyguitest.backends.input import KeymapWarning",
+                "",
+                'warnings.filterwarnings("ignore", category=KeymapWarning)',
+            ]
+        )
+    if options.suppress_atspi_chatter:
+        lines.extend(
+            [
+                "# --suppress-atspi-chatter: GLib's own AT-SPI/dbind log noise is",
+                "# silenced below; unrelated to this script's own correctness.",
+                "try:",
+                "    from gi.repository import GLib",
+                "",
+                "    GLib.log_set_handler(",
+                '        "dbind",',
+                "        GLib.LogLevelFlags.LEVEL_WARNING,",
+                "        lambda *a, **k: None,",
+                "    )",
+                "except Exception:",
+                "    pass",
+            ]
+        )
     return lines
 
 
@@ -1397,6 +1519,36 @@ _HELPER_SOURCE = {
             f"expected a window matching {title!r} to be open, but none "
             f"appeared within {timeout:g}s"
         )
+    # A freshly-opened window can be found to exist, and even have settled
+    # geometry, before it actually holds keyboard focus, or before the
+    # window manager considers it ready to receive it -- seen live as typed
+    # text landing in the terminal the script itself was running in while
+    # the real window was still coming up. Geometry is given a moment to
+    # stop changing first (a still-animating window can otherwise be
+    # clicked at a position it is about to leave); activation is then
+    # retried a few times, confirming it actually took, rather than trusted
+    # to one call -- or the click that follows -- to transfer focus as a
+    # side effect. All of this is best-effort: nothing here raises if it
+    # does not fully succeed, since a script that got this far already has
+    # a real window to hand back.
+    try:
+        last = gui.geometry(window)
+        for _ in range(3):
+            gui.wait(0.1)
+            current = gui.geometry(window)
+            if current == last:
+                break
+            last = current
+    except Exception:
+        pass
+    for _ in range(5):
+        try:
+            gui.activate_window(window)
+            if gui.active_window() == window:
+                break
+        except Exception:
+            break
+        gui.wait(0.1)
     return window
 ''',
     _ELEMENT_HELPER: '''def _expect_element(gui, role, name, timeout, within=None):
@@ -1484,6 +1636,23 @@ def _title_pattern(title: str) -> str:
     the raw title unchanged and lets pyguitest do the one escape.
     """
     return _literal(title)
+
+
+def _unaddressable_reason(window: WindowRef) -> str:
+    """Explain, for a generated comment, why `window.addressable` is False.
+
+    Two different situations look identical from `addressable` alone: a
+    window with neither field at all, and one whose only field, app_id, is
+    shared with another window open at the same time (seen live on KDE: a
+    desktop shell's own desktop, panels, and popups can all report the same
+    app_id) and so cannot be trusted to mean this one specifically.
+    """
+    if window.app_id:
+        return (
+            f"no title, and its app id {window.app_id!r} was shared by another "
+            "open window at the time"
+        )
+    return "no title and no app id"
 
 
 def _hotkey_string(keys: tuple[str, ...]) -> str:

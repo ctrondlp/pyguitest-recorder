@@ -60,6 +60,17 @@ def test_generated_source_is_valid_and_uses_the_real_api(window, save_button):
     compile(source, "<test>", "exec")
 
 
+def test_a_recording_that_is_entirely_unaddressable_still_parses():
+    # Every event degrading to a comment (no statement at all) used to leave
+    # `with pyguitest.connect() as gui:` with nothing indented under it --
+    # invalid Python, not just an unhelpful script.
+    unaddressable = WindowRef(title="", app_id="")
+    source = render(WindowActivate(window=unaddressable))
+    assert "pass" in source
+    compile(source, "<test>", "exec")
+    assert validate(source) == []
+
+
 def test_named_element_beats_a_coordinate(window, save_button):
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button))
@@ -90,6 +101,41 @@ def test_no_window_geometry_falls_back_to_absolute():
     assert "gui.move_mouse(42, 99)" in source
 
 
+def test_a_totally_unattributed_click_gets_a_settle_wait_first():
+    # Seen live on KDE: dismissing GNOME Text Editor's own in-window
+    # "Discard changes?" sheet with a click that resolved to no window at
+    # all -- not even the desktop -- landed on whatever was still there
+    # before the sheet finished appearing. A bare coordinate with a real
+    # window (test above) is not this case: it already has some grounding.
+    source = render(Click(target=Target(x=1355, y=408)))
+    assert "gui.wait(0.3)" in source
+    assert "a moment to finish appearing" in source
+    assert source.index("gui.wait(0.3)") < source.index("gui.move_mouse(1355, 408)")
+    assert validate(source) == []
+
+
+def test_an_unattributed_scroll_also_gets_a_settle_wait():
+    source = render(Scroll(target=Target(x=5, y=5), dy=1))
+    assert "gui.wait(0.3)" in source
+    assert validate(source) == []
+
+
+def test_a_click_with_a_real_window_gets_no_settle_wait(window):
+    source = render(Click(target=Target(x=180, y=90, window=window)))
+    assert "gui.wait(0.3)" not in source
+
+
+def test_the_settle_wait_only_fires_once_for_a_stationary_click():
+    # `_move` skips re-emitting the same point; the wait must be skipped
+    # right along with it, or a click-then-click at the same unattributed
+    # spot would pay for two waits it never asked for.
+    source = render(
+        Click(target=Target(x=1355, y=408)),
+        Click(target=Target(x=1355, y=408)),
+    )
+    assert source.count("gui.wait(0.3)") == 1
+
+
 def test_absolute_mode_ignores_elements_and_geometry(window, save_button):
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button)),
@@ -114,6 +160,45 @@ def test_preamble_can_be_turned_off(window):
         Click(target=Target(x=1, y=1, window=window)), capability_preamble=False
     )
     assert "gui.require" not in source
+
+
+def test_warning_suppressions_are_off_by_default():
+    source = render(Pause(seconds=0.1))
+    assert "KeymapWarning" not in source
+    assert "dbind" not in source
+    assert "import warnings" not in source
+
+
+def test_suppress_keymap_warning_emits_a_filter_with_an_explanatory_comment():
+    source = render(Pause(seconds=0.1), suppress_keymap_warning=True)
+    assert "import warnings" in source
+    assert "from pyguitest.backends.input import KeymapWarning" in source
+    assert 'warnings.filterwarnings("ignore", category=KeymapWarning)' in source
+    assert "--suppress-keymap-warning" in source
+    assert validate(source) == []
+    compile(source, "<test>", "exec")
+
+
+def test_suppress_atspi_chatter_emits_a_best_effort_glib_handler():
+    source = render(Pause(seconds=0.1), suppress_atspi_chatter=True)
+    assert "from gi.repository import GLib" in source
+    assert '"dbind"' in source
+    assert "except Exception:" in source
+    assert "--suppress-atspi-chatter" in source
+    assert validate(source) == []
+    compile(source, "<test>", "exec")
+
+
+def test_both_suppressions_can_be_on_together():
+    source = render(
+        Pause(seconds=0.1),
+        suppress_keymap_warning=True,
+        suppress_atspi_chatter=True,
+    )
+    assert "KeymapWarning" in source
+    assert "dbind" in source
+    assert validate(source) == []
+    compile(source, "<test>", "exec")
 
 
 def test_double_click_at_a_coordinate_emits_double_click(window):
@@ -228,6 +313,39 @@ def test_a_drifting_title_with_no_app_id_is_used_anyway_with_a_warning():
     assert "gui.wait_for_window(" in source
     # The comment wraps, so match a phrase that survives the break.
     assert "match is fragile" in source
+
+
+def test_an_ambiguous_app_id_with_no_title_is_not_matched_on(save_button):
+    # Seen live on KDE: a desktop shell's own desktop, panels, and popups can
+    # all report the same app_id ("plasmashell"). Matching on it alone would
+    # silently find whichever one happens to be listed first, not the one
+    # actually meant, so this must fall back the same way a window with
+    # neither field at all does -- not emit `_window_by_app_id`.
+    popup = WindowRef(title="", app_id="plasmashell", app_id_ambiguous=True)
+    source = render(WindowActivate(window=popup))
+    assert "_window_by_app_id" not in source
+    # The comment wraps, so match a phrase that survives the break.
+    assert "'plasmashell'" in source
+    assert "was shared by another" in source
+    assert validate(source) == []
+
+
+def test_an_ambiguous_app_id_drag_endpoint_falls_back_to_absolute_coordinates():
+    popup = WindowRef(
+        title="",
+        app_id="plasmashell",
+        app_id_ambiguous=True,
+        geometry=(8, 501, 655, 517),
+    )
+    source = render(
+        Drag(
+            start=Target(x=100, y=100),
+            end=Target(x=667, y=965, window=popup),
+        )
+    )
+    assert "_window_by_app_id" not in source
+    assert "667, 965" in source
+    assert validate(source) == []
 
 
 def test_window_variable_is_named_from_the_app_id_when_there_is_no_title():
@@ -592,6 +710,91 @@ def expect_window_pattern(source):
     raise AssertionError("no expect_window call in the generated source")
 
 
+class _FakeGeometryGui:
+    """A `gui` stand-in for exercising `_expect_window`'s settle loop directly.
+
+    `geometry_sequence` is popped from the front on every call, repeating
+    the last value once exhausted -- long enough that a test can describe
+    "changes twice then settles" without predicting exactly how many reads
+    the loop performs.
+    """
+
+    def __init__(self, window, geometry_sequence):
+        self._window = window
+        self._geometry_sequence = list(geometry_sequence)
+        self.geometry_calls = 0
+        self.wait_calls = 0
+
+    def wait_for_window(self, title, timeout):
+        return self._window
+
+    def geometry(self, window):
+        self.geometry_calls += 1
+        if len(self._geometry_sequence) > 1:
+            return self._geometry_sequence.pop(0)
+        return self._geometry_sequence[0]
+
+    def wait(self, seconds):
+        self.wait_calls += 1
+
+
+def _load_expect_window():
+    from pyguitest_recorder.generator.python import _HELPER_SOURCE, _WINDOW_HELPER
+
+    namespace: dict = {}
+    exec(_HELPER_SOURCE[_WINDOW_HELPER], namespace)  # noqa: S102
+    return namespace["_expect_window"]
+
+
+def test_expect_window_stops_once_geometry_settles():
+    # Two consecutive matching reads end the wait early rather than always
+    # spending the full settle budget.
+    expect_window = _load_expect_window()
+    gui = _FakeGeometryGui(
+        window="the-window",
+        geometry_sequence=[
+            (0, 0, 10, 10),
+            (5, 5, 10, 10),
+            (5, 5, 10, 10),
+            (5, 5, 10, 10),
+        ],
+    )
+    result = expect_window(gui, "Title", timeout=5)
+    assert result == "the-window"
+    # Three reads: the initial one, one that still differs (still
+    # animating), and one that finally matches -- stopping there rather
+    # than spending the full settle budget.
+    assert gui.geometry_calls == 3
+    assert gui.wait_calls == 2
+
+
+def test_expect_window_gives_up_settling_after_a_bounded_number_of_checks():
+    # A window whose geometry never repeats (unlikely, but not impossible)
+    # must not be waited on forever -- the last reading is used.
+    expect_window = _load_expect_window()
+    gui = _FakeGeometryGui(
+        window="the-window",
+        geometry_sequence=[(0, 0, 1, 1), (1, 1, 1, 1), (2, 2, 1, 1), (3, 3, 1, 1)],
+    )
+    result = expect_window(gui, "Title", timeout=5)
+    assert result == "the-window"
+    assert gui.wait_calls == 3
+
+
+def test_expect_window_tolerates_geometry_failing_mid_settle():
+    expect_window = _load_expect_window()
+
+    class FlakyGui(_FakeGeometryGui):
+        def geometry(self, window):
+            self.geometry_calls += 1
+            if self.geometry_calls == 2:
+                raise RuntimeError("window vanished")
+            return (0, 0, 1, 1)
+
+    gui = FlakyGui(window="the-window", geometry_sequence=[])
+    assert expect_window(gui, "Title", timeout=5) == "the-window"
+
+
 def test_a_window_check_emits_its_title_unescaped():
     # expect_window forwards straight to wait_for_window, which now matches
     # a plain string literally -- see _title_pattern.
@@ -608,6 +811,38 @@ def test_the_helpers_a_check_calls_are_emitted_with_it():
     assert "def expect_text(" in source
     assert "def _expect_element(" in source
     assert "def expect_checked(" not in source
+
+
+def test_helpers_are_defined_after_main_not_before_it():
+    # main() is what the script is actually about; a reader should meet it
+    # first and only reach a helper's definition once something already
+    # called it, not scroll past every helper before seeing the first line
+    # of the recorded interaction.
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert source.index("def main(") < source.index("def expect_text(")
+    assert source.index("def main(") < source.index("def _expect_element(")
+    # Still defined before the line that actually calls it at import time.
+    assert source.index("def expect_text(") < source.index("if __name__")
+
+
+def test_a_helper_is_defined_before_the_helper_it_calls():
+    # `expect_text` is the one the script's body actually calls; a reader
+    # meets it first, then the thing it depends on -- never the reverse.
+    source = render(check("text", "label", "Status", expected="Saved"))
+    assert source.index("def expect_text(") < source.index("def _expect_element(")
+
+
+def test_a_shared_child_helper_is_placed_once_after_its_first_parent():
+    # expect_text and expect_checked both call _expect_element; two roots
+    # sharing one child should not duplicate it, and it lands right after
+    # whichever root needed it first (alphabetically: expect_checked).
+    source = render(
+        check("checked", "check box", "Read only", expected=True),
+        check("text", "label", "Status", expected="Saved"),
+    )
+    assert source.count("def _expect_element(") == 1
+    assert source.index("def expect_checked(") < source.index("def _expect_element(")
+    assert source.index("def _expect_element(") < source.index("def expect_text(")
 
 
 def test_a_check_fails_with_a_message_naming_the_element():
@@ -984,9 +1219,11 @@ def test_a_double_click_on_a_named_element_stays_one_gesture(window):
     )
     expected = 'double_click_element(gui, gui.element(role=Role.ICON, name="Computer"))'
     assert expected in source
-    # The helper's own docstring mentions `element.click()`, so look at the
-    # body rather than the whole file.
-    assert ".click()" not in source.split("def main")[1]
+    # The helper's own docstring mentions `element.click()`, so look at
+    # main's body specifically -- up to the next top-level def, where the
+    # helper itself is defined -- rather than the whole file.
+    main_body = source.split("def main")[1].split("\ndef ")[0]
+    assert ".click()" not in main_body
     assert "def double_click_element(" in source
     assert "gui.double_click()" in source
     assert "Capability.ELEMENT_GEOMETRY" in source

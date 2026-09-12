@@ -71,6 +71,16 @@ def test_unset_flags_stay_none_so_the_config_file_wins():
     assert args.locators is None
     assert args.window_context is None
     assert args.record_raw is None
+    assert args.suppress_keymap_warning is None
+    assert args.suppress_atspi_chatter is None
+
+
+def test_suppress_flags_are_parsed():
+    args = build_parser().parse_args(
+        ["--suppress-keymap-warning", "--suppress-atspi-chatter"]
+    )
+    assert args.suppress_keymap_warning is True
+    assert args.suppress_atspi_chatter is True
 
 
 def test_regenerate_writes_a_script_without_recording(saved, tmp_path, capsys):
@@ -103,6 +113,54 @@ def test_regenerate_honours_absolute_coordinates(saved, tmp_path):
 def test_regenerate_writes_to_stdout_without_output(saved, tmp_path, capsys):
     main(["--regenerate", str(saved), "--config", str(_empty(tmp_path))])
     assert "import pyguitest" in capsys.readouterr().out
+
+
+def test_suppress_flags_default_off_and_emit_nothing(saved, tmp_path):
+    out = tmp_path / "script.py"
+    main(
+        ["--regenerate", str(saved), "-o", str(out), "--config", str(_empty(tmp_path))]
+    )
+    source = out.read_text()
+    assert "KeymapWarning" not in source
+    assert "dbind" not in source
+
+
+def test_suppress_keymap_warning_flag_reaches_the_generated_script(saved, tmp_path):
+    out = tmp_path / "script.py"
+    main(
+        [
+            "--regenerate",
+            str(saved),
+            "-o",
+            str(out),
+            "--suppress-keymap-warning",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    source = out.read_text()
+    assert "from pyguitest.backends.input import KeymapWarning" in source
+    assert 'warnings.filterwarnings("ignore", category=KeymapWarning)' in source
+    compile(source, str(out), "exec")
+
+
+def test_suppress_atspi_chatter_flag_reaches_the_generated_script(saved, tmp_path):
+    out = tmp_path / "script.py"
+    main(
+        [
+            "--regenerate",
+            str(saved),
+            "-o",
+            str(out),
+            "--suppress-atspi-chatter",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    source = out.read_text()
+    assert "from gi.repository import GLib" in source
+    assert '"dbind"' in source
+    compile(source, str(out), "exec")
 
 
 def test_missing_recording_is_reported(tmp_path, capsys):

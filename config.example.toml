@@ -58,6 +58,10 @@ capability_preamble = true  # emit gui.require(...) naming what the script uses
 default_timeout = 10.0
 format_output = true        # run ruff format over the generated file
 function_name = "main"
+# Both below default off: real signal worth seeing at least once, not
+# noise to silence by default. Turn on once you already know what they mean.
+suppress_keymap_warning = false  # silence uinput's keyboard-layout caveat
+suppress_atspi_chatter = false   # silence GLib's unrelated AT-SPI/dbind log noise
 
 [privacy]
 sensitive = false           # treat all typed text as secret

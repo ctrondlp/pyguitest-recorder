@@ -7,6 +7,115 @@ was released.
 
 ### Fixed
 
+- **A generated script's pointer actions had no synchronization at all when
+  a click resolved to no window at all -- not even the desktop -- leaving
+  it to a human's own recorded pause, which was too short to notice on a
+  fast, confident click.** Same live KDE reproduction as the resolver retry
+  below: dismissing GNOME Text Editor's own in-window "Discard changes?"
+  sheet with two clicks close together in time meant `normalize.py`'s
+  1-second `pause_threshold` never saw a gap worth turning into an explicit
+  wait, so nothing paced the second click against the sheet still
+  animating in. `target.window is None` is the one case a generated script
+  has nothing else grounding the point in, so it is now also the one case
+  that gets a small (0.3s) unconditional settle wait before the pointer
+  moves there, regardless of what the recording human happened to notice.
+
+- **A click resolving to no window at all -- not even the active-window
+  fallback -- gave up permanently on the first empty answer, even when the
+  window was real, already active, and resolvable moments later.**
+  Reproduced repeatedly live on KDE: dismissing GNOME Text Editor's own
+  in-window "Discard changes?" sheet (not a separate top-level window --
+  confirmed live, it never shows up in a window list of its own) with two
+  clicks close together in time recorded with zero window attribution
+  every single time, forcing both into bare, unanchored absolute
+  coordinates that then had to also survive the window opening at the same
+  screen position on every future replay. `DesktopResolver._window()` now
+  retries the whole hit-test / decoration / active-window chain up to twice
+  more, a beat apart, before giving up -- most likely recovering from a
+  slow kdotool subprocess round trip racing a fast second click, not a
+  genuinely missing window. Bounded and best-effort: a click that truly has
+  no window still degrades to a coordinate exactly as before, just after a
+  fair chance to resolve first.
+
+### Added
+
+- **Two new, off-by-default flags for quieting warnings on a replay you
+  already trust**: `--suppress-keymap-warning`/`suppress_keymap_warning`
+  silences pyguitest's own `KeymapWarning` (uinput can type the wrong
+  characters entirely silently when record and replay machines have
+  different keyboard layouts -- real signal the first time, noise on
+  repeat runs of a script you have already checked), and
+  `--suppress-atspi-chatter`/`suppress_atspi_chatter` silences GLib's
+  "dbind" log domain (native AT-SPI registry chatter that never goes
+  through Python's `warnings` module at all -- confirmed unrelated
+  background noise on a desktop where the accessibility bus is not scoped
+  to one display, not a signal of anything wrong with the script). Both
+  emit a one-line comment in the generated script explaining why the
+  suppression is there. See `docs/recipes.md`'s "Quieting warnings you
+  already know about".
+
+### Changed
+
+- **Emitted helper functions (`_expect_window`, `expect_text`, and the rest)
+  now come after `def main():` instead of before it, and in parent -> child
+  -> child order rather than alphabetical.** A generated script is about the
+  recorded interaction; a reader should meet `main()` first and only reach a
+  helper's own definition after something in the body already called it,
+  not scroll past every helper to find where the script actually starts.
+  When one helper calls another (`expect_text` calling `_expect_element`,
+  say), the caller is now listed first and the callee right after it, so a
+  dependency reads as an explanation of something already introduced rather
+  than a forward reference to a name not yet used.
+
+### Fixed
+
+- **A freshly-opened window's geometry could be read before it finished
+  animating into its final position, so a click computed from it could
+  land wherever was really there instead -- and the keystrokes meant for
+  the new window went there too.** Seen live on KDE: after the Kickoff
+  scroll-to-"Text Editor" fixes above got it opening reliably, typing meant
+  for GNOME Text Editor landed in the Konsole the replay script itself was
+  running in. `_expect_window` found the window (it existed the moment
+  KWin fired a window-created event) and immediately read its geometry to
+  compute a click point -- but "exists" and "finished sliding into its
+  resting position" are not the same moment, and nothing between those two
+  calls waited for the second one. `_expect_window` now reads geometry
+  again a couple of times, a beat apart, and only returns once two
+  consecutive reads agree; a window whose geometry never stops changing
+  within that budget is used as last read rather than waited on forever,
+  so this costs nothing extra once a window is already settled (the
+  overwhelmingly common case) and only spends time here when there is
+  something real to wait for.
+
+- **A window identified only by an ambiguous app_id could be silently
+  matched to the wrong window instead of the one actually meant, or the
+  generated script could time out waiting for it forever.** Seen live on
+  KDE: a drag inside KDE's Kickoff menu resolved its end point to a window
+  reporting app_id "plasmashell" with no usable title -- but the desktop,
+  the panel, and the popup itself all report that same app_id, since one
+  process owns all three. Depending on which backend a script replays
+  against, matching on app_id alone either found some *other*
+  plasmashell-owned window first (wrong window, no error at all) or found
+  none, because not every backend fills app_id in yet (`KdotoolBackend`
+  never did, see the matching pyguitest fix) and the wait then ran out its
+  full timeout. `WindowRef` now records whether another window open at the
+  moment this one was identified shared its app_id; when that is true and
+  there is no title to fall back on, the window is no longer treated as
+  addressable at all, and every locator that depended on it (a wait, an
+  activation, a coordinate computed relative to its origin) falls back the
+  same way it already does for a window with no identity whatsoever --
+  absolute coordinates, or a plain comment explaining why.
+
+- **A recording where every single event turned out unaddressable generated
+  a script that did not even parse.** `with pyguitest.connect() as gui:`
+  needs at least one indented statement under it; a body made entirely of
+  explanatory comments (the fallback above, `_window_lookup`'s own "no
+  title and no app id" case, and others) is not one, and the emptiness
+  check guarding against exactly this only caught a body with *no lines at
+  all*, not one with comments and nothing else. Now checks for at least one
+  non-comment line and emits `pass` when there is none, regardless of
+  whether comments are present.
+
 - **The terminal the recorder itself was running in was recorded as if it
   were an application under test.** `ignore_pids` exists to keep the
   recorder out of its own recording, but it only ever held `os.getpid()` --

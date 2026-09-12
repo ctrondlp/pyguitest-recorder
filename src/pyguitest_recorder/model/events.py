@@ -139,11 +139,21 @@ class WindowRef:
     pid: int | None = None
     geometry: tuple[int, int, int, int] | None = None
     title_stable: bool = True
+    app_id_ambiguous: bool = False
+    """Whether another window open at the same moment shared this app_id.
+
+    A single process can own several toplevels at once -- a desktop shell's
+    own desktop, panels, and popups, seen live all sharing app_id
+    "plasmashell" on KDE -- and `app_id` alone cannot then tell them apart.
+    Set when this window was first seen, from a live window list, not
+    inferred from anything recorded later.
+    """
 
     @property
     def addressable(self) -> bool:
         """Whether this window can be found again by a stable property."""
-        return bool(self.app_id) or bool(self.title)
+        trustworthy_app_id = bool(self.app_id) and not self.app_id_ambiguous
+        return trustworthy_app_id or bool(self.title)
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -427,6 +437,7 @@ def _rebuild(cls: type, data: Any) -> Any:
             pid=data.get("pid"),
             geometry=tuple(geometry) if geometry else None,
             title_stable=data.get("title_stable", True),
+            app_id_ambiguous=data.get("app_id_ambiguous", False),
         )
     extents = data.get("extents")
     raw_actions = data.get("actions")

@@ -106,6 +106,17 @@ class Settings:
     format_output: bool = True
     function_name: str = "main"
 
+    suppress_keymap_warning: bool = False
+    """Silence pyguitest's KeymapWarning in generated scripts. Off by
+    default: real signal the first time (record/replay keyboard layout
+    mismatch types the wrong characters silently), noise on repeat runs."""
+
+    suppress_atspi_chatter: bool = False
+    """Silence GLib's "dbind" log domain in generated scripts -- AT-SPI's
+    own registry chatter, not pyguitest's. Off by default: a process-wide
+    GLib log handler with no way to undo it, so it should be opted into,
+    not assumed safe for every desktop."""
+
     include_header: bool = True
     """Write the docstring saying where the script came from. On by default.
 
