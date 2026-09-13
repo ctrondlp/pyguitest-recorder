@@ -2,10 +2,11 @@
 
 Everything emitted here is checked against the installed pyguitest: the
 generator asks `pyguitest.Session` whether a method exists before it will
-emit a call to it, and `validate` compiles the finished file. A recorder
-whose output does not import is worse than no recorder, and the failure mode
-is silent -- a plausible-looking script that names a function the library
-does not have.
+emit a call to it, and `validate` compiles the finished file, checking `gui.*`
+calls against `Session` and attribute reads on an element against `Element` --
+the two surfaces a generated script calls through. A recorder whose output
+does not import is worse than no recorder, and the failure mode is silent --
+a plausible-looking script that names a function the library does not have.
 
 Three emission rules carry the design.
 
@@ -97,6 +98,19 @@ _SUGAR = {
     "combo box": "dropdown",
     "menu item": "menu_item",
     "link": "link",
+}
+
+# The `gui.*` calls that hand back an Element, so `validate` can check what is
+# called on one against the installed `Element` -- see _unknown_api. The sugar
+# names come from _SUGAR rather than being listed again: an accessor added there
+# is covered the moment it can be emitted. The rest are the other ways a
+# pyguitest script gets an Element, which a hand-edited generated file may use.
+_ELEMENT_FACTORIES = frozenset(_SUGAR.values()) | {
+    "element",
+    "text_field",
+    "window_element",
+    "root_element",
+    "element_at",
 }
 
 _TEXT_ROLES = frozenset({"entry", "text", "password text"})
@@ -1673,16 +1687,37 @@ def _unknown_api(tree: ast.AST) -> list[str]:
         "Capability": ("pyguitest has no Capability", _public_names("Capability")),
         "Role": ("pyguitest has no Role", _public_names("Role")),
     }
+    element_names = _public_names("Element")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute):
             continue
         value = node.value
-        if not isinstance(value, ast.Name) or value.id not in holders:
-            continue
-        message, known = holders[value.id]
-        if known and node.attr not in known:
-            problems.append(f"{message} {node.attr!r}")
+        if isinstance(value, ast.Name) and value.id in holders:
+            message, known = holders[value.id]
+            if known and node.attr not in known:
+                problems.append(f"{message} {node.attr!r}")
+        elif element_names and _is_element_call(value):
+            # `gui.element(...).double_click()` is an attribute read on a
+            # *result*, not on a `gui` name, so the check above cannot see it --
+            # and it is the one API surface a generated script calls that way.
+            # Unchecked, a method the installed pyguitest does not have reached
+            # the file and failed at replay with an AttributeError naming it.
+            if node.attr not in element_names:
+                problems.append(f"pyguitest.Element has no method {node.attr!r}")
     return problems
+
+
+def _is_element_call(node: ast.AST) -> bool:
+    """Whether `node` is a `gui.<factory>(...)` call that hands back an Element."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr in _ELEMENT_FACTORIES
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "gui"
+    )
 
 
 def _unbound_names(tree: ast.AST) -> list[str]:

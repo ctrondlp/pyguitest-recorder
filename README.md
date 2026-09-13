@@ -236,12 +236,12 @@ carries the full table, including Arch, openSUSE and FreeBSD.
 **pyguitest 0.10.0 or newer is required outright.** Generated scripts call the
 `expect_` family as pyguitest `Session` methods, which do not exist before
 0.9.0, and double-click a named element with `Element.double_click`, which
-0.10.0 added. The floor is not advisory: an older pyguitest is handed a script
-naming a method it does not have, and nothing here catches that for you — the
-generator checks `gui.*` calls against the installed `Session`, but a method
-called on an element is an attribute read on a result, which it does not
-inspect. `--doctor` prints the installed pyguitest next to the generator
-profile, which is what the emitted calls were checked against.
+0.10.0 added. Nothing here depends on that going unnoticed: `validate()` checks
+`gui.*` calls against the installed `Session` and what is called on an element
+against the installed `Element`, so a script naming a method this pyguitest does
+not have is reported INVALID when it is generated. `--doctor` prints the
+installed pyguitest next to the generator profile, which is what the emitted
+calls were checked against.
 
 The older floors still matter for what the scripts *do*. 0.5.0 is where role
 lookups learned to accept both spellings of a renamed role, and where
