@@ -211,10 +211,17 @@ To try different inference rules without re-recording, keep the `.json` and
 ## A window is found by title and the title changed
 
 Window titles drift — GNOME Text Editor renames its window the moment the
-document has content. Where the recorder can tell that happened, it carries a
-small helper into the generated file that looks the window up by application
-id instead, because pyguitest itself can only look a window up by title regex.
+document has content. Where the recorder can tell that happened, the script
+does not match on the title at all: it matches the application id instead, as
+`gui.expect_window(app_id="org.gnome.TextEditor", timeout=10)`, and no helper
+is written into the file to do it. A window whose title never changed still
+matches by title, which is the thing a reader recognises.
 
-If a replay fails to find a window that is plainly on screen, loosen the regex
-in the generated script — that is exactly the kind of edit these files are
-meant to receive.
+If a replay then fails to find a window that is plainly on screen, check the
+app id the script asks for before anything else. A window has two possible
+identities and they do not always agree — the `xdg_toplevel` app id on
+Wayland, the class half of `WM_CLASS` on X11 — so a recording made one way can
+name a window the other way never shows; see
+[testable-guis.md](testable-guis.md#which-value-is-the-app-id). Failing that,
+the call takes an ordinary title or pattern, and these files are meant to be
+edited — that is what they are for.
