@@ -1,6 +1,7 @@
 import ast
 
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
+from pyguitest_recorder.generator import python as generator_module
 from pyguitest_recorder.model import (
     Assertion,
     Click,
@@ -47,6 +48,17 @@ def window_pattern(source):
 def render(*events, **options):
     recording = Recording(events=list(events))
     return generate(recording, GeneratorOptions(include_header=False, **options))
+
+
+def _installed_element_api(monkeypatch, *methods):
+    """Pretend the installed pyguitest Element offers exactly `methods`.
+
+    One test needs a pyguitest that has `Element.double_click` and another the
+    0.9.0 that does not, and only one of them can be installed on any machine.
+    """
+    monkeypatch.setattr(
+        generator_module, "_element_methods", lambda: frozenset(methods)
+    )
 
 
 def test_generated_source_is_valid_and_uses_the_real_api(window, save_button):
@@ -274,11 +286,13 @@ def test_a_double_click_event_gets_no_internal_settle_wait(window):
 
 
 def test_double_click_on_a_named_element_still_degrades(window, save_button):
+    # save_button carries no rectangle, so there is nowhere to move the
+    # pointer to; the comment has to say that rather than blame the library.
     source = render(
         Click(target=Target(x=5, y=5, window=window, element=save_button), count=2)
     )
     assert source.count(".click()") == 2
-    assert "Element has no double_click" in source
+    assert "the element has no rectangle to move to" in source
 
 
 def test_text_into_a_named_field_sets_it_directly():
@@ -1163,31 +1177,65 @@ def test_a_three_key_combination_keeps_every_modifier():
     assert 'gui.send_keys("^(+(S))")' in render(HotKey(keys=("ctrl", "shift", "S")))
 
 
-def test_a_double_click_on_a_named_element_stays_one_gesture(window):
+def test_a_double_click_on_a_named_element_stays_one_gesture(window, monkeypatch):
     # Two Element.click() calls are not a double click: each is a separate
     # round trip over the accessibility bus, slower than any toolkit's
     # double-click interval, so a double-clicked folder icon never opens.
+    _installed_element_api(monkeypatch, "click", "double_click")
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    expected = 'gui.element(role=Role.ICON, name="Computer").double_click()'
+    assert expected in source
+    main_body = source.split("def main")[1]
+    assert ".click()" not in main_body
+    assert "double_click_element" not in source
+    assert "Capability.ELEMENT_GEOMETRY" in source
+    assert validate(source) == []
+
+
+def test_a_double_click_asks_the_session_where_the_element_cannot_answer(
+    window, monkeypatch
+):
+    # pyguitest 0.9.0 -- the floor -- has Session.double_click_element and no
+    # Element.double_click. Which spelling is emitted is decided by asking the
+    # installed Element, so this is what such an install gets: a call its
+    # library answers.
+    _installed_element_api(monkeypatch, "click")
     icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
     source = render(
         Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
     )
     expected = 'gui.double_click_element(gui.element(role=Role.ICON, name="Computer"))'
     assert expected in source
-    main_body = source.split("def main")[1]
-    assert ".click()" not in main_body
-    assert "Capability.ELEMENT_GEOMETRY" in source
+    assert ".double_click()" not in source
     assert validate(source) == []
 
 
-def test_the_double_click_names_the_element_not_the_recorded_rectangle():
-    # The element stays the locator; double_click_element reads its extents
-    # fresh at replay (see pyguitest), so baking the recorded rectangle in
-    # here would break the moment the window moved.
+def test_the_double_click_spelling_is_one_the_installed_pyguitest_answers(window):
+    # Neither spelling is right on its own: whichever pyguitest is installed,
+    # the emitted call has to be one it has -- which is the whole reason the
+    # generator asks before it emits.
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    if "double_click" in generator_module._element_methods():
+        assert ".double_click()" in source
+        assert "double_click_element" not in source
+    else:
+        assert "gui.double_click_element(" in source
+
+
+def test_the_double_click_names_the_element_not_the_recorded_rectangle(monkeypatch):
+    # The element stays the locator, and the gesture reads its extents fresh
+    # at replay (see pyguitest), so baking the recorded rectangle in here
+    # would break the moment the window moved.
+    _installed_element_api(monkeypatch, "click", "double_click")
     icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
     source = render(Click(target=Target(x=40, y=50, element=icon), count=2))
-    assert 'gui.double_click_element(gui.element(role=Role.ICON, name="Computer"))' in (
-        source
-    )
+    assert 'gui.element(role=Role.ICON, name="Computer").double_click()' in source
     assert "10" not in source.split("def main")[1]
 
 
@@ -1200,6 +1248,7 @@ def test_a_double_click_with_no_rectangle_falls_back_to_two_clicks(window):
     )
     assert source.count(".click()") == 2
     assert "double_click_element" not in source
+    assert ".double_click()" not in source
 
 
 def test_a_redacted_run_says_why_at_the_point_of_use():

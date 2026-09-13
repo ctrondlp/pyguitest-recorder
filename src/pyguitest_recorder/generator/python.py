@@ -1,8 +1,9 @@
 """Render canonical events as pyguitest source.
 
 Everything emitted here is checked against the installed pyguitest: the
-generator asks `pyguitest.Session` whether a method exists before it will emit
-a call to it, and `validate` compiles the finished file. A recorder whose
+generator asks `pyguitest.Session` -- and, for a method an element answers
+itself, `pyguitest.Element` -- whether a method exists before it will emit a
+call to it, and `validate` compiles the finished file. A recorder whose
 output does not import is worse than no recorder, and the failure mode is
 silent -- a plausible-looking script that names a function the library does
 not have.
@@ -462,6 +463,7 @@ class PythonGenerator:
         """Build a generator with the given options, or the defaults."""
         self.options = options or GeneratorOptions()
         self._api = _session_methods()
+        self._element_api = _element_methods()
 
     def render(self, recording: Recording) -> str:
         """Return the complete generated module for `recording`."""
@@ -567,17 +569,18 @@ class PythonGenerator:
     def _double_click(self, event: Click, state: _State) -> bool:
         """Render a double click on a named element that stays a double click.
 
-        `Element` has no `double_click`, so this used to degrade to two
-        `Element.click()` calls and hope the toolkit read them as one gesture.
-        It frequently will not -- each click is a separate round trip through
-        the accessibility bus, which is slower than any double-click interval
-        -- and the failure is silent: double-clicking a folder icon simply
-        does not open the folder. Seen in a real recording of a file manager.
+        Two `Element.click()` calls are not a double click: each is a separate
+        round trip through the accessibility bus, which is slower than any
+        double-click interval -- and the failure is silent: double-clicking a
+        folder icon simply does not open the folder. Seen in a real recording
+        of a file manager.
 
-        `Session.double_click` is a real double click but goes wherever the
-        pointer is, so the element is located first and its *live* extents
-        drive the move. That keeps the locator an element -- the point is read
-        at replay, not baked in -- while the gesture stays one gesture.
+        Asked of the element itself where the installed pyguitest has
+        `Element.double_click`; on 0.9.0, which does not, the same gesture
+        comes from the session as `double_click_element`. Either way the
+        element is located first and its *live* extents drive the move, so the
+        locator stays an element -- the point is read at replay, not baked in
+        -- while the gesture stays one gesture.
         """
         element = event.target.element
         locator = self._element_expr(element, state)
@@ -590,7 +593,13 @@ class PythonGenerator:
         state.capabilities.update(
             {"ELEMENT_TREE", "ELEMENT_GEOMETRY", "POINTER_MOVE", "POINTER_BUTTON"}
         )
-        state.lines.append(f"gui.double_click_element({locator})")
+        if "double_click" in self._element_api:
+            state.lines.append(f"{locator}.double_click()")
+        else:
+            # Older pyguitest: 0.9.0 has Session.double_click_element but no
+            # Element.double_click, and asking the element for one there would
+            # fail at replay rather than here.
+            state.lines.append(f"gui.double_click_element({locator})")
         state.pointer = None
         return True
 
@@ -648,17 +657,20 @@ class PythonGenerator:
     def _note_element_repeat(self, event: Click, state: _State) -> None:
         """Explain a repeated click on a named element.
 
-        `Session.double_click` exists, but it clicks wherever the pointer
-        is, not a named element -- `Element` has no double_click of its own.
-        So a double click on a named element still degrades to two
-        `Element.click()` calls, unlike the coordinate path.
+        A double click on a named element is normally one gesture (see
+        `_double_click`); this is the path left when that declined, which is
+        the element carrying no rectangle to move to. A repeat past two has no
+        primitive on either path and lands here too.
         """
         if event.count > 1 and self.options.comments:
+            if event.count == 2:
+                reason = "the element has no rectangle to move to, so"
+            else:
+                reason = "pyguitest has no primitive past double_click, so"
             word = "double" if event.count == 2 else f"{event.count}x"
             state.lines.insert(
                 len(state.lines) - event.count,
-                f"# recorded as a {word} click; Element has no double_click,"
-                " so this is",
+                f"# recorded as a {word} click; {reason} this is",
             )
             state.lines.insert(
                 len(state.lines) - event.count,
@@ -1628,6 +1640,11 @@ def _format(source: str) -> str:
 def _session_methods() -> frozenset[str]:
     """The method names the installed pyguitest Session actually offers."""
     return _public_names("Session")
+
+
+def _element_methods() -> frozenset[str]:
+    """The method names the installed pyguitest Element actually offers."""
+    return _public_names("Element")
 
 
 def _public_names(attribute: str) -> frozenset[str]:

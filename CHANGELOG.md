@@ -5,6 +5,23 @@ was released.
 
 ## Unreleased
 
+### Changed
+
+- **A double click on a named element is asked of the element itself where
+  the installed pyguitest can do it, and of the session where it cannot.**
+  pyguitest's `Element` gained `double_click` after 0.9.0 — the release the
+  floor still names — so the generator asks `pyguitest.Element` what it offers
+  before it emits the call, the same way it already asked `Session`, and falls
+  back to `gui.double_click_element(element)` on an install that predates it.
+  An older pyguitest therefore keeps getting a script it answers instead of
+  one naming a method it does not have, and no floor bump is needed to take
+  the new spelling when it arrives. Nothing about the gesture changes: the
+  element stays the locator, its rectangle is read at replay rather than baked
+  in, and an element carrying no rectangle still degrades to two
+  `Element.click()` calls. That degradation's comment now says so — it used to
+  claim `Element` had no `double_click` at all, which was true of 0.9.0 and is
+  about to stop being true.
+
 ### Fixed
 
 - **Four documentation pages still described the release before 0.2.0,
