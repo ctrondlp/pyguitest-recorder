@@ -74,8 +74,9 @@ because the value of a check is exactly how much it would notice:
 **These are pyguitest `Session` methods**, added in pyguitest 0.9, so a generated
 script is plain pyguitest source and depends on nothing but pyguitest. Earlier
 versions of this recorder wrote a private copy of each one into every script that
-needed it; that stopped when pyguitest grew them, which is what raised the floor
-to 0.9.0. They exist rather than bare `assert` statements for two reasons. A
+needed it; that stopped once pyguitest grew them, and the floor has moved since
+for other reasons — the README's install section says where it stands now. They
+exist rather than bare `assert` statements for two reasons. A
 failing `assert gui.element(...).text == "Saved"` reports an `AssertionError` and
 a line number, where these say which element was wrong, what it should have read
 and what it actually reads. And each one retries until its timeout — a check

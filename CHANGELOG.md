@@ -22,6 +22,22 @@ was released.
   claim `Element` had no `double_click` at all, which was true of 0.9.0 and is
   about to stop being true.
 
+- **The pyguitest floor is now 0.10.0, and the code that existed to support
+  0.9.0 went with it: the generator no longer asks the installed `Element`
+  whether it has a `double_click`, and never emits
+  `Session.double_click_element` as a fallback spelling.** Under a 0.9.0 floor
+  the two spellings named the same gesture, and which one came out depended on
+  what was installed — a branch no supported install takes now.
+  `Element.double_click` is what generated scripts get, and `_element_methods()`
+  is deleted along with the fallback it served. An install older than the floor
+  is no longer covered for either: `validate()` checks `gui.*` calls against the
+  installed `Session`, but a method called on an element —
+  `gui.element(...).double_click()` — is an attribute read on a result, which it
+  has never inspected, so such an install fails at replay with the
+  `AttributeError` that names the method. The floor is what keeps that out of
+  reach. It also buys several `app_id`s per window lookup, for a window named
+  differently by each protocol, which pyguitest 0.10.0 added.
+
 ### Fixed
 
 - **Three claims about the project were older than its code: the status page

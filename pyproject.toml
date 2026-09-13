@@ -94,7 +94,14 @@ dependencies = [
     # hits exactly the failure this floor exists to prevent: `validate()`
     # passes a call to a method that is not there, and it is only found at
     # replay, not at generation time.
-    "pyguitest>=0.9.0",
+    # 0.10.0 raises it once more, and takes code away rather than adding it:
+    # with 0.9.0 underneath, `Element.double_click` had to be asked for and
+    # `Session.double_click_element` emitted where it was missing, which is
+    # two spellings for one gesture and a branch no supported install takes
+    # now. 0.10.0 also takes several ids for a window lookup, which is what
+    # lets a script replay a recording made on the other protocol -- see
+    # find_window's `app_id` in pyguitest's docs.
+    "pyguitest>=0.10.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
