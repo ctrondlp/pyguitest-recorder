@@ -160,6 +160,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="prefer window-relative coordinates over accessible elements",
     )
     render.add_argument(
+        "--natural-motion",
+        dest="motion",
+        action="store_const",
+        const="natural",
+        default=None,
+        help="shape each pointer move with pyguitest's natural motion, so the "
+        "pointer is genuinely on the way rather than only arriving",
+    )
+    render.add_argument(
+        "--recorded-motion",
+        dest="motion",
+        action="store_const",
+        const="recorded",
+        help="as --natural-motion, and carry the recorded route too, as via= "
+        "waypoints thinned to the corners it turned on",
+    )
+    render.add_argument(
+        "--teleport-motion",
+        dest="motion",
+        action="store_const",
+        const="teleport",
+        help="the default: gui.move_mouse(), exactly as recorded",
+    )
+    render.add_argument(
+        "--max-waypoints",
+        type=int,
+        default=None,
+        metavar="N",
+        help="cap on via points under --recorded-motion (32); 0 or less for no cap",
+    )
+    render.add_argument(
         "--no-sync-inference",
         dest="sync_inference",
         action="store_false",
@@ -278,6 +309,8 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "output",
         "session_file",
         "locators",
+        "motion",
+        "max_waypoints",
         "comments",
         "include_header",
         "header",
@@ -308,6 +341,8 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
     """Translate settings into generator options."""
     return GeneratorOptions(
         locators=settings.locators,
+        motion=settings.motion,
+        max_waypoints=settings.max_waypoints,
         comments=settings.comments,
         capability_preamble=settings.capability_preamble,
         function_name=settings.function_name,

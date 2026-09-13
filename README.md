@@ -183,7 +183,7 @@ gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
 What comes out depends on what was under the pointer — a checkbox gives
 `expect_checked`, a label with something to say gives `expect_text`, anything
 else named gives `expect_showing`. These are pyguitest `Session` methods, so a
-generated script depends on nothing but pyguitest — and it needs 0.10.0 or
+generated script depends on nothing but pyguitest — and it needs 0.10.1 or
 newer, as the install section explains. They name what was wrong instead of
 raising a bare
 `AssertionError`, and each retries until its timeout so a check cannot race a
@@ -233,10 +233,12 @@ On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
 [install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
 carries the full table, including Arch, openSUSE and FreeBSD.
 
-**pyguitest 0.10.0 or newer is required outright.** Generated scripts call the
+**pyguitest 0.10.1 or newer is required outright.** Generated scripts call the
 `expect_` family as pyguitest `Session` methods, which do not exist before
-0.9.0, and double-click a named element with `Element.double_click`, which
-0.10.0 added. Nothing here depends on that going unnoticed: `validate()` checks
+0.9.0; double-click a named element with `Element.double_click`, which 0.10.0
+added; and, once `motion` is set to `"natural"` or `"recorded"`, move the
+pointer with `Session.move_mouse_naturally`, which 0.10.1 added. Nothing here
+depends on that going unnoticed: `validate()` checks
 `gui.*` calls against the installed `Session` and what is called on an element
 against the installed `Element`, so a script naming a method this pyguitest does
 not have is reported INVALID when it is generated. `--doctor` prints the

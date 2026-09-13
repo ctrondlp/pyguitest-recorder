@@ -61,6 +61,27 @@ infer_idle = true
 
 [generator]
 locators = "element"        # "element", "relative" or "absolute"
+motion = "teleport"         # "teleport", "natural" or "recorded" -- how a
+                            # pointer move is rendered. "teleport" is
+                            # gui.move_mouse(), exactly as recorded. "natural"
+                            # is gui.move_mouse_naturally(): the same call
+                            # length and the same recorded endpoints, with a
+                            # path pyguitest shapes, so a hover reveal or a hot
+                            # corner fires on the approach rather than at the
+                            # destination. "recorded" also puts the route back
+                            # as via= waypoints thinned to the corners it
+                            # turned on -- the only one of the three that can
+                            # make a script long. Teleport stays the default
+                            # because the move before a click is rendered here
+                            # too, and a derived 0.25-1.5s per click adds up.
+                            # Needs a pyguitest with that method: without one
+                            # the recording still renders, as teleports, and
+                            # says so.
+max_waypoints = 32          # cap on via points under "recorded"; 0 or less for
+                            # no cap. A backstop above what thinning produces,
+                            # not a budget: reaching a much smaller number
+                            # means dropping corners, and a route made of
+                            # corners (a zigzag) then comes out a straight line
 comments = true
 include_header = true       # the docstring naming versions and desktop
 # Your own text to open the file with, above that docstring -- a licence, a

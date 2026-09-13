@@ -3,9 +3,73 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
-## Unreleased
+## [Unreleased]
+
+## [0.3.0] — 2026-09-13
+
+Two threads. One is the `motion` setting, which decides how a pointer move is
+rendered — shaped, recorded, or the teleport every recording has produced until
+now. The other is the floor and the prose catching up to what the code already
+did, so that a generated script names only what the pyguitest installed beside
+it can answer.
+
+### Added
+
+- **`motion`, deciding how a pointer move is rendered: `teleport` (unchanged,
+  and still the default), `natural`, or `recorded`.** `teleport` is
+  `gui.move_mouse()`, as every recording has always produced. `natural` emits
+  `gui.move_mouse_naturally()` instead — the same call length, the same
+  recorded endpoints, and a path pyguitest shapes, so the pointer is genuinely
+  on its way rather than only arriving: a hover reveal, a hot corner, or a menu
+  that opens on the approach now fires on the approach at replay.
+  `recorded` also puts the route back, as `via=` waypoints. The default stays
+  `teleport` because `_move` positions the pointer before every coordinate
+  click and scroll too, where the path was incidental — shaping those would put
+  a derived 0.25-1.5s in front of each one, which is the slowdown
+  `_HOVER_WAIT_CAP` exists to avoid. `--natural-motion`, `--recorded-motion`,
+  `--teleport-motion` and `--max-waypoints` set it from the command line.
+
+  `recorded` is the only value that can make a script long, which is why it is
+  asked for rather than assumed, and it is kept in hand by thinning rather than
+  by a budget. The route goes through Douglas-Peucker at `motion_threshold`
+  (8px — the line this codebase already draws between "the pointer meant this"
+  and "the pointer was passing through"), which is chosen for the property that
+  matters here: **every point it drops is within that tolerance of the line it
+  keeps.** Measured, on synthetic routes: 500 samples of a 180px curve become
+  29 waypoints, a quarter circle becomes 9, a 300-sample line carrying 7px of
+  hand jitter becomes none at all, and a route that never turned emits no `via`
+  rather than a route-shaped lie. `max_waypoints` (32) sits above all of that as
+  a backstop, and it is met by loosening the tolerance rather than by
+  subsampling — dropping every N-th point throws away exactly the corners
+  thinning just identified, which is how a 12-point zigzag came out a straight
+  line under a cap of 8.
+
+  A run of positions is folded into one move only where folding is safe. A
+  `MouseMove` that *is* a hover is never collapsed into one — its dwell is the
+  whole point of it, and a submenu that opened because the pointer stayed would
+  be lost. Nor does a run span two windows at different origins: a relative
+  coordinate is an offset into where its window was at the moment of capture,
+  and one `via` is rendered against a single `window_x`/`window_y` read, so a
+  window that moved partway through the run would have its earlier points
+  measured from an origin the script no longer has. That is the same failure
+  `_ensure_geometry` already handles within one event, met across a run.
+
+  As with the `Element.double_click` spelling, the generator asks the
+  installed pyguitest whether it has the method before emitting it, so an
+  install that predates it still gets a script it answers — rendered as
+  teleports, with a warning — rather than one naming a method it does not have.
 
 ### Changed
+
+- **The pyguitest floor is now 0.10.1**, the release that adds
+  `move_mouse_naturally`. The `motion` setting above emits that call under
+  "natural" and "recorded", so a floor that still permitted 0.10.0 would let
+  pip install a pair whose generated scripts name a method the library does not
+  have — which is precisely the failure `validate()` exists to catch, arriving
+  as a dependency's problem rather than a generator's. The generator's own
+  check for the method is unchanged, and still renders teleports with a warning
+  on an install the floor would not have allowed in the first place: a checkout
+  of an older pyguitest, or an install made with `--no-deps`.
 
 - **A double click on a named element is asked of the element itself where
   the installed pyguitest can do it, and of the session where it cannot.**

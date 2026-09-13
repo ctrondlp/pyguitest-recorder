@@ -139,6 +139,23 @@ class Settings:
 
     # -- generator -------------------------------------------------------
     locators: Literal["element", "relative", "absolute"] = "element"
+
+    motion: Literal["teleport", "natural", "recorded"] = "teleport"
+    """How a pointer move is rendered -- see GeneratorOptions.motion.
+
+    Off by default, and on purpose: `_move` positions the pointer before a
+    click and a scroll too, so shaping every move would put a derived
+    0.25-1.5s in front of each one. Turn it on for a recording whose hover and
+    approach behaviour is what has to replay.
+    """
+
+    max_waypoints: int = 32
+    """Cap on `via` points under `motion = "recorded"`; 0 or less means no cap.
+
+    A backstop above what thinning produces rather than a budget it works
+    inside -- see GeneratorOptions.max_waypoints for why that distinction
+    matters, and why a smaller cap silently straightens a zigzag.
+    """
     comments: bool = True
     capability_preamble: bool = True
     default_timeout: float = 10.0

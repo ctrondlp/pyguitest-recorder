@@ -1,4 +1,5 @@
 import ast
+import math
 
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.generator import python as generator_module
@@ -1334,3 +1335,241 @@ def test_a_very_long_hover_is_capped(window):
     # because the person was reading -- replaying that only wastes time.
     source = render(MouseMove(target=Target(x=65, y=47, window=window), dwell=45.0))
     assert "gui.wait(2.00)" in source
+
+
+# -- how a pointer move is rendered -----------------------------------------
+#
+# One axis, three values: `teleport` (what this always did), `natural` (one
+# shaped call, the same length) and `recorded` (that, plus the route as thinned
+# waypoints). Every test below asserts on the generated *text*, which is the
+# point: the choice is made while rendering and never touches a display, so it
+# behaves the same on X11, on XWayland, on a Wayland session and on a BSD with
+# none of the three. What varies by platform is whether pyguitest can inject at
+# all, and that is the capability preamble's business, not this one's.
+
+
+def moves(window, *points, dwell=0.0, screen=0):
+    """MouseMove events for a path, resting `dwell` at each of `points`."""
+    return [
+        MouseMove(target=Target(x=x, y=y, screen=screen, window=window), dwell=dwell)
+        for x, y in points
+    ]
+
+
+def _to_segment(point, start, end):
+    """How far `point` sits from the segment start -> end.
+
+    The measure a route's fidelity is judged by: the distance to the nearest
+    point of that segment, not to either of its ends.
+    """
+    ax, ay = start
+    bx, by = end
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    if not span:
+        return math.dist(point, start)
+    along = max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / span))
+    return math.dist(point, (ax + along * dx, ay + along * dy))
+
+
+def waypoints(source):
+    """The `via` points a generated script carries, as source text.
+
+    Text rather than numbers because a window-relative point is an expression
+    and not a literal -- `example_x + 140` rather than `240` -- so the tests
+    that care about the coordinates ask for absolute locators and compare
+    against that literal form.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg == "via":
+                    return [ast.unparse(item) for item in keyword.value.elts]
+    return []
+
+
+def test_teleport_motion_is_unchanged_and_still_the_default(window):
+    # The whole reason it is the default: a recording nobody asked anything of
+    # comes out exactly as it did before this option existed.
+    source = render(*moves(window, (200, 200), (260, 240), (330, 300)))
+    assert "gui.move_mouse(" in source
+    assert "move_mouse_naturally(" not in source
+    assert validate(source) == []
+
+
+def test_natural_motion_is_one_call_and_carries_no_waypoints(window):
+    source = render(
+        *moves(window, (200, 200), (260, 240), (330, 300)), motion="natural"
+    )
+    # Three recorded positions, one call: the movement is the event, not each
+    # sample of it. That is what keeps the script the same length as before.
+    assert source.count("gui.move_mouse_naturally(") == 1
+    assert waypoints(source) == []
+    assert validate(source) == []
+
+
+def test_a_straight_route_needs_no_waypoints_even_when_recorded(window):
+    # Collinear samples carry nothing the endpoints do not, so a `via` here
+    # would be claiming a route that was never there.
+    source = render(
+        *moves(window, (200, 200), (220, 200), (240, 200), (260, 200)),
+        motion="recorded",
+    )
+    assert source.count("gui.move_mouse_naturally(") == 1
+    assert waypoints(source) == []
+    assert validate(source) == []
+
+
+def test_a_recorded_route_thins_to_the_corners_it_turned_on(window):
+    # An L: right along y=200, down x=300, then right again. Ten intermediate
+    # samples of travel, two corners worth keeping.
+    route = moves(
+        window,
+        (200, 200),
+        (220, 200),
+        (240, 200),
+        (260, 200),
+        (280, 200),
+        (300, 200),
+        (300, 300),
+        (300, 400),
+        (300, 500),
+        (350, 500),
+        (400, 500),
+    )
+    source = render(*route, motion="recorded", locators="absolute")
+    kept = waypoints(source)
+    assert "(300, 200)" in kept
+    assert "(300, 500)" in kept
+    assert len(kept) < 10
+    assert validate(source) == []
+
+
+def test_a_thinned_route_stays_within_the_tolerance_it_claims(window):
+    """Every dropped sample must be within the tolerance of the line kept.
+
+    This is the property `_WAYPOINT_TOLERANCE` exists to promise, and the one
+    an iterative neighbour-dropping loop quietly broke: 500 samples of a 180px
+    curve came out as six chords, up to 286px from the path they were meant to
+    reproduce, against a tolerance claiming 8. Douglas-Peucker is *defined* by
+    the property, so this pins it rather than re-describing it.
+    """
+    samples = [
+        (120 + index * 3, 300 + int(180 * math.sin(index / 25))) for index in range(500)
+    ]
+    source = render(*moves(window, *samples), motion="recorded", locators="absolute")
+    route = [ast.literal_eval(point) for point in waypoints(source)]
+    assert route, "the curve thinned away to nothing"
+    # Douglas-Peucker keeps both ends of what it is given, so the polyline
+    # starts on the first sample and ends on the last one before the target.
+    assert route[0] == samples[0], "the route lost its start"
+    assert route[-1] == samples[-2], "the route lost the sample before the target"
+    walked = [*route, samples[-1]]
+    worst = max(
+        min(
+            _to_segment(sample, walked[index], walked[index + 1])
+            for index in range(len(walked) - 1)
+        )
+        for sample in samples[1:-1]
+    )
+    assert worst <= generator_module._WAYPOINT_TOLERANCE + 1, (
+        f"{worst:.0f}px off the emitted route, tolerance is "
+        f"{generator_module._WAYPOINT_TOLERANCE}"
+    )
+
+
+def test_the_waypoint_cap_backstops_a_route_that_genuinely_wanders(window):
+    # A zig-zag has nothing to thin -- every point is a real corner -- so the
+    # cap is the only thing keeping the script to a length a person would
+    # have been willing to write.
+    zigzag = moves(
+        window,
+        *[(200 + 40 * index, 260 if index % 2 else 140) for index in range(12)],
+    )
+    thinned = render(*zigzag, motion="recorded", locators="absolute")
+    capped = render(*zigzag, motion="recorded", locators="absolute", max_waypoints=2)
+    assert len(waypoints(thinned)) > 2
+    assert len(waypoints(capped)) == 2
+
+
+def test_a_hover_is_never_folded_into_a_run(window):
+    # The dwell is the whole point of the event: the pointer arrived and
+    # stayed, and a menu opened because of it. Folding a run across it would
+    # drop the one thing the recording existed to capture.
+    events = [
+        *moves(window, (200, 200), (220, 220)),
+        *moves(window, (300, 300), dwell=1.2),
+        *moves(window, (320, 320), (340, 340)),
+    ]
+    source = render(*events, motion="natural")
+    assert source.count("gui.move_mouse_naturally(") == 3
+    assert "gui.wait(1.20)" in source
+
+
+def test_a_run_stops_where_the_window_moved_underneath_it(window):
+    # Same title, same pid, different origin. A relative coordinate is an
+    # offset into where its window was at the moment of capture, and one `via`
+    # is rendered against a single window_x/window_y read -- so these two
+    # cannot share a call however alike they look.
+    shifted = WindowRef(
+        title="Example", app_id="org.example.App", pid=99, geometry=(0, 0, 800, 600)
+    )
+    source = render(
+        MouseMove(target=Target(x=200, y=200, window=window)),
+        MouseMove(target=Target(x=260, y=240, window=shifted)),
+        motion="natural",
+    )
+    assert source.count("gui.move_mouse_naturally(") == 2
+
+
+def test_an_older_pyguitest_falls_back_to_teleports(monkeypatch, window):
+    # The method is newer than the release this package's floor names. Emitting
+    # it anyway would produce a script that imports cleanly and then fails at
+    # replay, which is the failure validate() exists to prevent -- so the
+    # recording still renders, as teleports, and the caller is warned.
+    monkeypatch.setattr(generator_module, "_session_methods", lambda: frozenset())
+    source = render(*moves(window, (200, 200), (260, 240)), motion="natural")
+    assert "move_mouse_naturally(" not in source
+    assert "gui.move_mouse(" in source
+    assert validate(source) == []
+
+
+def test_a_recorded_route_renders_waypoints_relative_to_its_window(window):
+    # The default locator mode, and the one a waypoint list could plausibly
+    # break: here a point is an *expression*, `example_x + 200` rather than
+    # `300`, and every point in one `via` is measured against the same window
+    # origin — which is exactly what `_group_motion` refuses to take for
+    # granted.
+    source = render(
+        *moves(window, (300, 300), (400, 400), (200, 400), (100, 200)),
+        motion="recorded",
+    )
+    assert "via=[" in source
+    assert "example_x +" in waypoints(source)[0]
+    assert validate(source) == []
+
+
+def test_a_negative_waypoint_cap_is_treated_as_no_cap(window):
+    # `range()` over a negative cap is empty, which emptied the route
+    # silently — a nonsense setting quietly switching off the one thing it
+    # configures. Nonsense now means "no cap" instead.
+    source = render(
+        *moves(window, (300, 300), (400, 400), (200, 400), (100, 200)),
+        motion="recorded",
+        max_waypoints=-1,
+    )
+    assert "via=[" in source
+    assert validate(source) == []
+
+
+def test_an_unrecognised_motion_value_falls_back_to_the_default(window):
+    # Nothing validates config *values*, only keys, so a typo arrives intact.
+    # Falling back to the recorded behaviour is the conservative answer: an
+    # unknown setting should not silently select one of the new ones.
+    source = render(
+        *moves(window, (200, 200), (260, 240), (330, 300)),
+        motion="naturl",
+    )
+    assert "gui.move_mouse(" in source
+    assert "move_mouse_naturally(" not in source
+    assert validate(source) == []
