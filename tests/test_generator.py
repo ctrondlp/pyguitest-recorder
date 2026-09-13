@@ -1,6 +1,7 @@
 import ast
 
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
+from pyguitest_recorder.generator import python as generator_module
 from pyguitest_recorder.model import (
     Assertion,
     Click,
@@ -421,6 +422,58 @@ def test_window_variable_is_named_from_the_app_id_when_there_is_no_title():
 def test_validate_rejects_a_call_pyguitest_does_not_have():
     problems = validate("def f(gui):\n    gui.telepathy()\n")
     assert problems == ["pyguitest.Session has no method 'telepathy'"]
+
+
+def test_validate_rejects_a_method_an_element_does_not_have():
+    # A method called on an element is an attribute read on a *result*, which
+    # the `gui.*` check cannot see: it matches a Name, not a Call. Left
+    # unchecked, that shape reached the file and failed at replay with the
+    # AttributeError this now reports at generation time.
+    source = "def f(gui, Role):\n    gui.element(role=Role.ICON).telepathy()\n"
+    assert validate(source) == ["pyguitest.Element has no method 'telepathy'"]
+
+
+def test_validate_accepts_what_a_generated_script_calls_on_an_element():
+    # Every shape the generator emits, plus the accessors it only names when a
+    # recording carries that role, and a name -- rather than a call -- whose
+    # attribute is nobody's business here.
+    source = (
+        "def f(gui, Role):\n"
+        "    gui.button('Save').click()\n"
+        "    gui.checkbox('Enable').click()\n"
+        "    gui.dropdown('Country').choose('Norway')\n"
+        "    gui.menu_item('Open').click()\n"
+        "    gui.link('Docs').click()\n"
+        "    gui.text_field('Name').set_text('Ada')\n"
+        "    gui.element(role=Role.ICON, name='Computer').double_click()\n"
+        "    gui.window_element('Editor').focus()\n"
+        "    gui.root_element().children\n"
+        "    found = gui.element_at(1, 2)\n"
+        "    return found.text\n"
+    )
+    assert validate(source) == []
+
+
+def test_validate_sees_the_expression_the_generator_actually_emits(window, monkeypatch):
+    # The pair above works on shapes written by hand here. This one takes the
+    # generator's own output for a double click and pretends the installed
+    # Element has lost the method -- so a check that did not recognise the
+    # emitted shape would pass those two and fail this, instead of reporting
+    # nothing while looking thorough.
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    assert validate(source) == []
+
+    real = generator_module._public_names
+
+    def without_double_click(attribute: str) -> frozenset[str]:
+        names = real(attribute)
+        return names - {"double_click"} if attribute == "Element" else names
+
+    monkeypatch.setattr(generator_module, "_public_names", without_double_click)
+    assert validate(source) == ["pyguitest.Element has no method 'double_click'"]
 
 
 def test_validate_rejects_a_capability_and_a_role_pyguitest_does_not_have():

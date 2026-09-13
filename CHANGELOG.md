@@ -29,14 +29,20 @@ was released.
   the two spellings named the same gesture, and which one came out depended on
   what was installed — a branch no supported install takes now.
   `Element.double_click` is what generated scripts get, and `_element_methods()`
-  is deleted along with the fallback it served. An install older than the floor
-  is no longer covered for either: `validate()` checks `gui.*` calls against the
-  installed `Session`, but a method called on an element —
-  `gui.element(...).double_click()` — is an attribute read on a result, which it
-  has never inspected, so such an install fails at replay with the
-  `AttributeError` that names the method. The floor is what keeps that out of
-  reach. It also buys several `app_id`s per window lookup, for a window named
-  differently by each protocol, which pyguitest 0.10.0 added.
+  is deleted along with the fallback it served. The floor also buys several
+  `app_id`s per window lookup, for a window named differently by each protocol,
+  which pyguitest 0.10.0 added.
+
+- **`validate()` now checks what a generated script calls on an element against
+  the installed `Element`, not only `gui.*` calls against `Session`.**
+  `gui.element(...).double_click()` is an attribute read on a *result* rather
+  than on the `gui` name, so the older check never saw it — which meant a script
+  naming a method its pyguitest did not have passed validation and failed at
+  replay with the `AttributeError` naming it. The factories come from the
+  generator's own sugar table, so an accessor added there is covered the moment
+  it can be emitted; the other ways a script gets an element (`window_element`,
+  `root_element`, `element_at`) are covered too, since these files are meant to
+  be edited.
 
 ### Fixed
 

@@ -128,8 +128,10 @@ had, which is every desktop running a shell that holds FOCUSED itself.
 
 `validate()` compiles the file, confirms every `gui.<method>` call exists on
 the installed `pyguitest.Session`, checks each `Capability` and `Role`
-constant against the same, and reports any name the module reads without ever
-binding.
+constant against the same, checks what is called on an element —
+`gui.element(...).double_click()`, an attribute read on a *result* rather than
+on a `gui` name — against the installed `Element`, and reports any name the
+module reads without ever binding.
 
 A recorder that emits a plausible script naming a function the library does
 not have is worse than no recorder — and a script that compiles and then
