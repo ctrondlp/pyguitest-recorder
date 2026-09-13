@@ -186,11 +186,12 @@ appeared yet. Adding a wait is usually the fix, and the recorder's inference
 did not add one because nothing observable changed at that moment.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.10.0 or newer is required
+older than the recording expects. **pyguitest 0.10.1 or newer is required
 outright** — generated scripts call the `expect_` family as `Session` methods
-(0.9.0 and later) and double-click named elements with `Element.double_click`
-(0.10.0). Older floors matter as well: `gui.button(...)` finds nothing on a
-current at-spi2 before 0.5.0.
+(0.9.0 and later), double-click named elements with `Element.double_click`
+(0.10.0), and under `motion = "natural"` or `"recorded"` move the pointer with
+`Session.move_mouse_naturally` (0.10.1). Older floors matter as well:
+`gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
 

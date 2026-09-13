@@ -22,6 +22,10 @@ def test_example_config_parses_and_sets_only_known_keys():
     assert settings.stop_key_presses == 2
     assert settings.check_key == "ctrl+1"
     assert settings.locators == "element"
+    # The motion axis, which the example config documents at length because
+    # "teleport" being the default is not self-explanatory.
+    assert settings.motion == "teleport"
+    assert settings.max_waypoints == 32
 
 
 def test_a_recorded_interaction_becomes_a_runnable_script():

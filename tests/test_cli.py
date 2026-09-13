@@ -262,6 +262,19 @@ def test_record_motion_has_a_flag_not_only_a_config_key():
     assert _overrides(parser.parse_args([]))["record_motion"] is None
 
 
+def test_motion_has_flags_and_not_only_config_keys():
+    from pyguitest_recorder.cli import _overrides
+
+    parser = build_parser()
+    assert _overrides(parser.parse_args(["--natural-motion"]))["motion"] == "natural"
+    assert _overrides(parser.parse_args(["--recorded-motion"]))["motion"] == "recorded"
+    assert _overrides(parser.parse_args(["--teleport-motion"]))["motion"] == "teleport"
+    assert _overrides(parser.parse_args(["--max-waypoints", "3"]))["max_waypoints"] == 3
+    # Unset overrides nothing, so a config file's choice survives.
+    assert _overrides(parser.parse_args([]))["motion"] is None
+    assert _overrides(parser.parse_args([]))["max_waypoints"] is None
+
+
 # -- trimming ----------------------------------------------------------
 
 

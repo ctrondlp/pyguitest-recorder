@@ -34,11 +34,12 @@ from __future__ import annotations
 import ast
 import builtins
 import keyword
+import math
 import re
 import shutil
 import subprocess
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, fields
 from typing import Literal
 
@@ -226,6 +227,26 @@ worth reconstructing, only that replay must not let two clicks the recording
 already decided were separate collapse back into one on replay.
 """
 
+_WAYPOINT_TOLERANCE = 8
+"""Pixels a recorded path may sit off the line between its neighbours and still
+be dropped as detail, when a route is being replayed as waypoints.
+
+The same number as the analyzer's `motion_threshold`, deliberately: that is
+already this codebase's line between "the pointer meant this" and "the pointer
+was passing through", drawn at 8px to tell a click from a drag. A recorded path
+is mostly samples of travel between two or three real turns, so thinning to it
+is what turns hundreds of motion events into a handful of corners.
+"""
+
+_NATURAL_MOTION = "move_mouse_naturally"
+"""The Session method a shaped move needs, asked of the installed pyguitest.
+
+Not every pyguitest has it -- it is newer than the release this package's floor
+names -- so a session without it renders the teleport it would have emitted
+anyway, and says so in a warning, rather than emitting a call that imports
+cleanly and fails at replay. Same degradation `ELEMENT_GEOMETRY` already gets.
+"""
+
 _MODULE_DUNDERS = frozenset({"__name__", "__file__", "__doc__", "__spec__"})
 """Names every module is given without assigning them, for the unbound check."""
 
@@ -240,6 +261,41 @@ class GeneratorOptions:
 
     locators: Literal["element", "relative", "absolute"] = "element"
     """Preferred locator. Each falls back to the next on the way to absolute."""
+
+    motion: Literal["teleport", "natural", "recorded"] = "teleport"
+    """How to render a pointer move. Off is the old behaviour, deliberately.
+
+    `teleport` is `gui.move_mouse()`, exactly as recorded: the pointer is never
+    anywhere in between. Fine for a click, and wrong for anything that watches
+    the pointer on its way -- a hover reveal, a hot corner, a menu that opens
+    on the approach. This stays the default because `_move` also positions the
+    pointer before a click or a scroll, where the path was incidental: shaping
+    those would put a derived 0.25-1.5s in front of every click in the script,
+    which is the slowdown `_HOVER_WAIT_CAP` exists to avoid.
+
+    `natural` is `gui.move_mouse_naturally()`, one call carrying the
+    recording's own endpoints and a path pyguitest shapes -- the same script
+    length as a teleport, and a much better account of the travel. Turn it on
+    for a recording whose hover and approach behaviour matters.
+
+    `recorded` goes further and puts the route itself back, as `via=` waypoints
+    thinned to the corners that mattered. It is the only one of the three that
+    can make a script long, which is why it is asked for rather than assumed.
+    """
+
+    max_waypoints: int = 32
+    """Cap on the `via` points under `motion = "recorded"`; 0 or less is no cap.
+
+    A generated script is meant to be one a person would have been willing to
+    write, and a hundred-element `via` is not that however accurate it is.
+
+    Set above what thinning actually produces, deliberately. Douglas-Peucker at
+    8px turns the worst realistic route measured -- 500 samples of a 180px
+    curve -- into 29 points on its own, so this is a backstop and not a budget
+    the setting lives inside. It matters because the cap can only ever *lose*
+    shape: a 12-point zigzag came out as a straight line at 8, since reaching
+    that count means dropping the corners, and a zigzag has nothing else.
+    """
 
     capability_preamble: bool = True
     comments: bool = True
@@ -304,6 +360,14 @@ class _State:
     geometry_for: str | None = None
     geometry_origin: tuple[int, int] | None = None
     pointer: str | None = None
+    natural_motion: bool = False
+    """Whether the installed pyguitest has the shaped-move method.
+
+    Computed once per render rather than asked per move: the answer belongs to
+    the installed library, and asking imports pyguitest and walks its
+    namespace -- which a recording with hundreds of motion events would
+    otherwise do hundreds of times.
+    """
     focused_window: str | None = None
     """The window variable the script has most recently focused, so keyboard
     input can confirm focus once per switch rather than before every key.
@@ -325,6 +389,198 @@ class _State:
     """Ancestor (role, name) -> the variable it was bound to, so two elements
     needing the same scoping container share one lookup rather than
     searching for it twice."""
+
+
+@dataclass(frozen=True)
+class _MotionRun:
+    """Consecutive pointer positions that were really one movement.
+
+    Only ever built from motion recorded in its own right (`record_motion`),
+    where a MouseMove with no dwell is a position and nothing else. A MouseMove
+    that *is* a hover carries a dwell and is never folded into one of these:
+    the rest is the whole point of it, and collapsing a run across it would
+    drop the submenu the recording depended on.
+    """
+
+    moves: tuple[MouseMove, ...]
+
+    @property
+    def last(self) -> MouseMove:
+        """Where the movement ended -- the only position it has to reach."""
+        return self.moves[-1]
+
+
+def _flush_run(run: Sequence[MouseMove]) -> list[Event | _MotionRun]:
+    """One movement for a run of positions, or the positions if there is one.
+
+    A single position is not a run: rendering it through the same path as a
+    real one would add a call that means nothing.
+    """
+    return [_MotionRun(tuple(run))] if len(run) > 1 else list(run)
+
+
+def _same_frame(first: MouseMove, second: MouseMove) -> bool:
+    """Whether two positions share a window, a screen, and a window origin.
+
+    The origin is the one that is not obvious. A relative coordinate is an
+    offset into where its window was *at the moment that event was captured*,
+    and one `via=[...]` renders every point of it against a single
+    `window_x`/`window_y` read -- so a window that moved partway through the
+    run would have its earlier points measured from an origin the script no
+    longer has. `_ensure_geometry` exists for that same reason within a single
+    event; this is the version of it that spans a run.
+    """
+    return (
+        first.target.screen == second.target.screen
+        and first.target.window == second.target.window
+        and getattr(first.target.window, "geometry", None)
+        == getattr(second.target.window, "geometry", None)
+    )
+
+
+def _shaped(motion: str) -> bool:
+    """Whether a `motion` value asks for a shaped move at all.
+
+    Only the two documented values do. An unrecognised one falls back to the
+    recorded behaviour rather than silently selecting one of the new ones --
+    `load_settings` rejects an unknown *key*, but nothing validates a *value*,
+    so `motion = "naturl"` reaches here intact.
+    """
+    return motion in ("natural", "recorded")
+
+
+def _group_motion(
+    events: Sequence[Event], options: GeneratorOptions
+) -> list[Event | _MotionRun]:
+    """Fold runs of dwell-less MouseMoves into one movement each.
+
+    Returns the events untouched unless the setting asks for a shaped move,
+    which renders every position it was handed, one `gui.move_mouse` per line
+    -- the behaviour every recording got before this option existed.
+
+    Otherwise a run of positions becomes a single movement: `natural` keeps
+    only where it ended, and `recorded` keeps the route between. Both are
+    strictly shorter than the wall of teleports, which is the point -- that
+    wall is what `record_motion` costs today.
+    """
+    if not _shaped(options.motion):
+        return list(events)
+    grouped: list[Event | _MotionRun] = []
+    run: list[MouseMove] = []
+    for event in events:
+        if not isinstance(event, MouseMove) or event.dwell:
+            grouped.extend(_flush_run(run))
+            run = []
+            grouped.append(event)
+            continue
+        if run and not _same_frame(run[-1], event):
+            grouped.extend(_flush_run(run))
+            run = []
+        run.append(event)
+    grouped.extend(_flush_run(run))
+    return grouped
+
+
+def _off_line(point: Target, start: Target, end: Target) -> float:
+    """How far `point` sits off the straight line from `start` to `end`."""
+    ax, ay, bx, by, px, py = start.x, start.y, end.x, end.y, point.x, point.y
+    span = math.hypot(bx - ax, by - ay)
+    if not span:
+        return math.dist((px, py), (ax, ay))
+    return abs((px - ax) * (by - ay) - (py - ay) * (bx - ax)) / span
+
+
+def _straight(targets: Sequence[Target]) -> bool:
+    """Whether a route never turned, within the thinning tolerance.
+
+    A `via` for a route that was a straight line would be claiming a route
+    that was not there -- the same mistake, in the other direction, as
+    emitting one for a route nobody recorded. Thinning cannot answer this on
+    its own: it drops points that sit near the line between their *neighbours*,
+    which leaves the two ends of a straight run standing however straight it
+    was. The question here is whether the whole route sits near the line
+    between its own first and last positions.
+    """
+    if len(targets) < 3:
+        return True
+    return all(
+        _off_line(target, targets[0], targets[-1]) <= _WAYPOINT_TOLERANCE
+        for target in targets[1:-1]
+    )
+
+
+def _simplify(
+    points: Sequence[Target], tolerance: float = _WAYPOINT_TOLERANCE
+) -> list[Target]:
+    """Drop the points a route can do without, keeping the ones it turns on.
+
+    Douglas-Peucker, which is defined by the guarantee this needs: **every
+    dropped point is within `tolerance` of the line the kept points draw.** It
+    gets that by taking the point of *greatest* deviation from the chord first,
+    keeping it if it exceeds the tolerance, and recursing either side of it; a
+    span whose worst point is within tolerance is dropped whole.
+
+    The iterative "drop anything within tolerance of its neighbours" loop this
+    replaces did not have that guarantee, and looked like it did. It judged
+    each point against two neighbours, either of which might already have been
+    dropped on an earlier pass, so the chord grew without bound: 500 samples of
+    a 180px curve came out as six chords, up to 286px from the path they were
+    supposed to be reproducing. There is a test for the property now, which is
+    what would have caught it.
+
+    An explicit stack rather than recursion, because a long recording nests
+    deeply enough for the recursion limit to be a real ceiling.
+    """
+    if len(points) < 3:
+        return list(points)
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+    while stack:
+        first, last = stack.pop()
+        worst, worst_at = 0.0, first
+        for index in range(first + 1, last):
+            off = _off_line(points[index], points[first], points[last])
+            if off > worst:
+                worst, worst_at = off, index
+        if worst <= tolerance:
+            continue
+        keep[worst_at] = True
+        stack.append((first, worst_at))
+        stack.append((worst_at, last))
+    return [point for point, wanted in zip(points, keep, strict=True) if wanted]
+
+
+def _thin(targets: Sequence[Target], cap: int) -> list[Target]:
+    """The waypoints a route needs: its corners, within the tolerance.
+
+    Positions are compared in absolute screen coordinates, which is sound
+    because `_group_motion` only ever folds moves sharing one window origin --
+    so every point here differs from its relative offset by the same constant
+    and the distances are identical either way.
+
+    `cap` (0 or less for no cap) is the backstop for a route that genuinely
+    wanders, and it is met by **loosening the tolerance rather than by
+    subsampling**. That distinction is the whole of this function's second
+    half. Dropping every N-th point of an already-thinned route throws away
+    exactly the points `_simplify` just decided were corners: measured on a
+    24-sample zigzag, where every point is a corner, a cap of 8 took the
+    deviation from 0px to **113px**. Loosening instead keeps the corners and
+    smooths the detail between them, so the script gets shorter and the
+    deviation grows in the same, predictable direction.
+    """
+    kept = _simplify(targets)
+    if cap <= 0 or len(kept) <= cap:
+        return kept
+    tolerance = _WAYPOINT_TOLERANCE
+    for _ in range(16):  # 8px doubling to ~500k px; a cap of 2 is reached early
+        tolerance *= 2
+        kept = _simplify(targets, tolerance)
+        if len(kept) <= cap:
+            return kept
+    # Only reachable for a cap smaller than the two endpoints, which
+    # `_simplify` always keeps -- so this cannot in practice drop one.
+    return kept[:cap]
 
 
 def _iter_element_refs(recording: Recording) -> Iterator[ElementRef]:
@@ -480,13 +736,48 @@ class PythonGenerator:
     def render(self, recording: Recording) -> str:
         """Return the complete generated module for `recording`."""
         state = _State()
+        state.natural_motion = _NATURAL_MOTION in _session_methods()
         if self.options.locators == "element":
             state.element_scopes, scope_warnings = _compute_element_scopes(recording)
             state.warnings.extend(scope_warnings)
-        for event in recording.events:
-            self._emit(event, state)
+        if _shaped(self.options.motion) and not state.natural_motion:
+            state.warnings.append(
+                f"the installed pyguitest has no {_NATURAL_MOTION}(), so every "
+                f"move under motion = {self.options.motion!r} was rendered as a "
+                "teleport"
+            )
+        for item in _group_motion(recording.events, self.options):
+            if isinstance(item, _MotionRun):
+                self._emit_motion_run(item, state)
+            else:
+                self._emit(item, state)
         source = self._assemble(recording, state)
         return _format(source) if self.options.format_output else source
+
+    def _emit_motion_run(self, run: _MotionRun, state: _State) -> None:
+        """Render one movement: where it ended, and its route if asked for.
+
+        Under `natural` the route is dropped. The endpoints are the
+        recording's and pyguitest shapes what happens between them, which is
+        the same call length as a teleport and a much better account of the
+        travel -- the pointer is genuinely on the way, so a hover reveal or a
+        hot corner fires on the approach rather than at the destination.
+
+        Under `recorded` the route comes back as waypoints, thinned first (see
+        `_thin`), so a few hundred motion events become the handful of points
+        the movement actually turned on.
+        """
+        state.capabilities.add("POINTER_MOVE")
+        via: list[Target] = []
+        if self.options.motion == "recorded":
+            route = [move.target for move in run.moves[:-1]]
+            # Straightness is asked of the whole route, destination included:
+            # the recorded samples alone can all be collinear while the move
+            # still ended somewhere off that line.
+            whole = [*route, run.last.target]
+            if not _straight(whole):
+                via = _thin(route, self.options.max_waypoints)
+        self._move(run.last.target, state, via=via)
 
     # -- event dispatch ------------------------------------------------------
 
@@ -1044,12 +1335,17 @@ class PythonGenerator:
         # 8 for the body indent, 2 for "# ", against the project's own limit.
         state.lines.extend(f"# {line}" for line in textwrap.wrap(text, width=78))
 
-    def _move(self, target: Target, state: _State) -> None:
+    def _move(self, target: Target, state: _State, via: Sequence[Target] = ()) -> None:
         """Put the pointer at `target`, unless it is already known to be there.
 
         Tracking the last emitted position is what keeps a click and the
         scroll that follows it at the same place from emitting the same move
         twice, and is why a scroll can afford to always ask for one.
+
+        `via` is the route a movement took, already thinned. It is rendered as
+        literal tuples rather than built in a loop because a generated script
+        is meant to be one a person would have been willing to write; see
+        `motion` on GeneratorOptions.
         """
         point = self._point(target, state)
         if point == state.pointer:
@@ -1064,7 +1360,14 @@ class PythonGenerator:
             state.capabilities.add("TIMING")
             state.lines.append(f"gui.wait({_UNATTRIBUTED_SETTLE:g})")
         screen = f", screen={target.screen}" if target.screen else ""
-        state.lines.append(f"gui.move_mouse({point}{screen})")
+        if not _shaped(self.options.motion) or not state.natural_motion:
+            # Either not asked for, or a pyguitest without the shaped call --
+            # render() has already warned about the second.
+            state.lines.append(f"gui.move_mouse({point}{screen})")
+        else:
+            rendered = [f"({self._point(waypoint, state)})" for waypoint in via]
+            via_arg = f", via=[{', '.join(rendered)}]" if rendered else ""
+            state.lines.append(f"gui.move_mouse_naturally({point}{screen}{via_arg})")
         state.pointer = point
 
     def _element_call(

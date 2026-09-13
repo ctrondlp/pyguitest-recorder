@@ -63,8 +63,9 @@ met from the other side.
   daemon paths are observed rather than reasoned.
 - ~~**A double click on a named element is emitted on the element itself only
   where the installed pyguitest has `Element.double_click`.**~~ **Closed:** the
-  floor is 0.10.0, which has it, so the `double_click_element` fallback and the
-  probe that chose between the two spellings are gone. The element is looked
+  floor is 0.10.1, and `Element.double_click` has been in since 0.10.0, so the
+  `double_click_element` fallback and the probe that chose between the two
+  spellings are gone. The element is looked
   up, its rectangle read *at replay*, and `element.double_click()` called
   there — the element stays the locator and the gesture stays one gesture. It
   still needs the element to have a trustworthy rectangle, and falls back to
