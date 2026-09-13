@@ -25,9 +25,9 @@ keywords = ["gui", "testing", "recorder", "automation", "x11", "pyguitest"]
 # setuptools>=77 rejects the distribution if both are present. Same reason
 # pyguitest's list omits one.
 classifiers = [
-    # 0.2.0, never tagged, and "record more real applications" is still an
-    # open item. Every piece works end to end, but the coverage 4-Beta claims
-    # is not one this tree can make yet; pyguitest is 4-Beta because it can.
+    # "Record more real applications" is still an open item. Every piece
+    # works end to end, but the coverage 4-Beta claims is not one this tree
+    # can make yet; pyguitest is 4-Beta because it can.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     # Capture is XRecord, so recording is X11-only. What it writes is
@@ -105,7 +105,9 @@ dependencies = [
 x11 = ["python-xlib>=0.33"]
 # Element resolution at record time; the reason a recording can name a widget
 # instead of a coordinate.
-atspi = ["pyguitest[atspi]>=0.5.0"]
+# No version here: the base dependency above sets the floor, and a second copy
+# of it is one more number to go stale.
+atspi = ["pyguitest[atspi]"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]

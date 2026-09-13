@@ -74,11 +74,16 @@ met from the other side.
 - **Element resolution needs `Capability.ELEMENT_GEOMETRY`**, added upstream
   for this and released in pyguitest 0.4.0. A pyguitest without it declares
   the capability nowhere, so the recorder degrades to coordinates and says so
-  rather than failing. (The floor is 0.5.0 for other reasons — see the
-  README's install section.)
-- **pyguitest cannot look a window up by application id**, only by title
-  regex, so a recording whose title drifted carries a small helper function
-  into the generated file to do it.
+  rather than failing. (The floor is higher than that, and set by
+  `pyproject.toml` rather than by this capability — see the README's install
+  section.)
+- ~~**pyguitest cannot look a window up by application id**, only by title
+  regex.~~ **Closed:** `find_windows`/`find_window`/`wait_for_window`/
+  `expect_window` have taken an `app_id` since pyguitest 0.7.0, well inside
+  the floor, and the generator uses it — a window whose title drifted comes
+  out as `gui.expect_window(app_id=...)`. No helper is written into the script
+  to do it, and none has been since the private helpers stopped being emitted
+  in 0.2.0.
 - **pyguitest's X11 backend could not be pointed at a display by argument.**
   Fixed upstream; the recorder still sets `DISPLAY` around the call, which
   works on any version.

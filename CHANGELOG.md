@@ -24,6 +24,21 @@ was released.
 
 ### Fixed
 
+- **Three claims about the project were older than its code: the status page
+  and the troubleshooting guide both said pyguitest could not look a window up
+  by application id — the stated reason a helper function had to be carried
+  into each generated script — and `pyproject.toml` gave the floor as 0.5.0 in
+  one place and 0.9.0 in another while calling 0.2.0 "never tagged".** None of
+  it was true any more. `app_id` lookups landed in pyguitest 0.7.0, which the
+  `v0.9.0` tag the floor names is verified to contain; the generator emits
+  `gui.expect_window(app_id=...)` for a window whose title drifted; the private
+  helpers stopped being written into scripts in 0.2.0; and `v0.2.0` was tagged
+  on 2026-09-12 with a CHANGELOG section of its own. The cost was a status page
+  inviting somebody to build a feature that already existed. The `atspi`
+  extra's floor is gone rather than corrected — the base dependency sets it,
+  and a second copy is one more number to go stale. Found by checking whether
+  the feature existed before starting on it.
+
 - **Four documentation pages still described the release before 0.2.0,
   including two code samples and the key users are told to press to record a
   check.** The private `expect_*` helpers stopped being written into generated
