@@ -1,3 +1,10 @@
+"""What the generator writes, and whether the installed pyguitest answers it.
+
+Generated source is parsed and validated against the real API rather than
+matched as text, so a call that no longer exists fails here instead of at
+replay -- where it would be somebody's test that broke, not this one.
+"""
+
 import ast
 import math
 

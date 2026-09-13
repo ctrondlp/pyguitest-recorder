@@ -1,3 +1,10 @@
+"""The command line: the flags the parser accepts, and what they change.
+
+Parsing is checked apart from the effects, because the two fail differently.
+An unset flag that stays `None` is the mechanism by which the config file
+wins, and no end-to-end test would notice the difference.
+"""
+
 import pytest
 
 from pyguitest_recorder.cli import (

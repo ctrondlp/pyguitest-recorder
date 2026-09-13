@@ -1,3 +1,9 @@
+"""Fixtures shared across the suite: a resolved window, and raw X events.
+
+The resolver is a fake, so the modules that only need a window with something
+in it run without an X server and without an accessibility bus behind them.
+"""
+
 import pytest
 
 from pyguitest_recorder.backends.base import RawEvent

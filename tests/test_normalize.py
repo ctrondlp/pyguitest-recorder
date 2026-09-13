@@ -1,3 +1,12 @@
+"""Grouping raw X events into the events somebody meant.
+
+Most of the file is boundaries, because that is all this stage is: two clicks
+inside the double-click interval are one gesture and outside it are two, a
+text run split by an idle gap is two runs, and a held modifier turns a
+keystroke into a hotkey. Every threshold here decides which side of that line
+a real recording falls on.
+"""
+
 import pytest
 
 from conftest import FakeResolver

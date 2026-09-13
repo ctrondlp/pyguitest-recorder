@@ -1,3 +1,11 @@
+"""Turning a recorded coordinate into a window, an element, or a fallback.
+
+The failure side is most of it: which window a click is attributed to when
+hit-testing misses, what a geometry read that raises leaves behind, the
+bounded retry that covers a window still animating in, and the recorder's own
+window never being the answer.
+"""
+
 import os
 
 from pyguitest_recorder.model import ElementRef
