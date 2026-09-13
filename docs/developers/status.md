@@ -61,16 +61,16 @@ met from the other side.
 - ~~The CI `live` job has never run on a GitHub runner.~~ **Closed:** it now
   runs green on `ubuntu-latest` on every push, so the Ubuntu package names and
   daemon paths are observed rather than reasoned.
-- **A double click on a named element is emitted on the element itself only
-  where the installed pyguitest has `Element.double_click`** — added after
-  0.9.0, while the floor still names 0.9.0. On 0.9.0 the generator asks the
-  session for `double_click_element` instead, which is the same gesture: the
-  element is looked up, its rectangle read *at replay*, and the double click
-  injected there — so the element stays the locator and the gesture stays one
-  gesture. It needs the element to have a trustworthy rectangle, and falls
-  back to two `Element.click()` calls where it does not, which no toolkit is
-  obliged to read as a double click. A triple click has no primitive on
-  either path and emits three clicks.
+- ~~**A double click on a named element is emitted on the element itself only
+  where the installed pyguitest has `Element.double_click`.**~~ **Closed:** the
+  floor is 0.10.0, which has it, so the `double_click_element` fallback and the
+  probe that chose between the two spellings are gone. The element is looked
+  up, its rectangle read *at replay*, and `element.double_click()` called
+  there — the element stays the locator and the gesture stays one gesture. It
+  still needs the element to have a trustworthy rectangle, and falls back to
+  two `Element.click()` calls where it does not, which no toolkit is obliged
+  to read as a double click. A triple click has no primitive and emits three
+  clicks.
 - **Element resolution needs `Capability.ELEMENT_GEOMETRY`**, added upstream
   for this and released in pyguitest 0.4.0. A pyguitest without it declares
   the capability nowhere, so the recorder degrades to coordinates and says so
