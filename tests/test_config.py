@@ -1,3 +1,10 @@
+"""Where the config file is found, and what wins when two places disagree.
+
+Defaults with no file at all, the XDG lookup, keys given at the top level
+rather than in a section, and the precedence between file and command line
+are four separate mechanisms, and they fail in four different ways.
+"""
+
 import pytest
 
 from pyguitest_recorder.config import ConfigError, Settings, config_paths, load_settings

@@ -273,9 +273,16 @@ def send_input(
     connection = xdisplay.Display(display)
 
     def key(name: str) -> int:
+        """The keycode for a keysym name, on this X server's layout."""
         return connection.keysym_to_keycode(XK.string_to_keysym(name))
 
     def tap(*codes: int) -> None:
+        """Press each code in order and release in reverse, then pause.
+
+        The pause is not politeness. The events this script synthesizes only
+        mean anything to the recorder because they are separable in time, and
+        every delay in here exists for that.
+        """
         for code in codes:
             xtest.fake_input(connection, X.KeyPress, code)
         for code in reversed(codes):
@@ -284,17 +291,25 @@ def send_input(
         time.sleep(0.08)
 
     def point(x: int, y: int) -> None:
+        """Put the pointer at x, y and let the move stand as its own event."""
         xtest.fake_input(connection, X.MotionNotify, x=x, y=y)
         connection.sync()
         time.sleep(0.2)
 
     def click(button: int = 1) -> None:
+        """Press and release one button, then pause for the recorder to see it."""
         xtest.fake_input(connection, X.ButtonPress, button)
         xtest.fake_input(connection, X.ButtonRelease, button)
         connection.sync()
         time.sleep(0.3)
 
     def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+        """Press at one point, move to the other in steps, and release.
+
+        The intermediate points are what makes it a drag: they are what the
+        recorder sees between the press and the release, where a single jump
+        would be a press and a release with nothing in between.
+        """
         point(from_x, from_y)
         xtest.fake_input(connection, X.ButtonPress, 1)
         connection.sync()

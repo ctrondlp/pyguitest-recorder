@@ -1,3 +1,10 @@
+"""The event model: what each event carries, and what survives storage.
+
+Serialisation is checked rather than assumed, because a recording is meant to
+outlive the script generated from it: a field dropped in the round trip is a
+decision lost between two renders of the same session.
+"""
+
 import pytest
 
 from pyguitest_recorder.model import (
