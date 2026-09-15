@@ -211,10 +211,10 @@ class Normalizer:
     _click_at: float = field(default=0.0, init=False)
     _clicked: Target | None = field(default=None, init=False)
     _last_input: float | None = field(default=None, init=False)
-    _rest: tuple[tuple[int, int], float] | None = field(default=None, init=False)
-    """Where the pointer has been sitting, and since when. Set only by real
-    motion, so a pointer that simply has not moved since a click is not
-    mistaken for someone hovering. See `_dwell`."""
+    _rest: tuple[tuple[int, int], float, int] | None = field(default=None, init=False)
+    """Where the pointer has been sitting, since when, and on which screen.
+    Set only by real motion, so a pointer that simply has not moved since a
+    click is not mistaken for someone hovering. See `_dwell`."""
 
     def feed(self, raw: RawEvent) -> list[Event]:
         """Consume one raw event, returning whatever became final.
@@ -248,8 +248,25 @@ class Normalizer:
         return out
 
     def flush(self) -> list[Event]:
-        """Emit anything still buffered. Call once when recording stops."""
-        return self._flush_click() + self._flush_text()
+        """Emit anything still buffered. Call once when recording stops.
+
+        Includes a hover still in progress when the recording ended: without
+        this, a rest with no later event to flush it was dropped outright
+        rather than merely reported a little short. `_last_input` -- the
+        last raw event actually seen; stop-key presses never reach `feed`,
+        so they cannot advance it -- stands in for "now". A rest with
+        nothing at all after it reports as zero-length and is correctly
+        dropped by `_dwell`'s own threshold check, rather than this
+        inventing a duration nothing observed.
+        """
+        out = self._flush_click()
+        if self._rest is not None:
+            where, since, screen = self._rest
+            self._rest = None
+            until = since if self._last_input is None else self._last_input
+            out.extend(self._dwell(where, since, until, screen))
+        out.extend(self._flush_text())
+        return out
 
     def _flush_click(self) -> list[Event]:
         """Emit the buffered click, now that nothing can merge into it."""
@@ -286,29 +303,29 @@ class Normalizer:
             ]
         here = (raw.x, raw.y)
         if self._rest is None:
-            self._rest = (here, raw.timestamp)
+            self._rest = (here, raw.timestamp, raw.screen)
             return []
-        where, since = self._rest
+        where, since, screen = self._rest
         if _distance(where, here) < self.options.motion_threshold:
             # Still resting. The arrival time deliberately stays the earliest
             # one, so a hand that trembles over a menu entry still reads as
             # one rest rather than restarting the clock on every jitter.
             return []
-        self._rest = (here, raw.timestamp)
-        return self._dwell(where, since, raw.timestamp, raw.screen)
+        self._rest = (here, raw.timestamp, raw.screen)
+        return self._dwell(where, since, raw.timestamp, screen)
 
     def _flush_dwell(self, raw: RawEvent) -> list[Event]:
         """Emit the hover the pointer was in the middle of, if it was one."""
         if self._rest is None:
             return []
-        where, since = self._rest
+        where, since, screen = self._rest
         self._rest = None
         if _distance(where, (raw.x, raw.y)) < self.options.motion_threshold:
             # The action is happening where the pointer already was: whatever
             # renders it will move there itself, so a move saying the same
             # thing would only be noise.
             return []
-        return self._dwell(where, since, raw.timestamp, raw.screen)
+        return self._dwell(where, since, raw.timestamp, screen)
 
     def _dwell(
         self, where: tuple[int, int], since: float, until: float, screen: int
@@ -323,20 +340,29 @@ class Normalizer:
         rested = until - since
         if not self.options.hover_threshold or rested < self.options.hover_threshold:
             return []
-        # Whatever is still buffered happened *before* this hover -- a click
-        # waiting out its double-click window, a run of typing waiting for
-        # the keyboard to go quiet -- so it has to come out ahead of it.
-        # Events carry their own timestamps, but a recording is a list, and
-        # emitting the hover first would put it in the wrong place in it.
-        return [
-            *self._flush_click(),
-            *self._flush_text(),
-            MouseMove(
-                timestamp=max(0.0, since - self.started),
-                target=self.resolver.resolve(where[0], where[1], screen),
-                dwell=round(rested, 2),
-            ),
-        ]
+        hover = MouseMove(
+            timestamp=max(0.0, since - self.started),
+            target=self.resolver.resolve(where[0], where[1], screen),
+            dwell=round(rested, 2),
+        )
+        # A buffered click always predates this hover: a button press flushes
+        # any dwell in progress before it is ever buffered (see feed), so a
+        # click still waiting out its double-click window can only be from
+        # before the pointer settled here. It comes out ahead of the hover
+        # unconditionally -- events carry their own timestamps, but a
+        # recording is a list, and emitting the hover first would put the
+        # click in the wrong place in it.
+        click = self._flush_click()
+        # Buffered text is not the same guarantee: feed() deliberately lets a
+        # hover sit undisturbed through typing, so a run of text can have
+        # started before this hover began (comes out ahead of it, like a
+        # click) or during it, after the pointer had already settled (comes
+        # out after, since that is when it actually happened). Order by the
+        # run's own start time rather than assuming.
+        text = self._flush_text()
+        if text and text[0].timestamp < hover.timestamp:
+            return [*click, *text, hover]
+        return [*click, hover, *text]
 
     def _on_button_press(self, raw: RawEvent) -> list[Event]:
         """Remember the press; a click is only known at release."""
