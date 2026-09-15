@@ -259,12 +259,13 @@ class Normalizer:
         dropped by `_dwell`'s own threshold check, rather than this
         inventing a duration nothing observed.
         """
-        out = self._flush_click() + self._flush_text()
+        out = self._flush_click()
         if self._rest is not None:
             where, since, screen = self._rest
             self._rest = None
             until = since if self._last_input is None else self._last_input
             out.extend(self._dwell(where, since, until, screen))
+        out.extend(self._flush_text())
         return out
 
     def _flush_click(self) -> list[Event]:

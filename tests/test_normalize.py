@@ -756,6 +756,21 @@ def test_typing_during_a_hover_comes_out_after_it(key):
     assert typed.text == "hi"
 
 
+def test_typing_during_a_hover_the_recording_ended_inside_still_comes_out_after(key):
+    # The same ordering as the flushed-by-motion case above, except nothing
+    # follows the typing: flush() has to run the hover through _dwell before
+    # letting the buffered text out, or the run that started at 1.5 lands
+    # ahead of the hover that began at 1.0.
+    events = drain(
+        Normalizer(),
+        [motion(1.0, 65, 47), key(1.5, "h", "h"), key(1.6, "i", "i")],
+    )
+    assert [type(e).__name__ for e in events] == ["MouseMove", "TextInput"]
+    hover, typed = events
+    assert hover.dwell == pytest.approx(0.6)
+    assert typed.text == "hi"
+
+
 def test_a_hover_open_at_the_end_of_the_recording_is_not_dropped():
     # No further motion after the pointer settles: only flush() can still
     # emit this hover, since nothing else will ever flush it.
