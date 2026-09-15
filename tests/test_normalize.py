@@ -720,6 +720,62 @@ def test_a_hover_before_a_click_elsewhere_comes_out_first(press, release):
     assert [type(e).__name__ for e in events] == ["Click", "MouseMove", "Click"]
 
 
+def test_typing_before_a_hover_still_comes_out_first(key):
+    # The text run starts and ends before the pointer ever settles, so it
+    # keeps predating the hover the way a click does.
+    events = drain(
+        Normalizer(),
+        [
+            key(1.0, "h", "h"),
+            key(1.1, "i", "i"),
+            motion(2.0, 65, 47),
+            motion(2.9, 400, 400),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["TextInput", "MouseMove"]
+
+
+def test_typing_during_a_hover_comes_out_after_it(key):
+    # The pointer settles first (the hover begins at t=1.0) and only then
+    # does typing start, into whatever was already focused -- feed()
+    # deliberately does not end a hover on a keyboard event, so the text run
+    # is still open when the hover is finally flushed by the later motion.
+    # The hover began first and must be emitted first.
+    events = drain(
+        Normalizer(),
+        [
+            motion(1.0, 65, 47),
+            key(1.5, "h", "h"),
+            key(1.6, "i", "i"),
+            motion(2.4, 400, 400),
+        ],
+    )
+    assert [type(e).__name__ for e in events] == ["MouseMove", "TextInput"]
+    hover, typed = events
+    assert hover.dwell == pytest.approx(1.4)
+    assert typed.text == "hi"
+
+
+def test_a_hover_open_at_the_end_of_the_recording_is_not_dropped():
+    # No further motion after the pointer settles: only flush() can still
+    # emit this hover, since nothing else will ever flush it.
+    events = drain(
+        Normalizer(), [motion(1.0, 65, 47), motion(1.4, 66, 47), motion(1.8, 65, 48)]
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], MouseMove)
+    assert (events[0].target.x, events[0].target.y) == (65, 47)
+    assert events[0].dwell == pytest.approx(0.8)
+
+
+def test_a_short_rest_at_the_end_of_the_recording_stays_dropped():
+    # Nothing after the single motion event that started the rest, so
+    # flush() has no later timestamp to measure it against and must not
+    # invent one.
+    events = drain(Normalizer(), [motion(1.0, 65, 47)])
+    assert events == []
+
+
 def test_motion_under_a_held_button_is_a_drag_not_a_hover(press, release):
     events = drain(
         Normalizer(),

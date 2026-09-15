@@ -5,6 +5,33 @@ was released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Typing into an already-focused field while the pointer sat still could
+  come out of the generator before the hover that preceded it, reversing
+  the recorded order.** `_dwell()` always placed buffered click/text ahead
+  of the hover `MouseMove` it was about to emit, on the assumption that
+  anything still buffered predates the hover -- true for a click (a button
+  press always flushes an in-progress hover before a new click can be
+  buffered), false for text: `feed()` deliberately lets a hover sit
+  undisturbed through typing, so a run of text can start *during* an
+  already-open hover, after the pointer had already settled. `_dwell()` now
+  orders a buffered text run against the hover by comparing when the run
+  actually started, rather than assuming it always came first.
+
+- **A hover the pointer was still resting in when the recording stopped was
+  dropped outright instead of being emitted, even when it had already run
+  well past `hover_threshold`.** `flush()` only drained the buffered click
+  and text run; nothing flushed a `_rest` still in progress, since nothing
+  else does either -- every other path to `_dwell()` is triggered by a later
+  event that also supplies the "until" timestamp, and there is no such event
+  at the end of a recording. `flush()` now flushes a trailing rest too,
+  measured against the last raw event actually seen (stop-key presses are
+  swallowed before reaching the normalizer and cannot supply this); a rest
+  with no later event at all reports as zero-length and stays correctly
+  dropped by `_dwell`'s own threshold check rather than this inventing a
+  duration nothing observed.
+
 ## [0.3.0] — 2026-09-13
 
 Two threads. One is the `motion` setting, which decides how a pointer move is
