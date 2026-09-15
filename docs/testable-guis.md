@@ -2,13 +2,13 @@
 
 **Who this is for:** application developers. It is written to be handed to you
 by whoever has to automate your UI, and it asks for about a day of work spread
-across a codebase.
+across a codebase — most of it in two sittings.
 
 **The short version:** accessibility is the *foundation* of robust GUI
 automation. A test can find your widgets the same way a screen reader does —
 through the accessibility tree — and when it can, it clicks a button by name
-and survives redesigns. When it can't, it falls back to pixel coordinates,
-and those break the next time anything moves.
+and survives redesigns. When it can't, it falls back to pixel coordinates, and
+those break the next time anything moves.
 
 Two qualifications, so the rest of this document is read accurately.
 Accessibility and automation are not the same thing: a test can also match a
@@ -23,20 +23,54 @@ it's done.
 
 ---
 
-## The one-page version
+## Start here
 
-| Do this | So that |
-|---|---|
-| Give every button, field, checkbox, menu item and tab an **accessible name** | Tests can say `click the "Save" button` instead of `click pixel (412, 380)` |
-| Keep those names **unique within a window** | The test clicks the Remove button you meant, not a different one |
-| Keep names **stable when state changes** | `"Save"` doesn't become `"Save (3 unsaved)"` and break every test |
-| Use the **right widget type** for the job | A button made from a clickable box isn't a button to anyone outside your process |
-| Give the window a **stable app id** (the class half of `WM_CLASS` on X11) | Tests survive a title that changes when the document does |
-| Report **which widget has keyboard focus** | Typed text can be attributed to the field it went into |
-| Report widget positions in **screen coordinates** | "What's under the mouse here?" gets the right answer |
-| Make long operations **visible** — a status message, a disabled button | Tests can wait for your app to be ready instead of sleeping for two seconds |
+Three tiers, by how much time you have. Each stands on its own.
 
-If you only do the first row, you have already fixed most of it.
+### If you have 30 minutes
+
+The two that buy the most, in this order:
+
+1. **Give every control a name** —
+   [section 1](#1-name-every-control-a-user-acts-on). Usually the visible text
+   already is the name and you get this for free. The ones that need work are
+   the icon-only buttons: the toolbar, the close button on a chip, the row
+   action that is only a trash can.
+2. **Connect every field to its visible label** —
+   [also section 1](#form-fields-connect-the-label-to-the-field). A text field
+   almost never carries its own name; the name is sitting next to it in a
+   separate label widget, and unless you say the two are related the field is
+   published as an unnamed entry.
+
+Then look at what you actually published, rather than assuming it worked:
+
+```sh
+pyguitest inspect --window "MyApp"
+```
+
+`--window` takes a regex and narrows the listing to windows whose **title**
+matches it, so quote enough of the title to be unambiguous. If your Save
+button turns up in that output under the name you expect, a test can find it.
+
+### If you have an afternoon
+
+Sections [1](#1-name-every-control-a-user-acts-on) and
+[2](#2-make-names-unique-within-a-window), plus one assertion per screen in
+your test suite:
+
+```python
+gui.assert_accessible(within=window)
+```
+
+[How to check your own work](#how-to-check-your-own-work) has the full call,
+what it does and does not check, and the shape to paste it into a suite.
+
+### If you are choosing a toolkit, or writing a custom widget
+
+[Section 3](#3-use-the-widget-type-that-matches-the-behaviour) decides whether
+any of the rest is reachable. A "button" built from a clickable box, a canvas
+you draw yourself, a virtualized list that publishes nothing — none of those
+can be fixed by labelling, because there is nothing there to label.
 
 ---
 
@@ -80,14 +114,14 @@ that isn't testing anything.
 ### The same recording, before and after
 
 This is what the difference looks like in a generated test. Both files came
-from doing the identical thing — click the toolbar's save button, type a
-filename, confirm — against two versions of the same application.
+from `pyguitest-recorder -o test.py`, doing the identical thing — click the
+toolbar's save button, type a filename, confirm — against two versions of the
+same application.
 
 **Before**, with an unnamed icon-only toolbar button and an entry whose label
 is not associated with it:
 
 ```python
-# note: no accessible element at (412, 88); recorded as a coordinate
 gui.move_mouse(412, 88)
 gui.click()
 gui.wait(1.5)
@@ -105,7 +139,7 @@ and a status message that appears while writing:
 
 ```python
 gui.button("Save").click()
-saveas = gui.wait_for_window("Save As", timeout=10)
+gui.wait_for_window("Save As", timeout=10)
 gui.text_field("Name").set_text("report.txt")
 gui.button("Save").click()
 gui.wait_until_gone(name="Saving…", timeout=10)
@@ -119,13 +153,17 @@ only thing that changed was the metadata the application publishes.
 
 ## 1. Name every control a user acts on
 
-These widget types need a name, because they're the ones a person operates by
+These widget types need a name, because they are the ones a person operates by
 identifying them:
 
-> buttons · toggle buttons · checkboxes · radio buttons · links · text fields ·
-> password fields · spin buttons · dropdowns · menu items · tabs · sliders
+> push buttons · toggle buttons · check boxes · radio buttons · links · text
+> entries · password fields · spin buttons · combo boxes · menu items · check
+> and radio menu items · page tabs · sliders
 
-Labels, images and layout containers don't need one.
+That is exactly the role list the automated check in
+[How to check your own work](#how-to-check-your-own-work) uses, so an unnamed
+one of these fails a build rather than only a screen reader. Labels, images and
+layout containers don't need a name.
 
 Usually the visible text *is* the accessible name and you get this for free. It
 breaks for **icon-only buttons** — the toolbar, the close button on a chip, the
@@ -347,10 +385,11 @@ When something asks your widget where it is, the answer must be where it
 actually is *on the screen* — not relative to the window, and not `(0, 0)`.
 
 This isn't hypothetical, and it is not one application's bug. Measured on
-**Fedora 45, GTK 4.23.3 and at-spi2-core 2.61.1 (2026-09-06)** across three
-unrelated GTK 4 applications — gnome-calculator, baobab and gnome-text-editor
-— **every widget reported its correct size at position `(0, 0)`**.
-gnome-calculator's `C`, `↑n` and `7` buttons all claimed `(0, 0, 64, 44)`.
+Fedora 45 (the exact toolkit and at-spi versions are in the note at the end)
+across three unrelated GTK 4 applications — gnome-calculator, baobab and
+gnome-text-editor — **every widget reported its correct size at position
+`(0, 0)`**. gnome-calculator's `C`, `↑n` and `7` buttons all claimed
+`(0, 0, 64, 44)`.
 
 The size is right and the position is missing, which has a specific
 consequence: "what is at this point?" cannot distinguish two widgets, so it
@@ -370,15 +409,45 @@ own stack before concluding anything**:
 ```python
 import pyguitest
 
-gui = pyguitest.connect()
-window = gui.window_element("MyApp")
-for element in gui.elements(within=window):
-    print(element.role, element.name, gui.extents(element))
+with pyguitest.connect() as gui:
+    # window_element matches a window *title*: a plain string is a literal
+    # substring match, a compiled re.Pattern is a regex. Section 5 is the page
+    # for what to match on instead when the title is not trustworthy.
+    window = gui.window_element("MyApp")
+    for element in gui.elements(within=window):
+        print(element.role, element.name, gui.extents(element))
 ```
 
 Every widget reporting `x` and `y` of `0` while the sizes look right is the
 signature. A window that genuinely sits at the top-left corner of the screen
 is the one false positive — move it first.
+
+If that raises `WindowNotFound` for a window that is plainly on screen, look
+it up by app id instead of retrying the title — it does not drift, and
+several ids may be given where the two protocols name a window differently
+(which value that is on your desktop is
+[section 5](#which-value-is-the-app-id)):
+
+```python
+window = gui.find_window(app_id="org.example.MyApp")
+```
+
+If the title you passed was just stale (a window element's name *is* its
+title, read at the moment of the lookup), `window.title` now has the current
+one, and `gui.window_element(window.title)` finds it.
+
+If instead the toolkit publishes no name for the window at all, that still
+won't help: a native-Wayland GTK 4 frame node has been measured with an empty
+name, every widget inside it still enumerable and placed correctly.
+`window_element` matches on name, so there is nothing to match — the same
+class of toolkit gap as the position bug above, not something the
+application sets and gets wrong. Scope by process instead, since every
+element still reports its own `pid`:
+
+```python
+for element in gui.elements(predicate=lambda e: e.pid == window.pid):
+    print(element.role, element.name, gui.extents(element))
+```
 
 Check it directly if you maintain custom widgets, and check it **on a second
 monitor and at a non-100% scale factor**, which is where the remaining bugs
@@ -428,11 +497,13 @@ So make progress observable:
 
 ---
 
-## Environment gotchas that aren't your fault
+## When it isn't your code: an empty tree
 
 Your application can be doing everything right and still be invisible, because
 the accessibility bridge is switched off. Worth knowing before you go looking
-for a bug in your own code:
+for a bug in your own code.
+
+### If the tree comes back empty
 
 - **GTK apps need `toolkit-accessibility` on.** GNOME sessions set it; KDE
   sessions don't. With it off, nothing reports a problem — queries just come
@@ -449,11 +520,20 @@ for a bug in your own code:
   `QT_ACCESSIBILITY=1` and `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` are the usual
   overrides.
 
+Each of those looks exactly like an application with no accessible widgets, so
+`pyguitest inspect` coming back empty is worth reading as a question about the
+desktop before it is read as one about your code.
+
 ## How to check your own work
 
 **Look at the tree.** `pyguitest inspect` prints every widget on the desktop
 with its type, name and state (`--json` for a diffable version). If you can't
-find your button in that output by name, no test will either.
+find your button in that output by name, no test will either. `--window` takes
+a regex and narrows the listing to windows whose **title** matches it:
+
+```sh
+pyguitest inspect --window "MyApp"
+```
 
 **Add one assertion per screen to your test suite.** This turns the whole
 review into something CI does for you:
@@ -461,22 +541,26 @@ review into something CI does for you:
 ```python
 import pyguitest
 
-gui = pyguitest.connect()
-window = gui.window_element("MyApp")
-
-gui.assert_accessible(within=window)
+with pyguitest.connect() as gui:
+    # a window title -- see section 6 if this raises WindowNotFound
+    window = gui.window_element("MyApp")
+    gui.assert_accessible(within=window)
 ```
 
-**What it actually checks**, since the name under-promises. Two things, in
+`assert_accessible` needs pyguitest 0.3.0 or later, the release that added it
+and the two assertions underneath it; `pyguitest-recorder --doctor` prints the
+installed version so you can check.
+
+**What it actually checks**, since the name under-promises — two things, in
 this order:
 
 1. **Every visible control that should carry a name has one.** "Should" is a
    fixed list of roles — push button, toggle button, check box, radio button,
-   link, entry, password field, spin button, combo box, menu item, check and
-   radio menu item, page tab, slider — and `roles=` overrides it. Invisible
-   controls are skipped deliberately: an off-screen widget nobody can reach is
-   not a labelling problem, and a hidden dialog's worth of them would drown
-   the findings that matter.
+   link, entry, password text, spin button, combo box, menu item, check menu
+   item, radio menu item, page tab, slider — and `roles=` overrides it.
+   Invisible controls are skipped deliberately: an off-screen widget nobody can
+   reach is not a labelling problem, and a hidden dialog's worth of them would
+   drown the findings that matter.
 2. **No two controls of the same role in scope share a name.** Same roles,
    same scope. This is the section 2 problem, caught automatically.
 
@@ -496,30 +580,20 @@ Add it once per screen and the *next* unnamed toolbar button fails the build
 on the day it's added, instead of six months later when someone tries to test
 it.
 
-**Record a session against your app.** Every click that comes out as
-`gui.button("Save").click()` is a control you got right; every click that comes
-out as a raw coordinate is one to fix. The generated script says at the top
-which ones it couldn't name, and why.
+**Record a session against your app.** Recording your own application and
+reading what came out is the fastest review there is:
 
----
+```sh
+pyguitest-recorder -o test.py
+```
 
-## Checklist
-
-- [ ] Every button, field, checkbox, menu item and tab has a name
-- [ ] Icon-only buttons have explicit labels, not just tooltips
-- [ ] Text fields are associated with their visible label (`labelled-by`)
-- [ ] No duplicate names within a single window
-- [ ] Names don't change when state changes
-- [ ] Widget types match behaviour — no buttons made of boxes
-- [ ] Custom widgets publish their contents, not one opaque rectangle
-- [ ] Lists and tables publish rows, cells and selection — not just pixels
-- [ ] Window app id is stable — on X11, the *class* half of `WM_CLASS`
-- [ ] Dialogs have real titles
-- [ ] Keyboard focus is reported per widget, not just per window
-- [ ] Positions are correct on a second monitor and at non-100% scaling
-- [ ] Enabled / visible / checked reflect reality
-- [ ] Long operations show something that appears and disappears
-- [ ] One `assert_accessible` per screen, running in CI
+Every click that comes out as `gui.button("Save").click()` is a control you got
+right; every click that comes out as a raw coordinate is one to fix. A name
+that exists but couldn't be *acted on* gets a comment right on that line;
+anything systemic — element resolution off entirely, a Chromium window that
+never joined the tree — lands in a note block at the end, pointed to from the
+top of the file. So the list of things to fix writes itself, and it is
+written by the same rules a test would be held to.
 
 ---
 
@@ -533,7 +607,9 @@ at-spi2-core 2.61.1, gtk4 4.23.3, 2026-09-06); `toolkit-accessibility` off by
 default on KDE and the silent empty results that follow (2026-09-01); Chromium
 and Electron absent from the accessibility tree while the system-wide flag is
 false (GNOME Shell 51, 2026-09-05); window titles drifting under GNOME Text
-Editor.
+Editor; that same application's native-Wayland frame publishing an empty
+AT-SPI name while every element belonging to its process stayed enumerable
+and correctly placed, confirmed on KDE Plasma 6 / KWin (2026-09-09).
 
 Focus reporting has been measured twice, with opposite results, and both are
 true: **no** per-widget focus on GNOME Shell 50.4 Wayland across three toolkits
