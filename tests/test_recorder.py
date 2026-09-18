@@ -522,8 +522,18 @@ def test_capture_is_given_the_stop_key_the_settings_ask_for():
             x11_module, "X11CaptureBackend", side_effect=lambda **kw: seen.update(kw)
         ),
     ):
+        # The backend is named because "auto" is a platform decision: on native
+        # Windows it is always win32, never xrecord, so this test built nothing
+        # for it to look at there and failed with a KeyError on the one CI job
+        # that runs on that platform. Naming it asks for exactly the backend
+        # under test, on every platform.
         choose_backend(
-            Settings(stop_key="Pause", stop_key_presses=1, stop_key_interval=0.5)
+            Settings(
+                backend="xrecord",
+                stop_key="Pause",
+                stop_key_presses=1,
+                stop_key_interval=0.5,
+            )
         )
     assert isinstance(seen["stop_key"], StopKey)
     recogniser = seen["stop_key"]
