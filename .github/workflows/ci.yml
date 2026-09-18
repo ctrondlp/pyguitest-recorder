@@ -142,13 +142,14 @@ jobs:
       # attempt at this bridge did exactly that and the job failed on the
       # identical `import grp`. `--no-deps` because pyguitest has no hard
       # runtime dependencies and the line above has already resolved the
-      # recorder's own.
+      # recorder's own. One line, too: this job's default shell is PowerShell,
+      # where a trailing `\` is not a line continuation -- split that way, pip
+      # was handed `\` as a directory to install and said so.
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
-          pip install --force-reinstall --no-deps \
-            "pyguitest @ git+https://github.com/ctrondlp/pyguitest@main"
+          pip install --force-reinstall --no-deps "pyguitest @ git+https://github.com/ctrondlp/pyguitest@main"
 
       # Proves the bridge above actually delivered it: without this, a
       # pyguitest that silently lacked the module would send every win32
