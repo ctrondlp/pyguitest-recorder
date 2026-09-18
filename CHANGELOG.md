@@ -27,6 +27,12 @@ was released.
   position that leaves the rest, and the recording's opening gap is not slept
   through. `--verbatim-motion` sets it from the command line.
 
+- **A Windows CI job.** The suite on `windows-latest`, which is what would
+  have caught both of the portability bugs below before they reached a user.
+  It also asserts the `needs_ruff` tests actually ran, since the `dev` extra
+  installs ruff and a skip there would mean thirty-three assertions had
+  quietly stopped running on the one platform the job exists to cover.
+
 ### Fixed
 
 - **A rest was reported at the position where it *began*, up to
@@ -46,6 +52,61 @@ was released.
   interface saw the pointer stop and the hover names what is under it there.
   The move to a hover is also dropped where the route before it already ended
   at that point, which is now the common case rather than the exception.
+
+- **A pyguitest without `backends.win32` crashed the win32 backend instead of
+  explaining itself.** The key vocabulary this backend records against --
+  `VK` and `key_name_for_virtual_key` -- lives in pyguitest's own Windows
+  backend, which arrived with pyguitest's Windows support and is in no release
+  before it. An older pyguitest reached the deferred import and raised
+  `ModuleNotFoundError` four frames inside a backend constructor, naming
+  nothing a reader could act on. `unavailable_reason()` now asks first and
+  refuses with a sentence naming the upgrade, ahead of the window-station
+  probe, since it is equally true on a machine whose desktop is perfect.
+
+- **An exception inside either hook callback cost the application its input.**
+  A Python exception escaping a `ctypes` callback reaches no caller: ctypes
+  prints the traceback and returns 0, so `CallNextHookEx` never ran and the
+  rest of the hook chain was skipped for that message -- the keystroke or the
+  pointer event the person actually made. `_text_for` alone makes four
+  `user32` calls, so this was reachable. Both callbacks now contain their
+  processing and reach `CallNextHookEx` down every path.
+
+- **`ToUnicodeEx` was consuming the keyboard layout's dead-key state, breaking
+  composition in the application being recorded.** The keyboard hook calls it
+  on every key-down to work out what a keystroke types, and called with no
+  flags it does not merely read the layout -- it *consumes* a pending dead
+  key, which is kernel-mode state belonging to the layout rather than to this
+  process. Running ahead of the application the keystroke is going to, that
+  meant a person typing `'` then `e` on an international layout got `'e` in
+  their editor instead of `é`: the recorder altering exactly what it exists to
+  observe. It now passes `ToUnicodeEx`'s "do not change keyboard state" flag,
+  which Windows 10 1607 and newer honour.
+
+- **Recorder configuration had no Windows location.** `config_paths()` looked
+  under `~/.config` on every platform, which on Windows is neither
+  conventional nor discoverable -- `~` there is the profile root a user sees
+  in Explorer, not a place for dotfiles. `%APPDATA%` is now the default there,
+  with `XDG_CONFIG_HOME` still winning wherever it is set (a Cygwin or MSYS2
+  session that sets it means it), and the home-directory dotfile unchanged on
+  every platform. Nothing moves on Linux or the BSDs.
+
+- **Thirty-three tests failed rather than skipped where `ruff` was absent.**
+  The generator shells out to `ruff format` and is documented to degrade
+  silently without it; the tests asserting on an exact rendering were
+  therefore asserting that a formatter had run. They now carry a `needs_ruff`
+  marker and skip with a reason. Found on a fresh Windows box and reproduced
+  identically on Linux with ruff hidden from `PATH`, which is what showed it
+  was never a platform problem.
+
+- **A pointer move recorded on Windows was the one injected event that came
+  back unmarked.** `RawEvent.injected` exists so a replay's own synthetic input
+  can be told apart from the input it replayed; the win32 backend computes it
+  once from `LLMHF_INJECTED` for every mouse event it builds, but the motion
+  branch spelled its `RawEvent` out with five arguments and no sixth. A
+  replayed recording therefore came back with every click and keystroke marked
+  and every move in between claiming to belong to whoever was at the keyboard,
+  and a move is the event a replay generates most of. The flag is now on the
+  motion too.
 
 - **Typing into an already-focused field while the pointer sat still could
   come out of the generator before the hover that preceded it, reversing
@@ -272,6 +333,48 @@ did, so that a generated script names only what the pyguitest installed beside
 it can answer.
 
 ### Added
+
+- **A `win32` capture backend: this recorder is no longer X11-only.** Two
+  `WH_KEYBOARD_LL`/`WH_MOUSE_LL` hooks stand in for XRecord on native Windows —
+  the platform's own counterpart, and the only route available: Windows has no
+  interface that lets one process observe another's input the way XRecord
+  does, and Microsoft's documented alternative, raw input, needs a
+  message-only window this first pass does not build. `choose_backend`
+  prefers it automatically on Windows (never falling back to `xrecord`, which
+  would silently record only whatever X clients happen to be running under
+  Xming, VcXsrv or WSLg — a phantom-desktop recording with no error at all)
+  and still honours an explicit `backend = "xrecord"` for whoever wants that
+  anyway.
+
+  The honest limit this backend carries and XRecord does not: **a low-level
+  hook that misses `LowLevelHooksTimeout` (300ms by default, 1000ms the most
+  any recent Windows build will honour) is silently unhooked, with no
+  `CallNextHookEx`, no error, and no way for this process to find out.** The
+  callback is kept to the least possible work — read the structure, enqueue
+  it, return — which is Microsoft's own mitigation, and the rest (keysym
+  resolution, `ToUnicodeEx` for typed text) runs off that same thread rather
+  than being deferred, so `analyzer/normalize.py` needed no changes at all:
+  every `RawEvent` this backend produces is shaped exactly like X11's, down to
+  `raw.text` being populated in the callback the same way `_printable()`
+  populates it there.
+
+  Two things XRecord cannot do at all come along with the platform:
+  `RawEvent` gained an `injected` field, set from `LLKHF_INJECTED`/
+  `LLMHF_INJECTED` — a synthetic keystroke or click is recorded and marked
+  rather than silently dropped or silently kept indistinguishable from a
+  real one, which is the same "never drop what you saw" rule this package
+  applies everywhere else. And every keysym this backend names uses X11's
+  own spelling (`Control_L`, `BackSpace`, `Super_L`), not pyguitest's own
+  lower-cased internal vocabulary — replay would not care either way, but
+  `analyzer/normalize.py`'s `MODIFIERS` table matches X11's spelling exactly,
+  character for character, and a lower-cased `control_l` would have made
+  every Windows-recorded Ctrl-chord invisible to it.
+
+  **Nothing here has run on a Windows machine.** Every structure, flag and
+  call shape is transcribed from Microsoft's own documentation, and the
+  tests drive a fake `user32` the same shape `tests/test_x11.py` fakes
+  `Xlib` — real hook installation, a real background pump thread, real
+  `ctypes` structures cast from raw addresses, none of it a live Win32 API.
 
 - **`motion`, deciding how a pointer move is rendered: `teleport` (unchanged,
   and still the default), `natural`, or `recorded`.** `teleport` is

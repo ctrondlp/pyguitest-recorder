@@ -6,6 +6,8 @@ Everything except the capture backend itself, which needs a live X server.
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
+
 from conftest import FakeResolver
 from pyguitest_recorder.analyzer import Normalizer
 from pyguitest_recorder.backends.base import RawEvent
@@ -45,6 +47,7 @@ def test_every_setting_is_named_in_the_example_config():
     assert missing == []
 
 
+@pytest.mark.needs_ruff
 def test_a_recorded_interaction_becomes_a_runnable_script():
     window = WindowRef(
         title="Untitled - Text Editor",
@@ -113,6 +116,7 @@ def test_a_recording_survives_being_saved_and_re_rendered(tmp_path):
     assert validate(after) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_recorded_check_becomes_an_assertion_in_the_script():
     """Press the check key over a label and the script verifies what it read.
 
@@ -156,6 +160,7 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     assert "send_keys" not in source
 
 
+@pytest.mark.needs_ruff
 def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
     # A recording outlives the script generated from it, and the check is the
     # part a reader would most notice going missing.

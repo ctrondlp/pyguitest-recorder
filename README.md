@@ -30,13 +30,14 @@ python3 login_test.py                    # replay it
 
 > ⚠️ **Keyboard capture sees every application's keystrokes**, not only the one
 > you are recording — including your password manager. That is what X11's
-> RECORD extension does, and it is why this tool exists at all. Close what you
-> would not want in a file, and read [Privacy](#privacy) before recording
-> anything that touches a login.
+> RECORD extension and Windows' low-level input hooks both do, and it is why
+> this tool exists at all. Close what you would not want in a file, and read
+> [Privacy](#privacy) before recording anything that touches a login.
 
-Recording needs X11 or XWayland; under a Wayland session it reaches XWayland
-clients and nothing else, and says so rather than producing a file with
-silent gaps. [Why that is permanent](docs/developers/architecture.md#why-recording-is-x11-only).
+Recording needs X11, XWayland, or native Windows; under a Wayland session it
+reaches XWayland clients and nothing else, and says so rather than producing a
+file with silent gaps.
+[Why that is permanent](docs/developers/architecture.md#why-wayland-has-no-capture-backend).
 
 Three flags carry most of the value:
 
@@ -202,8 +203,13 @@ redraw. Full table in
 pip install 'pyguitest-recorder[x11,atspi]'
 ```
 
-`x11` brings `python-xlib`, which capture needs. `atspi` is what lets a click
-be recorded as a name instead of a coordinate.
+`x11` brings `python-xlib`, which capture needs on Linux; on native Windows,
+capture needs no extra at all (it is pure `ctypes`), so `pip install
+pyguitest-recorder` alone is enough there. `atspi` is what lets a click be
+recorded as a name instead of a coordinate — on Windows that comes from
+pyguitest's own `windows` extra instead (`pip install
+'pyguitest[windows]'`), since element resolution there is UI Automation, not
+AT-SPI.
 
 ### From a clone
 
@@ -270,17 +276,28 @@ only the one you are recording — including your password manager.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/pyguitest-recorder/config.toml`, falling back to
-`~/.pyguitest-recorder.toml`. Precedence is defaults → file → command line.
-See [config.example.toml](config.example.toml).
+`$XDG_CONFIG_HOME/pyguitest-recorder/config.toml` wherever that is set. With
+it unset the default is per-platform — `~/.config/pyguitest-recorder/config.toml`
+on Linux and the BSDs, `%APPDATA%\pyguitest-recorder\config.toml` on Windows,
+since `~/.config` is neither conventional nor discoverable there. Either way
+`~/.pyguitest-recorder.toml` is read if the first is absent. Precedence is
+defaults → file → command line. See
+[config.example.toml](config.example.toml).
 
 ## Status
 
-**Early, but the engine is complete and every path has now been run** —
-including live capture of a real application, AT-SPI element resolution
-against a real accessibility bus, and focus-based targeting for typed text.
+**Early, but the engine is complete and every X11 path has been run live** —
+including capture of a real application, AT-SPI element resolution against a
+real accessibility bus, and focus-based targeting for typed text.
 `scripts/live-capture-check.py` runs the whole pipeline against a private Xvfb
 on every push, and it has found two bugs that no unit test could have.
+
+**Windows recording is newer and has not captured a real keystroke.** The
+suite runs on Windows in CI and the backend is tested against a fake `user32`,
+but a CI runner has no interactive desktop, so `SetWindowsHookExW` has never
+been asked to install a hook on a live session. See
+[docs/developers/status.md](docs/developers/status.md) for what that leaves
+outstanding.
 
 The per-part verification table, and the known gaps — no UI yet, only one
 recording of a real desktop application, and what GTK4 hit-testing costs — are
@@ -296,8 +313,8 @@ in [docs/developers/status.md](docs/developers/status.md).
   coordinates?", and the rest
 - [docs/testable-guis.md](docs/testable-guis.md) — how to build a GUI that can
   be tested at all; written to be handed to application developers
-- [docs/developers/](docs/developers/) — why recording is X11 only, the
-  element-resolution rules, and what has actually been run
+- [docs/developers/](docs/developers/) — why Wayland has no capture backend,
+  the element-resolution rules, and what has actually been run
 
 ## License
 

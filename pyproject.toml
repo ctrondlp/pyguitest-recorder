@@ -19,7 +19,15 @@ requires-python = ">=3.10"
 # source, so a permissive license here would be claiming more than it can.
 license = "GPL-2.0-or-later"
 authors = [{ name = "Dennis K. Paulsen" }]
-keywords = ["gui", "testing", "recorder", "automation", "x11", "pyguitest"]
+keywords = [
+    "gui",
+    "testing",
+    "recorder",
+    "automation",
+    "x11",
+    "windows",
+    "pyguitest",
+]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
 # setuptools>=77 rejects the distribution if both are present. Same reason
@@ -30,14 +38,21 @@ classifiers = [
     # can make yet; pyguitest is 4-Beta because it can.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    # Capture is XRecord, so recording is X11-only. What it writes is
-    # pyguitest source, which then runs wherever pyguitest does -- these say
-    # where you can record, not where the generated script replays.
+    # Capture is XRecord on Linux, so this classifier is about that mechanism
+    # specifically, not a claim that recording is X11-only overall -- win32
+    # capture on native Windows needs no X server at all. What the recorder
+    # writes is pyguitest source, which then runs wherever pyguitest does --
+    # these say where you can *record*, not where the generated script
+    # replays.
     "Environment :: X11 Applications",
     "Operating System :: POSIX :: Linux",
     # The suite and a live recording both pass on FreeBSD 15.
     "Operating System :: POSIX :: BSD :: FreeBSD",
     "Operating System :: POSIX",
+    # win32 capture: transcribed from Microsoft's documentation and tested
+    # against fakes, not yet run on a Windows machine -- see
+    # docs/developers/status.md.
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     # The versions CI actually runs; 3.14 is added here when the matrix adds
     # it, not before.

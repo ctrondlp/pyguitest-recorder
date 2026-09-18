@@ -213,12 +213,40 @@ class Settings:
         return Settings(**data)
 
 
-def config_paths() -> list[Path]:
-    """The configuration files that would be read, most general first."""
+def _config_home() -> Path:
+    """The directory `pyguitest-recorder/config.toml` sits under.
+
+    `XDG_CONFIG_HOME` wins wherever it is set, on every platform: it is an
+    explicit instruction, and a Cygwin or MSYS2 session that sets it means it.
+
+    Failing that, the answer is per-platform. `%APPDATA%` is where a Windows
+    program's own configuration belongs -- it is the directory Windows backs
+    up and roams -- and `~/.config` is neither conventional nor discoverable
+    there, since `~` on Windows is the profile root a user sees in Explorer
+    rather than a place for dotfiles. Everywhere else it is `~/.config`, which
+    is what XDG specifies as the default and what this has always been.
+    """
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
+    if xdg:
+        return Path(xdg)
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata)
+    return Path.home() / ".config"
+
+
+def config_paths() -> list[Path]:
+    """The configuration files that would be read, most general first.
+
+    Two places on Linux and the BSDs -- `$XDG_CONFIG_HOME` (or `~/.config`),
+    then a dotfile in the home directory -- and the same two on Windows with
+    `%APPDATA%` standing in for the first. The dotfile stays on every
+    platform: it costs one `is_file()` and it is what somebody moving a
+    checkout between machines will already have.
+    """
     return [
-        base / "pyguitest-recorder" / "config.toml",
+        _config_home() / "pyguitest-recorder" / "config.toml",
         Path.home() / ".pyguitest-recorder.toml",
     ]
 

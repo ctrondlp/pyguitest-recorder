@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -134,11 +135,49 @@ def probe_context(settings: Settings) -> ContextReport:
 
 
 def choose_backend(settings: Settings) -> CaptureBackend:
-    """Pick a capture backend, or explain why none can serve this session."""
+    """Pick a capture backend, or explain why none can serve this session.
+
+    `"auto"` prefers the platform's own backend rather than trying every one
+    in turn: on native Windows that is always `win32`, never `xrecord`, even
+    though an X server genuinely can be present there (Xming, VcXsrv, WSLg).
+    Selecting `xrecord` on such a machine would record only the X clients
+    drawing into that server -- a recording of a phantom desktop, produced
+    with no error at all, which is the same trap a pure Wayland session is
+    for this same auto-selection on Linux. Naming a backend explicitly
+    bypasses that judgment call and asks for exactly what was named,
+    refusing outright on the wrong platform rather than silently degrading
+    to whichever backend the platform actually offers.
+    """
+    if settings.backend not in ("auto", "xrecord", "win32"):
+        raise CaptureUnavailable(f"unknown capture backend {settings.backend!r}")
+    wants_win32 = settings.backend == "win32" or (
+        settings.backend == "auto" and sys.platform == "win32"
+    )
+    if wants_win32:
+        return _choose_win32(settings)
+    return _choose_xrecord(settings)
+
+
+def _choose_win32(settings: Settings) -> CaptureBackend:
+    """The win32 backend, or explain why this machine cannot offer it."""
+    if sys.platform != "win32":
+        raise CaptureUnavailable(
+            "the win32 backend needs a native Windows process; this is "
+            f"{sys.platform!r}"
+        )
+    from .backends.win32 import Win32CaptureBackend
+    from .backends.win32 import unavailable_reason as win32_unavailable_reason
+
+    reason = win32_unavailable_reason()
+    if reason is not None:
+        raise CaptureUnavailable(reason)
+    return Win32CaptureBackend(display=settings.display, screen=settings.screen)
+
+
+def _choose_xrecord(settings: Settings) -> CaptureBackend:
+    """The xrecord backend, or explain why this machine cannot offer it."""
     from .backends.x11 import X11CaptureBackend, unavailable_reason
 
-    if settings.backend not in ("auto", "xrecord"):
-        raise CaptureUnavailable(f"unknown capture backend {settings.backend!r}")
     reason = unavailable_reason()
     if reason is not None:
         raise CaptureUnavailable(reason)
