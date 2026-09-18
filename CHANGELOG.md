@@ -7,6 +7,24 @@ was released.
 
 ### Fixed
 
+- **A pyguitest without `backends.win32` crashed the win32 backend instead of
+  explaining itself.** The key vocabulary this backend records against --
+  `VK` and `key_name_for_virtual_key` -- lives in pyguitest's own Windows
+  backend, which arrived with pyguitest's Windows support and is in no release
+  before it. An older pyguitest reached the deferred import and raised
+  `ModuleNotFoundError` four frames inside a backend constructor, naming
+  nothing a reader could act on. `unavailable_reason()` now asks first and
+  refuses with a sentence naming the upgrade, ahead of the window-station
+  probe, since it is equally true on a machine whose desktop is perfect.
+
+- **An exception inside either hook callback cost the application its input.**
+  A Python exception escaping a `ctypes` callback reaches no caller: ctypes
+  prints the traceback and returns 0, so `CallNextHookEx` never ran and the
+  rest of the hook chain was skipped for that message -- the keystroke or the
+  pointer event the person actually made. `_text_for` alone makes four
+  `user32` calls, so this was reachable. Both callbacks now contain their
+  processing and reach `CallNextHookEx` down every path.
+
 - **`ToUnicodeEx` was consuming the keyboard layout's dead-key state, breaking
   composition in the application being recorded.** The keyboard hook calls it
   on every key-down to work out what a keystroke types, and called with no

@@ -11,6 +11,7 @@ machine.
 import pytest
 
 from pyguitest_recorder import recorder as recorder_module
+from pyguitest_recorder.backends import win32 as win32_module
 from pyguitest_recorder.backends.base import CaptureUnavailable
 from pyguitest_recorder.config import Settings
 from pyguitest_recorder.recorder import choose_backend
@@ -44,7 +45,22 @@ class TestAutoOnLinux:
             choose_backend(_settings(backend="win32"))
 
 
+@pytest.mark.skipif(
+    not win32_module._pyguitest_win32_available(),
+    reason=(
+        "the installed pyguitest has no backends.win32, so the win32 backend "
+        "cannot be constructed to be dispatched to"
+    ),
+)
 class TestAutoOnWindows:
+    """Skipped where pyguitest predates its own Windows support.
+
+    These assert which backend `choose_backend` *returns*, so they build one
+    -- and building one needs the key vocabulary that lives in pyguitest's
+    own win32 backend. The dispatch decision is what is under test; the
+    dependency is what makes the decision reachable.
+    """
+
     def test_auto_picks_win32_rather_than_xrecord(self, monkeypatch):
         # The one judgment call this function makes: an X server genuinely
         # can be present on Windows (Xming, VcXsrv, WSLg), and picking it

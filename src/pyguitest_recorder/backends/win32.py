@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import importlib.util
 import queue
 import sys
 import threading
@@ -387,15 +388,55 @@ def available() -> bool:
     return unavailable_reason() is None
 
 
+_NO_PYGUITEST_WIN32 = (
+    "the installed pyguitest has no win32 backend, so there is no key "
+    "vocabulary to record against -- `pyguitest.backends.win32` arrived with "
+    "pyguitest's own Windows support and is absent from every release before "
+    "it. Upgrade pyguitest (pip install --upgrade pyguitest)"
+)
+"""Why a Windows recording cannot start against an older pyguitest.
+
+This package depends on pyguitest for the *vocabulary* a captured virtual key
+is reported in -- `VK` and `key_name_for_virtual_key`, which `_KeyVocabulary`
+reads -- and that module landed with pyguitest's Windows support. Until a
+release carries it, a Windows recording is unavailable here for a reason that
+has nothing to do with this machine, and saying so beats a
+`ModuleNotFoundError` raised four frames inside a backend constructor.
+"""
+
+
+def _pyguitest_win32_available() -> bool:
+    """Whether the installed pyguitest carries the win32 key vocabulary.
+
+    `find_spec` rather than an import, so asking costs nothing and leaves
+    nothing imported: `unavailable_reason` runs on every `--probe` and every
+    backend selection, and importing pyguitest's Windows backend to find out
+    whether it exists would be a side effect this question does not need.
+    """
+    try:
+        return importlib.util.find_spec("pyguitest.backends.win32") is not None
+    except (ImportError, ValueError):
+        # A pyguitest too old to have the `backends` package at all, or a
+        # namespace package with no spec to report. Either is "not there".
+        return False
+
+
 def unavailable_reason() -> str | None:
     """Why this machine cannot capture, or None if it can.
 
-    Three distinct failures, reported apart for the same reason
+    Four distinct failures, reported apart for the same reason
     `x11.unavailable_reason` keeps its three apart: they look identical from
-    the outside -- "capture will not start" -- and need different fixes.
+    the outside -- "capture will not start" -- and need different fixes. The
+    fourth is not about this machine at all: an installed pyguitest older than
+    its own Windows support has no key vocabulary for this backend to read,
+    and that is a `pip install --upgrade` rather than anything about the
+    desktop. It is checked before `user32`, because it is the one that is
+    equally true on a machine where everything else is perfect.
     """
     if sys.platform != "win32":
         return "this is not a native Windows process; the win32 backend needs one"
+    if not _pyguitest_win32_available():
+        return _NO_PYGUITEST_WIN32
     lib = _user32()
     if lib is None:
         return "user32.dll did not load, which should not happen on Windows itself"
@@ -426,8 +467,19 @@ def _key_vocabulary() -> tuple[dict[str, int], Any]:
     cleanly wherever `pyguitest_recorder.backends` is imported at all, on
     every platform, and pyguitest itself is a hard dependency but there is no
     reason to pay for it before a Windows recording actually starts.
+
+    **The module it wants may not be there.** `pyguitest.backends.win32`
+    arrived with pyguitest's own Windows support and does not exist in any
+    release before it, so an installed-but-older pyguitest reaches this line
+    and raises `ModuleNotFoundError` from four frames down -- which says
+    nothing about what to install. `unavailable_reason` asks the same
+    question up front and refuses with a sentence; this raises the typed
+    error for the paths that get here anyway.
     """
-    from pyguitest.backends.win32 import VK, key_name_for_virtual_key
+    try:
+        from pyguitest.backends.win32 import VK, key_name_for_virtual_key
+    except ImportError as exc:  # pragma: no cover - unavailable_reason gates it
+        raise CaptureUnavailable(_NO_PYGUITEST_WIN32) from exc
 
     return VK, key_name_for_virtual_key
 
@@ -800,8 +852,27 @@ class Win32CaptureBackend:
         decision is written down rather than left implicit.
         """
         lib = _user32()
-        if code != HC_ACTION:
-            return int(lib.CallNextHookEx(None, code, wparam, lparam))
+        if code == HC_ACTION:
+            # Suppressed, and the reason is the person at the keyboard rather
+            # than tidiness: an exception escaping a ctypes callback does not
+            # propagate anywhere a caller can catch it -- ctypes prints the
+            # traceback and returns 0 -- so `CallNextHookEx` below never runs
+            # and the rest of the hook chain is skipped for that keystroke.
+            # A recorder that drops the keystroke it was watching is worse
+            # than one that misses an event, and `_text_for` alone makes four
+            # user32 calls. `_KeyboardState.press` already guards its own
+            # out-of-range case for this reason; this covers every step.
+            with contextlib.suppress(Exception):
+                self._record_key(lib, wparam, lparam)
+        return int(lib.CallNextHookEx(None, code, wparam, lparam))
+
+    def _record_key(self, lib: Any, wparam: int, lparam: int) -> None:
+        """Read one `KBDLLHOOKSTRUCT` and enqueue the event it describes.
+
+        Split out of `_on_keyboard_event` so the callback boundary has exactly
+        one guarded call in it and `CallNextHookEx` is reached down every path
+        -- see that method for why the suppression is not optional.
+        """
         info = ctypes.cast(lparam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
         vk_code = info.vkCode
         extended = bool(info.flags & LLKHF_EXTENDED)
@@ -823,18 +894,23 @@ class Win32CaptureBackend:
                 injected=injected,
             )
         )
-        return int(lib.CallNextHookEx(None, code, wparam, lparam))
 
     def _on_mouse_event(self, code: int, wparam: int, lparam: int) -> int:
         """`WH_MOUSE_LL`'s callback: read the structure, enqueue, return."""
         lib = _user32()
-        if code != HC_ACTION:
-            return int(lib.CallNextHookEx(None, code, wparam, lparam))
+        if code == HC_ACTION:
+            # Guarded for `_on_keyboard_event`'s reason: an escaping exception
+            # would cost the pointer event the rest of its hook chain.
+            with contextlib.suppress(Exception):
+                self._record_mouse(wparam, lparam)
+        return int(lib.CallNextHookEx(None, code, wparam, lparam))
+
+    def _record_mouse(self, wparam: int, lparam: int) -> None:
+        """Read one `MSLLHOOKSTRUCT` and enqueue the event it describes."""
         info = ctypes.cast(lparam, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
         raw = self._translate_mouse(wparam, info)
         if raw is not None:
             self._queue.put(raw)
-        return int(lib.CallNextHookEx(None, code, wparam, lparam))
 
     def _translate_mouse(self, wparam: int, info: Any) -> RawEvent | None:
         """One `MSLLHOOKSTRUCT` -> a `RawEvent`, or None for an unmeant message."""

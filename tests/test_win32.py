@@ -56,6 +56,26 @@ from pyguitest_recorder.backends.win32 import (
     unavailable_reason,
 )
 
+pytestmark = pytest.mark.skipif(
+    not win32_module._pyguitest_win32_available(),
+    reason=(
+        "the installed pyguitest has no backends.win32, so there is no key "
+        "vocabulary to build a capture backend against -- see "
+        "win32._NO_PYGUITEST_WIN32"
+    ),
+)
+"""Skipped whole where pyguitest predates its own Windows support.
+
+Almost every test here constructs `Win32CaptureBackend`, which builds its key
+vocabulary from `pyguitest.backends.win32` -- so on an older pyguitest they
+fail at construction for a reason that is about the *dependency*, not about
+this backend. CI installs released pyguitest and hit exactly that.
+
+Skipping rather than loosening: these tests are worth nothing if they cannot
+build the thing they test, and a skip says which upgrade turns them back on.
+"""
+
+
 # -- fakes ---------------------------------------------------------------
 
 
@@ -465,6 +485,94 @@ class TestAvailability:
 
 
 # -- the hook callbacks, through a fake user32 --------------------------------
+
+
+class TestThePyguitestDependency:
+    """An older pyguitest is a reason, not a ModuleNotFoundError.
+
+    This backend reads its key vocabulary -- `VK` and
+    `key_name_for_virtual_key` -- from `pyguitest.backends.win32`, which
+    arrived with pyguitest's own Windows support and is in no release before
+    it. Without this guard the miss surfaced as a bare `ModuleNotFoundError`
+    four frames inside a backend constructor, naming nothing a reader could
+    act on. It is also what CI hits: the suite installs released pyguitest.
+    """
+
+    def test_a_pyguitest_without_win32_is_reported_as_the_reason(self, monkeypatch):
+        patch_windows(monkeypatch)
+        monkeypatch.setattr(win32_module, "_pyguitest_win32_available", lambda: False)
+        reason = unavailable_reason()
+        assert reason is not None
+        assert "pyguitest" in reason
+        assert "upgrade" in reason.lower()
+        assert not available()
+
+    def test_the_reason_is_given_before_the_window_station_is_probed(self, monkeypatch):
+        # Checked ahead of user32 deliberately: it is equally true on a
+        # machine where the desktop is perfect, and reporting the hook
+        # failure instead would send a reader looking at their session.
+        fake = FakeUser32(hook_fails=True)
+        patch_windows(monkeypatch, fake_user32=fake)
+        monkeypatch.setattr(win32_module, "_pyguitest_win32_available", lambda: False)
+        assert "pyguitest" in unavailable_reason()
+        assert not fake.hooked, "no hook should be installed to answer this"
+
+    def test_the_vocabulary_raises_a_typed_error_rather_than_an_import_error(
+        self, monkeypatch
+    ):
+        # The paths that reach the import anyway still owe a caller a typed
+        # error -- CaptureUnavailable is what every other refusal here uses.
+        def _missing(_name):
+            raise ImportError("no pyguitest.backends.win32 here")
+
+        monkeypatch.setattr(win32_module.importlib.util, "find_spec", _missing)
+        assert not win32_module._pyguitest_win32_available()
+
+
+class TestCallbackIsolation:
+    """An exception inside a hook must never cost the chain its event.
+
+    A Python exception escaping a `ctypes` callback does not reach any caller:
+    ctypes prints the traceback and returns 0, so `CallNextHookEx` is skipped
+    and the remaining hooks never see that keystroke. The person at the
+    keyboard loses the key they pressed -- a far worse failure than the
+    recorder missing one event.
+    """
+
+    def test_a_raising_keyboard_step_still_reaches_call_next_hook(self, monkeypatch):
+        fake = FakeUser32(text="a")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        monkeypatch.setattr(
+            made, "_record_key", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        assert fake.next_calls, "CallNextHookEx was skipped, so the key was swallowed"
+
+    def test_a_raising_mouse_step_still_reaches_call_next_hook(self, monkeypatch):
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        monkeypatch.setattr(
+            made,
+            "_record_mouse",
+            lambda *a: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        lparam, _info = mouse_lparam()
+        made._on_mouse_event(HC_ACTION, WM_MOUSEMOVE, lparam)
+        assert fake.next_calls, "CallNextHookEx was skipped, so the move was swallowed"
+
+    def test_a_non_action_code_is_passed_straight_through(self, monkeypatch):
+        # The platform's own rule for every hook procedure: any nCode other
+        # than HC_ACTION must reach CallNextHookEx untouched.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(-1, WM_KEYDOWN, lparam)
+        assert fake.next_calls == [(-1, WM_KEYDOWN, lparam)]
+        assert drain(made) == []
 
 
 class TestKeyboardCallback:

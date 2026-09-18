@@ -106,6 +106,21 @@ jobs:
     # interactive desktop -- so what this proves is what the fakes prove, on
     # the platform they describe: every module imports, the suite collects,
     # and the tests written to run anywhere pass.
+    #
+    # continue-on-error until pyguitest ships its own Windows support, and
+    # this is a dependency-ordering fact rather than a tolerance for red.
+    # pip installs the *released* pyguitest here, and no release yet imports
+    # on Windows at all: `session.py` has a module-scope `import grp`, which
+    # does not exist on this platform. Every test that touches the installed
+    # Session -- the generator's validation, the resolver, the CLI -- fails on
+    # that import, and nothing in this repository can fix it. The win32 tests
+    # themselves skip cleanly (see backends/win32._NO_PYGUITEST_WIN32), so
+    # what is left failing is exactly the dependency.
+    #
+    # Remove this line when the recorder's pyguitest floor names a release
+    # carrying `pyguitest.backends.win32`; at that point the skips light up
+    # and this job becomes a real gate.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 

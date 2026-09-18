@@ -276,17 +276,28 @@ only the one you are recording — including your password manager.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/pyguitest-recorder/config.toml`, falling back to
-`~/.pyguitest-recorder.toml`. Precedence is defaults → file → command line.
-See [config.example.toml](config.example.toml).
+`$XDG_CONFIG_HOME/pyguitest-recorder/config.toml` wherever that is set. With
+it unset the default is per-platform — `~/.config/pyguitest-recorder/config.toml`
+on Linux and the BSDs, `%APPDATA%\pyguitest-recorder\config.toml` on Windows,
+since `~/.config` is neither conventional nor discoverable there. Either way
+`~/.pyguitest-recorder.toml` is read if the first is absent. Precedence is
+defaults → file → command line. See
+[config.example.toml](config.example.toml).
 
 ## Status
 
-**Early, but the engine is complete and every path has now been run** —
-including live capture of a real application, AT-SPI element resolution
-against a real accessibility bus, and focus-based targeting for typed text.
+**Early, but the engine is complete and every X11 path has been run live** —
+including capture of a real application, AT-SPI element resolution against a
+real accessibility bus, and focus-based targeting for typed text.
 `scripts/live-capture-check.py` runs the whole pipeline against a private Xvfb
 on every push, and it has found two bugs that no unit test could have.
+
+**Windows recording is newer and has not captured a real keystroke.** The
+suite runs on Windows in CI and the backend is tested against a fake `user32`,
+but a CI runner has no interactive desktop, so `SetWindowsHookExW` has never
+been asked to install a hook on a live session. See
+[docs/developers/status.md](docs/developers/status.md) for what that leaves
+outstanding.
 
 The per-part verification table, and the known gaps — no UI yet, only one
 recording of a real desktop application, and what GTK4 hit-testing costs — are
