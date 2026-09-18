@@ -50,8 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=_version_string())
 
     capture = parser.add_argument_group("capture")
-    capture.add_argument("--display", help="X display to record (default: $DISPLAY)")
-    capture.add_argument("--screen", type=int, help="screen number (default: 0)")
+    capture.add_argument(
+        "--display",
+        help="X display to record (default: $DISPLAY); xrecord only, ignored "
+        "on Windows",
+    )
+    capture.add_argument(
+        "--screen",
+        type=int,
+        help="screen number (default: 0); an opaque tag carried through to "
+        "each event on every backend, not a monitor index on any of them",
+    )
     capture.add_argument(
         "--stop-key",
         metavar="KEY",

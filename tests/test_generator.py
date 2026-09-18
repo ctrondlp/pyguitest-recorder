@@ -8,6 +8,8 @@ replay -- where it would be somebody's test that broke, not this one.
 import ast
 import math
 
+import pytest
+
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.generator import python as generator_module
 from pyguitest_recorder.model import (
@@ -79,6 +81,7 @@ def test_a_recording_that_is_entirely_unaddressable_still_parses():
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_named_element_beats_a_coordinate(window, save_button):
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button))
@@ -87,6 +90,7 @@ def test_named_element_beats_a_coordinate(window, save_button):
     assert "move_mouse" not in source
 
 
+@pytest.mark.needs_ruff
 def test_unsugared_role_uses_the_element_form(window):
     item = ElementRef(role="list item", name="Inbox")
     source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
@@ -292,6 +296,7 @@ def test_double_click_on_a_named_element_still_degrades(window, save_button):
     assert "the element has no rectangle to move to" in source
 
 
+@pytest.mark.needs_ruff
 def test_text_into_a_named_field_sets_it_directly():
     field = ElementRef(role="entry", name="Name")
     source = render(TextInput(text="Ada", target=Target(x=1, y=1, element=field)))
@@ -305,6 +310,7 @@ def test_sensitive_text_never_appears_as_a_literal():
     assert "gui.type_text(SECRET_1)" in source
 
 
+@pytest.mark.needs_ruff
 def test_redaction_can_be_disabled():
     source = render(TextInput(text="hunter2", sensitive=True), redact_sensitive=False)
     assert 'gui.type_text("hunter2")' in source
@@ -317,11 +323,13 @@ def test_quotes_and_newlines_survive_the_literal():
     exec(compile(source, "<test>", "exec"), namespace)  # noqa: S102
 
 
+@pytest.mark.needs_ruff
 def test_hotkey_uses_send_keys_grammar():
     assert 'gui.send_keys("^(s)")' in render(HotKey(keys=("ctrl", "s")))
     assert 'gui.send_keys("^(+(l))")' in render(HotKey(keys=("ctrl", "shift", "l")))
 
 
+@pytest.mark.needs_ruff
 def test_named_key_taps():
     assert 'gui.tap_key("Return")' in render(KeyStroke(key="Return"))
 
@@ -343,11 +351,13 @@ def test_drag_uses_the_drag_primitive(window):
     assert "gui.drag(" in source
 
 
+@pytest.mark.needs_ruff
 def test_wait_for_element_renders_a_role_constant():
     source = render(WaitForElement(element=ElementRef(role="dialog", name="Save As")))
     assert 'gui.wait_for_element(role="dialog", name="Save As", timeout=10)' in source
 
 
+@pytest.mark.needs_ruff
 def test_wait_for_an_ambiguous_element_is_scoped_too(window):
     # The third element-rendering path (sync-inferred waits, alongside
     # clicks and checks) needs the identical ancestry scoping: waiting for
@@ -365,6 +375,7 @@ def test_wait_for_an_ambiguous_element_is_scoped_too(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_drifting_title_is_dropped_for_the_app_id():
     drifting = WindowRef(
         title="Untitled - Editor", app_id="org.x.E", title_stable=False
@@ -535,6 +546,7 @@ def test_a_right_click_on_a_named_element_stays_a_right_click(window, save_butto
     assert "Element.click() takes no button" in source
 
 
+@pytest.mark.needs_ruff
 def test_a_left_click_still_prefers_the_element(window, save_button):
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button))
@@ -560,6 +572,7 @@ def test_a_click_on_an_element_with_no_atspi_actions_falls_back_to_a_coordinate(
     assert "offered AT-SPI no click or" in source
 
 
+@pytest.mark.needs_ruff
 def test_an_element_with_unrecorded_actions_still_prefers_the_element(window):
     # A session saved before this field existed deserializes with
     # actions=None -- unknown, not "confirmed none" -- and --regenerate on it
@@ -589,6 +602,7 @@ def test_a_scroll_of_nothing_emits_nothing(window):
     assert "gui.scroll" not in source
 
 
+@pytest.mark.needs_ruff
 def test_hotkeys_name_keys_the_way_send_keys_resolves_them():
     # `{RET}` is not the abbreviation for Return -- `ENT` is -- so truncating
     # a keysym to three letters produced a key send_keys cannot resolve. The
@@ -603,6 +617,7 @@ def test_hotkeys_name_keys_the_way_send_keys_resolves_them():
     assert 'gui.send_keys("%({Prior})")' in source
 
 
+@pytest.mark.needs_ruff
 def test_a_hotkey_on_a_grammar_character_is_escaped():
     source = render(HotKey(keys=("ctrl", "+")), HotKey(keys=("ctrl", "(")))
     assert 'gui.send_keys("^({+})")' in source
@@ -747,6 +762,7 @@ def test_a_key_tap_confirms_focus_too(window):
     assert "gui.focus_window(example)" in source
 
 
+@pytest.mark.needs_ruff
 def test_typing_with_no_window_to_focus_still_renders(window):
     source = render(TextInput(text="Ada", target=Target(x=10, y=10)))
     assert "gui.focus_window(" not in source
@@ -822,6 +838,7 @@ def check(kind, role=None, name="", expected=None, window=None, sensitive=False)
     )
 
 
+@pytest.mark.needs_ruff
 def test_a_text_check_names_the_element_and_what_it_read():
     source = render(check("text", "label", "Status", expected="Saved"))
     assert 'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")' in source
@@ -829,6 +846,7 @@ def test_a_text_check_names_the_element_and_what_it_read():
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_checked_check_renders_the_recorded_state():
     source = render(check("checked", "check box", "Read only", expected=True))
     assert (
@@ -838,12 +856,14 @@ def test_a_checked_check_renders_the_recorded_state():
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_showing_check_is_the_floor_for_a_button():
     source = render(check("showing", "push button", "Undo"))
     assert 'gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo")' in source
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_check_on_an_ambiguous_element_is_scoped_too(window):
     # Ancestry disambiguation was built for clicked elements first; checks
     # go through a separate rendering path (_expect, not _element_expr) and
@@ -889,6 +909,7 @@ def test_a_password_check_is_redacted_like_typed_input_is():
     assert 'SECRET_1 = os.environ["SECRET_1"]' in source
 
 
+@pytest.mark.needs_ruff
 def test_a_password_check_can_be_written_out_when_redaction_is_off():
     source = render(
         check("text", "password text", "Password", expected="hunter2", sensitive=True),
@@ -930,6 +951,7 @@ def test_a_check_requires_the_capabilities_it_uses():
     assert "Capability.ELEMENT_TREE" in source
 
 
+@pytest.mark.needs_ruff
 def test_a_button_recorded_under_either_atspi_name_gets_the_sugar(window):
     # at-spi2 renamed the role without changing its integer, so which string
     # a recording carries depends on the version it was made against. 2.61.1
@@ -952,6 +974,7 @@ def test_a_button_recorded_as_button_still_names_the_role_constant(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
     # A "Save" button in a Save As dialog and one in Preferences: identical
     # role+name, so an unscoped gui.element(role=..., name="Save") would
@@ -975,6 +998,7 @@ def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_disambiguation_walks_past_a_shared_immediate_parent(window):
     # Both buttons sit in a container named "Content" -- identical at the
     # nearest level -- so the disambiguating ancestor has to be found one
@@ -1079,6 +1103,7 @@ def test_a_window_variable_is_named_from_the_title_a_reader_recognizes():
     assert "zenity = " not in source
 
 
+@pytest.mark.needs_ruff
 def test_one_window_still_binds_once_however_it_is_named():
     # Two mentions of the SAME window collapse to a single binding. Title is
     # part of the key, but that does not reintroduce the drift problem: the
@@ -1095,6 +1120,7 @@ def test_one_window_still_binds_once_however_it_is_named():
     assert source.count('gui.expect_window("') == 1
 
 
+@pytest.mark.needs_ruff
 def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
     # The bug this guards: app_id alone was the key, and app_id names the
     # application, not the window -- two terminal windows of one app share
@@ -1111,6 +1137,7 @@ def test_two_windows_of_one_app_do_not_collapse_to_one_binding():
     assert source.count('gui.expect_window("') == 2
 
 
+@pytest.mark.needs_ruff
 def test_two_windows_with_the_same_first_seen_title_do_not_collapse_either():
     # Found by a repo-wide bug audit, not live: (app_id, title) alone is not
     # enough either -- two windows launched independently (two "Open File"
@@ -1188,6 +1215,7 @@ def test_the_header_names_the_recorder_that_wrote_the_script():
     assert "Recorder:    pyguitest-recorder 0.1.0" in source
 
 
+@pytest.mark.needs_ruff
 def test_the_header_can_be_switched_off_entirely():
     source = full(KeyStroke(key="Return"), include_header=False)
     assert "Generated by pyguitest-recorder" not in source
@@ -1210,6 +1238,7 @@ def test_a_multi_line_custom_header_keeps_its_shape():
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_a_header_containing_triple_quotes_does_not_corrupt_the_module():
     # Found by a repo-wide bug audit, not live: a licence block or a ticket
     # reference containing `"""` (a plausible --header value) used to close
@@ -1222,10 +1251,12 @@ def test_a_header_containing_triple_quotes_does_not_corrupt_the_module():
     assert 'Ticket QA-1234\\"""' in source
 
 
+@pytest.mark.needs_ruff
 def test_a_three_key_combination_keeps_every_modifier():
     assert 'gui.send_keys("^(+(S))")' in render(HotKey(keys=("ctrl", "shift", "S")))
 
 
+@pytest.mark.needs_ruff
 def test_a_double_click_on_a_named_element_stays_one_gesture(window):
     # Two Element.click() calls are not a double click: each is a separate
     # round trip over the accessibility bus, slower than any toolkit's
@@ -1243,6 +1274,7 @@ def test_a_double_click_on_a_named_element_stays_one_gesture(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_the_double_click_names_the_element_not_the_recorded_rectangle():
     # The element stays the locator, and the gesture reads its extents fresh
     # at replay (see pyguitest), so baking the recorded rectangle in here

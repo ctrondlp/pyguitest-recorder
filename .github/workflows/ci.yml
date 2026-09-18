@@ -92,6 +92,54 @@ jobs:
       - name: Record a real application and check what came out
         run: ./scripts/live-capture-check.py
 
+  windows:
+    name: the suite on Windows
+    runs-on: windows-latest
+    # The win32 capture backend lands here before there is a Windows machine
+    # in anyone's loop, so this job is what stops a Linux-only assumption
+    # reaching a user first. It has already earned its place twice: a
+    # `Path.home()` test that only held where HOME decides the home directory,
+    # and thirty-three rendering assertions that silently required `ruff` on
+    # PATH. Neither is visible on the ubuntu runners.
+    #
+    # Nothing here can install a low-level input hook -- a CI runner has no
+    # interactive desktop -- so what this proves is what the fakes prove, on
+    # the platform they describe: every module imports, the suite collects,
+    # and the tests written to run anywhere pass.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version: this job is about the platform, and Python-to-Python
+          # differences are the `tests` matrix's business.
+          python-version: "3.12"
+
+      # `x11` is deliberately absent: python-xlib is a Linux dependency and
+      # the win32 backend needs nothing installed. `dev` brings ruff, which
+      # the generator shells out to -- without it the rendering assertions
+      # skip rather than fail, and a skip here would hide what this job is
+      # for.
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Check the formatter-dependent tests actually ran
+        shell: bash
+        # A skip is the correct answer without ruff and the wrong one here:
+        # `dev` installs it, so any skip on this row means the marker is
+        # firing when it should not and thirty-three assertions have quietly
+        # stopped running on the one platform this job exists to cover.
+        run: |
+          set -eo pipefail
+          if python -m pytest -q -m needs_ruff 2>&1 | tee /tmp/marked.txt | grep -q skipped; then
+            echo "::error::ruff-dependent tests skipped despite the dev extra"
+            cat /tmp/marked.txt
+            exit 1
+          fi
+
   build:
     name: build sdist and wheel
     runs-on: ubuntu-latest

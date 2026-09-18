@@ -82,10 +82,10 @@ Two further causes worth knowing, both of which look identical from here:
 
 ## Nothing was captured at all
 
-**Are you on Wayland?** Recording needs X11 or XWayland. Under a Wayland
-session the recorder reaches XWayland clients and nothing else, so recording a
-native Wayland application produces nothing —
-[developers/architecture.md](developers/architecture.md#why-recording-is-x11-only)
+**Are you on Wayland?** Recording needs X11, XWayland, or native Windows.
+Under a Wayland session the recorder reaches XWayland clients and nothing
+else, so recording a native Wayland application produces nothing —
+[developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
 explains why this is permanent rather than a gap.
 
 Check which one the application under test actually is: in a GNOME Wayland
@@ -123,10 +123,10 @@ run; slower than that, the first press is handed on as a keystroke and the
 count restarts. Recording now prints `Escape (1/2) — press again within
 2s to stop.` the moment the first press registers, precisely so there is no
 need to guess whether it was seen. If it is still happening with presses
-close together in time, check what has focus: capture is XRecord/X11-only,
-so a press landing on a genuinely native-Wayland surface (no XWayland
-presence at all) never reaches the recorder in the first place — see
-`docs/developers/architecture.md#why-recording-is-x11-only`.
+close together in time, check what has focus: on Linux capture is
+XRecord/X11-only, so a press landing on a genuinely native-Wayland surface (no
+XWayland presence at all) never reaches the recorder in the first place — see
+`docs/developers/architecture.md#why-wayland-has-no-capture-backend`.
 
 ## The check key typed into the application instead of recording a check
 

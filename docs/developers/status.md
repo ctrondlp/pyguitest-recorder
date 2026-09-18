@@ -18,6 +18,7 @@ claiming everything works.
 | Window/title-drift resolution | tested; drift fix found by a live recording |
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
 | XRecord capture of a real application | run live, here and on CI runners |
+| win32 capture (low-level hooks, keysyms, `ToUnicodeEx`) | tested against a fake `user32`; suite passes on Windows 11, but no hook has yet been installed on a real desktop |
 | AT-SPI element resolution | run live against a real accessibility bus |
 | Focus-based targeting for typed text | run live; names a GTK4 field |
 | Drag, window switching, save/regenerate | run live |
@@ -45,11 +46,31 @@ was written in.
 private headless GNOME session: the RECORD context comes up and disables
 cleanly, but neither XTEST nor kernel-level `uinput` can inject into it —
 the compositor owns the pointer — so there is no input to record. It is the
-same wall described in [architecture.md](architecture.md#why-recording-is-x11-only),
+same wall described in
+[architecture.md](architecture.md#why-wayland-has-no-capture-backend),
 met from the other side.
 
 ## Known gaps
 
+- **The win32 capture backend has never captured a real keystroke.** The
+  suite passes on Windows 11 (build 26200), so every module imports and every
+  structure lays out as declared there — but that run was over SSH, which has
+  no interactive desktop, and `SetWindowsHookExW` refuses outright without
+  one. So no hook has been installed on a live session, and nothing below the
+  fakes has been exercised: every structure, flag and hook call is still only
+  transcribed from Microsoft's documentation and tested against a fake
+  `user32` (a real background thread, real `ctypes` structures cast from raw
+  addresses, no live Win32 API).
+
+  Two things a first real desktop run has to confirm specifically. That
+  `ToUnicodeEx` with `_TOUNICODE_NO_KEYBOARD_STATE_CHANGE` really does leave
+  the layout's dead-key state alone — without that flag the recorder eats a
+  pending dead key, so a person typing `'` then `e` gets `'e` in their editor
+  instead of `é`, and the flag is honoured only on Windows 10 1607 and newer.
+  And the limit XRecord does not have: a low-level hook that misses Windows'
+  own `LowLevelHooksTimeout` is silently unhooked, with no error reaching this
+  process, so a Windows recording can in principle have an undetectable gap.
+  See `pyguitest_recorder/backends/win32.py`'s module docstring.
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
 - **Only one recording has been made of a real desktop application** — a file
