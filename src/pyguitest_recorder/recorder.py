@@ -366,7 +366,9 @@ class Recorder:
 
         Blocks. The caller stops it by calling `stop` from another thread, or
         by interrupting -- which is what the command line does, so Ctrl-C ends
-        a recording rather than discarding it.
+        a recording rather than discarding it. A second interrupt, while the
+        tail an interrupted run is owed is still being worked through, gives
+        that tail up and ends the recording where it stands.
         """
         if self._backend is None or self._normalizer is None:
             raise RuntimeError("start() must be called before run()")
@@ -378,16 +380,7 @@ class Recorder:
         except KeyboardInterrupt:
             interrupted = True
         if interrupted:
-            # Nothing has been consumed since the interrupt, so the backend's
-            # queue is the only copy of what capture already delivered. An
-            # interrupted run is one the user was still making, so its tail
-            # belongs in the recording -- and sorting it in the same way as
-            # live input means a stop press that could not be answered while
-            # the recorder was behind still ends the run, instead of landing
-            # in the script as a hundred keystrokes.
-            for raw in self._backend.drain():
-                if self._absorb(raw):
-                    break
+            self._collect_the_tail()
         # Presses held for a stop run that never completed are the
         # application's, not the recorder's, so they belong in the recording.
         self._consume(self._stop_key.release())
@@ -399,6 +392,39 @@ class Recorder:
             )
         self._collect_warnings()
         return self.recording
+
+    def _collect_the_tail(self) -> None:
+        """Sort in what capture had already delivered when the run was interrupted.
+
+        Nothing has been consumed since the interrupt, so the backend's queue is
+        the only copy of it. An interrupted run is one the user was still making,
+        so its tail belongs in the recording -- and sorting it in the same way as
+        live input means a stop press that could not be answered while the
+        recorder was behind still ends the run, instead of landing in the script
+        as a hundred keystrokes.
+
+        Working through it costs what consuming anything costs, which on a
+        recording that fell behind is the very thing that made the tail long --
+        so this is a wait someone will try to cut short. A second interrupt does:
+        the recording is worth more than the rest of its tail, and losing the
+        whole run to an interrupt raised while saving it is the worst way for it
+        to end. It is kept as it stands, and says so.
+
+        A backend with no `drain` has no tail to give. The protocol asks for one,
+        but nothing a backend leaves out should cost the recording.
+        """
+        drain = getattr(self._backend, "drain", None)
+        if drain is None:
+            return
+        try:
+            for raw in drain():
+                if self._absorb(raw):
+                    break
+        except KeyboardInterrupt:
+            self.recording.environment.notes.append(
+                "interrupted a second time while collecting what capture had "
+                "already delivered, so the end of this recording is missing"
+            )
 
     @property
     def unstopped_presses(self) -> int:

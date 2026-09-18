@@ -487,6 +487,16 @@ still be the recorded order of the events, which is what the rest of the
 generator already gives without the wait.
 """
 
+_VERBATIM_HOVER_FLOOR = 0.005
+"""Least of a hover's wait still worth a statement under `motion = "verbatim"`.
+
+A hover's wait is written to two decimals, so anything under half a hundredth
+would read `gui.wait(0.00)`. What is left of a rest that small is what the
+script has already replayed through the rest's own positions -- see
+`PythonGenerator._unreplayed_dwell` -- and a line that sleeps for nothing is
+noise.
+"""
+
 
 def _shaped(motion: str) -> bool:
     """Whether a `motion` value asks for a shaped move at all.
@@ -951,14 +961,41 @@ class PythonGenerator:
             " -- a hover, not a move on the way somewhere",
             state,
         )
+        verbatim = self.options.motion == "verbatim"
         waited = min(event.dwell, _HOVER_WAIT_CAP)
-        state.lines.append(f"gui.wait({waited:.2f})")
-        if self.options.motion == "verbatim":
-            # The wait just emitted *is* the recorded interval up to the
-            # position that leaves this rest, so the clock moves with it --
-            # otherwise that position would be waited for twice.
-            state.replayed_until = event.timestamp + waited
+        if verbatim:
+            waited = self._unreplayed_dwell(event, waited, state)
+        if waited >= _VERBATIM_HOVER_FLOOR or not verbatim:
+            state.lines.append(f"gui.wait({waited:.2f})")
         state.bare_click_pending = False
+
+    def _unreplayed_dwell(
+        self, event: MouseMove, waited: float, state: _State
+    ) -> float:
+        """How much of a hover's wait the `verbatim` clock has yet to spend.
+
+        A rest is stamped where it *began* and emitted where it *ended* -- it is
+        only known to have been one once the pointer leaves -- so by the time it
+        is rendered the script may already have replayed part of it: the
+        positions the pointer took inside it, each with the wait that preceded
+        it (a hand never rests perfectly still, and `record_motion` records every
+        tremor), or a Pause standing for the same idle. Waiting the whole dwell
+        on top of that replays a rest at up to twice its length, on the one value
+        whose point is replaying the recorded clock. So the wait is whatever is
+        left of it, and the clock is brought up to the end of the rest and no
+        further: the position that leaves it is then measured from there, and is
+        not asked for the same interval again.
+
+        `waited` is already capped (see `_HOVER_WAIT_CAP`); a rest the script has
+        replayed past that -- through its own positions, or a Pause, neither of
+        which is capped -- is left as it was replayed.
+        """
+        ends = event.timestamp + waited
+        replayed = (
+            event.timestamp if state.replayed_until is None else state.replayed_until
+        )
+        state.replayed_until = max(replayed, ends)
+        return ends - replayed
 
     def _emit_click(self, event: Click, state: _State) -> None:
         """Render a click, preferring the element under the pointer.

@@ -274,6 +274,38 @@ class InterruptedBackend(_SilentBackend):
         return iter(self._events)
 
 
+class InterruptedTwiceBackend(InterruptedBackend):
+    """A capture backend interrupted again while its tail is being collected.
+
+    The first tail event is delivered and the interrupt lands before the next,
+    which is where an impatient Ctrl-C lands on a long backlog.
+    """
+
+    def drain(self):
+        self.drained = True
+        yield self._events[0]
+        raise KeyboardInterrupt
+
+
+class NoDrainBackend:
+    """A capture backend that predates `drain`: interrupted, and nothing more."""
+
+    name = "fake"
+
+    def __init__(self, *events: RawEvent) -> None:
+        self._events = list(events)
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def events(self):
+        yield self._events[0]
+        raise KeyboardInterrupt
+
+
 class StopKeyBackend(_SilentBackend):
     """A capture backend whose own events end the recording."""
 
@@ -358,6 +390,35 @@ class TestTheCollectedTail:
         recording = recorder.run()
         assert [type(e).__name__ for e in recording.events] == ["KeyStroke"]
         assert recorder.unstopped_presses == 1
+
+    def test_a_second_interrupt_gives_up_the_tail_but_keeps_the_recording(self):
+        # Working through a tail costs what consuming anything costs, which on a
+        # recording that fell behind is why the tail is long -- so the wait is
+        # one a user cuts short by pressing Ctrl-C again. That used to raise out
+        # of `run` past everything it had collected: the whole recording lost
+        # to an interrupt made while it was being saved.
+        backend = InterruptedTwiceBackend(
+            RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a"),
+            RawEvent(kind="key_press", timestamp=1.1, keysym="b", text="b"),
+            RawEvent(kind="key_press", timestamp=1.2, keysym="c", text="c"),
+        )
+        recording = _run(backend)
+        assert [type(e).__name__ for e in recording.events] == ["TextInput"]
+        assert recording.events[0].text == "ab"
+        note = " ".join(recording.environment.notes)
+        assert "interrupted a second time" in note
+        assert "end of this recording is missing" in note
+
+    def test_a_backend_with_no_drain_still_gives_up_its_recording(self):
+        # The protocol asks for one, but a backend that lacks it -- which the
+        # Windows one did when this was written -- must not turn an ordinary
+        # Ctrl-C into an AttributeError raised after the recording was made.
+        backend = NoDrainBackend(
+            RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a")
+        )
+        recording = _run(backend)
+        assert [type(e).__name__ for e in recording.events] == ["TextInput"]
+        assert recording.events[0].text == "a"
 
 
 class TestFallingBehind:

@@ -35,6 +35,84 @@ was released.
 
 ### Fixed
 
+- **`motion = "verbatim"` replayed a rest for up to twice as long as it
+  lasted.** A rest is stamped where it *began* and only known to have been one
+  once the pointer leaves, so its hover comes out after the positions taken
+  inside it -- and under `record_motion` a resting hand takes plenty, a tremor
+  every few tens of milliseconds, each replayed with the wait that preceded it.
+  The hover then waited out the whole dwell on top of that. Found by running
+  the shape of a real recording through both halves rather than by reading
+  either: a pointer that arrived at a menu row, trembled there for 1.7s and
+  left came out as a script that slept for 3.58s over a 1.92s recording. A
+  hand that stopped dead was no better once the rest passed `pause_threshold`,
+  because an idle that long is also an inferred `Pause` over the same interval,
+  and that spent it in full a second time. The hover's wait is now whatever is
+  left of it: the clock is brought up to the end of the rest and no further, so
+  the positions inside it and a `Pause` beside it have each already spent their
+  part, and the position that leaves it is measured from there. The same
+  recordings now replay at the length they were made at, trembling or still, at
+  0.6s, 1.7s and 3.5s. The test that covered this built a hover with nothing
+  inside it, which is not what a hand makes. The other three values are not
+  touched: a hover and a `Pause` over one idle still both wait there.
+
+- **A recorded move was attributed to the window beneath the one it was over,
+  until the pointer left that window.** The cache that lets a run of moves skip
+  the window lookup (`_recent_window`) answered from the last lookup for as long
+  as the point stayed inside the rectangle that lookup had covered -- and
+  containing the point is not the same as being under it. A pointer that began
+  over bare desktop and moved onto an application drawn over it stayed inside
+  the desktop's rectangle the whole way, so every move on the application came
+  out against the desktop's origin and not its own, until a click looked the
+  window up properly: three of five moves in a two-window reproduction. The
+  answer now expires (`MOTION_TRUST_SECONDS`, a quarter of a second), so a
+  stacking change goes unnoticed for at most that long, and a recording pays a
+  few lookups a second to notice it where the uncached version paid hundreds.
+  It is a bound and not exactness -- a window that opens over the pointer is
+  still attributed to the one beneath for up to that long -- because pyguitest
+  offers no cheaper question than the window list whose cost the cache exists to
+  avoid.
+
+- **A pointer move over nothing waited out a retry meant for a click, and asked
+  the whole question again on the next move.** `_window` sleeps 50ms and asks
+  twice more when it finds no window at all, a retry earned by a click that
+  landed while a window was still animating in, and the motion path went
+  through it -- uncached, because only a *hit* was ever remembered. A miss is
+  any point no listed window covers, so each move there cost three full
+  lookups and two sleeps, on the stretch of screen where a pointer spends much
+  of its time. Found reading the motion path end to end for what else it costs per
+  event, once the cache had made the hit case cheap. A move now takes the first
+  answer and does not retry, and a miss is remembered for as long as a hit is;
+  a click keeps its patience.
+
+- **A second Ctrl-C while an interrupted recording was collecting its tail lost
+  the whole recording, and the note on the terminal said the opposite of what
+  interrupting did.** `Recorder.run` collects what capture had already
+  delivered when it is interrupted, at the pace consuming anything goes -- on a
+  recording that fell behind, that is the very thing that made the tail long,
+  so it is a wait a user cuts short with another Ctrl-C. Only the live loop was
+  guarded against `KeyboardInterrupt`, so the second one raised out of `run`
+  and past everything it had collected. It now gives the rest of the tail up
+  and keeps the recording as it stands, with a note saying its end is missing.
+  The line the CLI prints while the recorder is behind said that interrupting
+  "would drop whatever is still queued", which stopped being true when the tail
+  started being collected; it now says the stop key and Ctrl-C both wait for
+  the backlog, and that Ctrl-C a second time gives up on the rest. A backend
+  with no `drain` at all -- the protocol asks for one, but a recording is worth
+  more than its tail -- no longer costs the recording either.
+
+  That last case was the Windows backend, which was merged after the interrupt
+  path was written and had no `drain`: the same Ctrl-C there ended in an
+  `AttributeError` once the recording had been made, and nothing on Linux could
+  see it, because type-checking there skips the `sys.platform == "win32"`
+  branch that builds the class. It has one now, with the contract
+  `X11CaptureBackend.drain` has, and each backend's tests ask it whether it
+  offers the whole `CaptureBackend` protocol, so a member added to the protocol
+  next is checked without anyone remembering to. `mypy --platform win32`, which
+  is how this was found, is clean. What Windows still does not do is recognise
+  the stop chord at capture: `stop_pressed_at` is always None there, so a
+  Windows recording that falls behind answers the stop key only once the backlog
+  has been worked through.
+
 - **A rest was reported at the position where it *began*, up to
   `motion_threshold` away from where the pointer actually stopped, so a replay
   waited there and then moved elsewhere.** The still window has to stay

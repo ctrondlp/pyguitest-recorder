@@ -8,9 +8,37 @@ window never being the answer.
 
 import os
 
+import pytest
+
 from pyguitest_recorder.model import ElementRef
 from pyguitest_recorder.windows import DesktopResolver, NullResolver
 from pyguitest_recorder.windows import resolver as resolver_module
+
+
+class FakeClock:
+    """The clock a remembered window lookup ages by, moved by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """Frozen for every test here, so counting lookups never depends on speed.
+
+    A remembered answer expires after a fraction of a second of real time, which
+    is longer than any of these runs take and shorter than a stalled CI machine
+    is willing to promise. Tests about that expiry ask for this and move it.
+    """
+    made = FakeClock()
+    monkeypatch.setattr(resolver_module, "_now", made)
+    return made
 
 
 class FakeWindow:
@@ -65,6 +93,45 @@ class CountingSession(FakeSession):
     def geometry(self, window):
         self.geometry_reads += 1
         return super().geometry(window)
+
+
+class StackedSession:
+    """A desktop of overlapping windows, with a hit test that honours the stack.
+
+    `stack` is bottom to top, the order pyguitest's own `windows()` returns, and
+    the last window covering a point is the one under it -- which is what
+    `Session.window_at` answers. The single-window fakes above cannot say
+    whether a lookup found the window that is *on top*, which is the whole of
+    what a cached answer has to get right.
+    """
+
+    def __init__(self, *stack):
+        self.stack = list(stack)
+        self.window_lookups = 0
+
+    def window_at(self, x, y, screen=0):
+        self.window_lookups += 1
+        found = None
+        for window, (wx, wy, width, height) in self.stack:
+            if wx <= x < wx + width and wy <= y < wy + height:
+                found = window
+        return found
+
+    def active_window(self):
+        return self.stack[-1][0]
+
+    def geometry(self, window):
+        return dict(self.stack)[window]
+
+
+def desktop_with_an_app_on_it():
+    """A full-screen desktop with an application window drawn over part of it."""
+    desktop = FakeWindow(title="Desktop", app_id="org.example.Desktop", pid=1)
+    app = FakeWindow(title="App", app_id="org.example.App", pid=2)
+    return StackedSession(
+        (desktop, (0, 0, 1000, 800)),
+        (app, (200, 100, 400, 300)),
+    )
 
 
 def resolver(session, **kwargs):
@@ -681,6 +748,86 @@ def test_a_click_leaves_the_moves_after_it_a_warm_answer():
     made.resolve(300, 200)
     made.resolve_window(300, 210)
     assert session.window_lookups == 1
+
+
+def test_a_window_drawn_over_the_last_answer_is_noticed_once_it_expires(clock):
+    # A rectangle containing the point does not say the window is the one *under*
+    # it: the pointer starts over bare desktop, moves onto an application drawn
+    # over it, and every move from there is still inside the desktop's rectangle.
+    # Answered on containment alone they were all attributed to the desktop --
+    # rendered against its origin, not the application's -- until the pointer left
+    # the desktop altogether, which it never does. Found by comparing the moves
+    # against what a full lookup answers for the same points.
+    made = resolver(desktop_with_an_app_on_it())
+    assert made.resolve_window(50, 50).window.title == "Desktop"
+    assert made.resolve_window(250, 150).window.title == "Desktop"  # still trusted
+    clock.advance(resolver_module.MOTION_TRUST_SECONDS)
+    assert made.resolve_window(300, 200).window.title == "App"
+    assert made.resolve_window(350, 250).window.title == "App"
+
+
+def test_a_recent_answer_is_trusted_for_a_fraction_of_a_second_and_no_longer(clock):
+    # The bound is what makes the saving honest: a few lookups a second where
+    # there were hundreds, and a stacking change noticed within one interval.
+    session = CountingSession(geometry=(100, 50, 800, 600))
+    made = resolver(session)
+    made.resolve_window(300, 200)
+    clock.advance(resolver_module.MOTION_TRUST_SECONDS / 2)
+    made.resolve_window(310, 200)
+    assert session.window_lookups == 1
+    clock.advance(resolver_module.MOTION_TRUST_SECONDS / 2)
+    made.resolve_window(320, 200)
+    assert session.window_lookups == 2
+
+
+def test_a_move_over_bare_desktop_does_not_sleep_through_a_retry(monkeypatch):
+    # A click that finds no window waits and asks again, because a window still
+    # animating in is worth waiting for. A pointer move is one of hundreds and
+    # the next will ask anyway: sleeping 50ms twice per move over bare desktop
+    # is a tenth of a second each, a recorder that cannot keep up with a hand
+    # on the one stretch of screen nothing is drawn.
+    slept = []
+    monkeypatch.setattr(resolver_module.time, "sleep", slept.append)
+    made = resolver(FakeSession(fail={"window_at", "active_window"}))
+    target = made.resolve_window(7, 8)
+    assert slept == []
+    assert target.window is None
+    assert (target.x, target.y) == (7, 8)
+
+
+def test_a_click_that_finds_no_window_still_waits_and_retries(monkeypatch):
+    # The counterpart to the above, so the patience is not lost from the one
+    # caller that has a use for it.
+    slept = []
+    monkeypatch.setattr(resolver_module.time, "sleep", slept.append)
+    made = resolver(FakeSession(fail={"window_at", "active_window"}))
+    made.resolve(7, 8)
+    assert slept == [0.05, 0.05]
+
+
+def test_a_miss_is_remembered_for_the_moves_that_follow_it(clock):
+    # Bare desktop is where a pointer spends much of its time, and a miss is the
+    # expensive answer -- the whole lookup, where a hit at least stops at the
+    # first window that covers the point. A hit-only cache did nothing for it.
+    session = CountingSession(fail=("window_at", "active_window"))
+    made = resolver(session)
+    for point in ((7, 8), (9, 8), (11, 9)):
+        assert made.resolve_window(*point).window is None
+    assert session.window_lookups == 1
+    clock.advance(resolver_module.MOTION_TRUST_SECONDS)
+    made.resolve_window(13, 9)
+    assert session.window_lookups == 2
+
+
+def test_a_miss_does_not_hide_a_window_from_a_click(clock):
+    # Only the motion path reads the remembered answer. A click still resolves
+    # the point it was made at, whatever the moves before it found.
+    session = desktop_with_an_app_on_it()
+    made = resolver(session)
+    stack, session.stack = session.stack, []
+    assert made.resolve_window(300, 200).window is None
+    session.stack = stack
+    assert made.resolve(300, 200).window.title == "App"
 
 
 def test_an_element_with_no_actions_is_described_as_unclickable():

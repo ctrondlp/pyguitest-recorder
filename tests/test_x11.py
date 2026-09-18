@@ -17,7 +17,10 @@ from Xlib.protocol import display as pdisplay  # noqa: E402
 from Xlib.protocol import event as xevent  # noqa: E402
 
 from pyguitest_recorder.backends import x11 as x11_module  # noqa: E402
-from pyguitest_recorder.backends.base import CaptureUnavailable  # noqa: E402
+from pyguitest_recorder.backends.base import (  # noqa: E402
+    CaptureBackend,
+    CaptureUnavailable,
+)
 from pyguitest_recorder.backends.x11 import (  # noqa: E402
     X11CaptureBackend,
     _group_switch_mask,
@@ -482,6 +485,14 @@ def test_without_a_recogniser_capture_never_ends_the_stream_itself():
     made._handle(FakeReply(key(9), key(9)))
     assert made.stop_pressed_at is None
     assert [e.kind for e in drain(made)] == ["key_press", "key_press"]
+
+
+def test_it_is_a_capture_backend():
+    # The protocol is runtime-checkable so that a member added to it is checked
+    # against every backend without anyone having to remember which they are --
+    # the Windows one was missing two when this was written, and nothing on the
+    # platform it was written on could see it.
+    assert isinstance(backend(), CaptureBackend)
 
 
 def test_events_yields_what_was_captured_and_stops_at_the_end():

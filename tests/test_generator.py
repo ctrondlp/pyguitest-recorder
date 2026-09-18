@@ -7,6 +7,7 @@ replay -- where it would be somebody's test that broke, not this one.
 
 import ast
 import math
+import re
 
 import pytest
 
@@ -1631,6 +1632,80 @@ def test_an_idle_pause_is_not_slept_through_twice_under_verbatim(window):
     assert "gui.wait(0.500)" in source  # the gap before the idle began
     assert "gui.wait(2.00)" in source  # the idle itself, once
     assert "gui.wait(2.000)" not in source  # not again as the gap that ended it
+
+
+def waits(source):
+    """Every `gui.wait(...)` a script sleeps through, in seconds."""
+    return [float(n) for n in re.findall(r"gui\.wait\(([0-9.]+)\)", source)]
+
+
+def test_a_rest_is_not_slept_through_again_for_the_positions_inside_it(window):
+    # Under `record_motion` every position is an event, the tremor of a resting
+    # hand included -- and the hover is only known once the pointer leaves, so it
+    # comes out *after* those positions, carrying the time the rest *began*. Each
+    # position had already been replayed with the wait that preceded it, so
+    # waiting out the whole dwell as well replayed a 0.9s rest as 1.4s, and a
+    # real 1.7s one as 3.6s: about twice as long, on the one value whose point is
+    # replaying the recorded clock.
+    source = render(
+        MouseMove(timestamp=1.0, target=Target(x=200, y=100, window=window)),
+        MouseMove(timestamp=1.1, target=Target(x=201, y=101, window=window)),
+        MouseMove(timestamp=1.5, target=Target(x=202, y=100, window=window)),
+        MouseMove(timestamp=1.0, target=Target(x=202, y=100, window=window), dwell=0.9),
+        MouseMove(timestamp=1.9, target=Target(x=300, y=140, window=window)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert sum(waits(source)) == pytest.approx(0.9, abs=0.02)
+
+
+def test_the_part_of_a_rest_not_yet_replayed_is_what_the_hover_waits_for(window):
+    # The tremor stopped 0.4s before the pointer left, and the recording has
+    # nothing between those two moments but the rest itself: that stretch is the
+    # hover's to wait out, and it is all of it that is.
+    source = render(
+        MouseMove(timestamp=1.0, target=Target(x=200, y=100, window=window)),
+        MouseMove(timestamp=1.5, target=Target(x=202, y=100, window=window)),
+        MouseMove(timestamp=1.0, target=Target(x=202, y=100, window=window), dwell=0.9),
+        MouseMove(timestamp=1.9, target=Target(x=300, y=140, window=window)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert waits(source) == [0.5, 0.4]
+
+
+def test_a_pause_and_a_hover_over_the_same_idle_are_slept_through_once(window):
+    # A pointer that stops dead for a second or more is an inferred Pause *and*
+    # a hover: the analyzer emits both for the one interval. The Pause is not
+    # capped and comes first, so it spends the interval and the hover has nothing
+    # left to wait for -- where each used to wait the whole of it.
+    source = render(
+        MouseMove(timestamp=0.15, target=Target(x=200, y=100, window=window)),
+        Pause(timestamp=0.15, seconds=1.7),
+        MouseMove(
+            timestamp=0.15, target=Target(x=200, y=100, window=window), dwell=1.7
+        ),
+        MouseMove(timestamp=1.85, target=Target(x=300, y=140, window=window)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert sum(waits(source)) == pytest.approx(1.7, abs=0.02)
+
+
+def test_a_hover_wait_is_unchanged_outside_verbatim(window):
+    # Every other value replays a hover as the wait it always was, whatever sits
+    # around it: only `verbatim` has a clock to keep.
+    for motion in ("teleport", "natural", "recorded"):
+        source = render(
+            MouseMove(timestamp=1.0, target=Target(x=200, y=100, window=window)),
+            MouseMove(timestamp=1.5, target=Target(x=202, y=100, window=window)),
+            MouseMove(
+                timestamp=1.0, target=Target(x=202, y=100, window=window), dwell=0.9
+            ),
+            motion=motion,
+            locators="absolute",
+        )
+        assert waits(source) == [0.9], motion
 
 
 def test_teleport_motion_is_unchanged_and_still_the_default(window):

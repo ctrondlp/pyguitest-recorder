@@ -394,9 +394,9 @@ def _record(
         # the recorder is says why the key has not been answered yet.
         recorder.on_lag = lambda behind: print(
             f"note: the recorder is {behind:.1f}s behind live input. It is "
-            "still recording, but the stop key cannot be answered until the "
-            "backlog is worked through: press it and wait rather than "
-            "interrupting, which would drop whatever is still queued.",
+            "still recording, but it can only end once it has worked through "
+            "that backlog: the stop key and Ctrl-C both wait for it, and "
+            "Ctrl-C a second time gives up on whatever is still queued.",
             file=sys.stderr,
         )
         recorder.start()
