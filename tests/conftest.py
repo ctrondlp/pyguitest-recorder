@@ -4,6 +4,8 @@ The resolver is a fake, so the modules that only need a window with something
 in it run without an X server and without an accessibility bus behind them.
 """
 
+import shutil
+
 import pytest
 
 from pyguitest_recorder.backends.base import RawEvent
@@ -80,3 +82,39 @@ def key():
         return RawEvent(kind=kind, timestamp=t, keysym=keysym, text=text)
 
     return make
+
+
+def pytest_configure(config):
+    """Register the one marker this suite defines."""
+    config.addinivalue_line(
+        "markers",
+        "needs_ruff: asserts on output `ruff format` normalized; skipped without it",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip the formatter-dependent tests where `ruff` is not on PATH.
+
+    `generator.python._format` shells out to `ruff format` and is documented
+    to degrade silently when it cannot -- the generated script is still
+    correct, just laid out as the emitter left it. Tests asserting on an
+    exact rendering (`gui.button("Save")`, double-quoted) are therefore
+    asserting that a formatter ran, and on a machine without one they fail
+    for a reason that is not a defect: thirty-three of them did, first on a
+    fresh Windows box and then identically on Linux with ruff hidden from
+    PATH, which is what showed it was never a platform problem.
+
+    Skipped rather than loosened. Quote style is not what these tests are
+    about, but the alternative -- normalizing the expected string -- would
+    quietly stop checking the layout the generated scripts are actually read
+    and edited in, which is the thing `_format` exists to guarantee.
+    """
+    if shutil.which("ruff") is not None:
+        return
+    skip = pytest.mark.skip(
+        reason="`ruff` is not on PATH, so generated output is unformatted; "
+        "install it (pip install ruff) to run the rendering assertions"
+    )
+    for item in items:
+        if "needs_ruff" in item.keywords:
+            item.add_marker(skip)

@@ -22,11 +22,12 @@ python3 login_test.py                    # replay it
 pyguitest-recorder --doctor
 ```
 
-Recording needs X11 or XWayland — that is a property of the platform, not a
-missing feature, and [developers/architecture.md](developers/architecture.md#why-recording-is-x11-only)
-explains why no Wayland compositor will ever allow it. Under a Wayland session
-the recorder reaches XWayland clients and nothing else, and says so rather
-than producing a file with silent gaps.
+Recording needs X11, XWayland, or native Windows — no ordinary Wayland
+compositor will ever allow it, which is a property of the platform, not a
+missing feature; see
+[developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
+for why. Under a Wayland session the recorder reaches XWayland clients and
+nothing else, and says so rather than producing a file with silent gaps.
 
 `--doctor` answers three questions: can input be captured at all, can clicks
 be resolved to named elements, and is the installed pyguitest new enough.

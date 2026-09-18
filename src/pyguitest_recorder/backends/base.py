@@ -44,6 +44,13 @@ class RawEvent:
     also the vocabulary `Session.press_key` accepts, so key names survive the
     whole pipeline unchanged. `text` is the character the key produced when it
     produced one, which is what the normalizer coalesces into typed strings.
+
+    `injected` is False everywhere except the win32 backend, which is the one
+    capture source that can actually tell: `KBDLLHOOKSTRUCT`/`MSLLHOOKSTRUCT`
+    carry `LLKHF_INJECTED`/`LLMHF_INJECTED`, a bit XRecord has no equivalent
+    of. It is recorded rather than acted on here -- see backends/win32.py's
+    module docstring for why dropping an injected event silently would be the
+    wrong call, and why marking it and moving on is the right one.
     """
 
     kind: RawKind
@@ -56,6 +63,7 @@ class RawEvent:
     dy: int = 0
     keysym: str = ""
     text: str = ""
+    injected: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Serialize for the raw diagnostic log."""
@@ -70,6 +78,7 @@ class RawEvent:
             "dy": self.dy,
             "keysym": self.keysym,
             "text": self.text,
+            "injected": self.injected,
         }
 
 

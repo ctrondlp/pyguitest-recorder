@@ -92,6 +92,98 @@ jobs:
       - name: Record a real application and check what came out
         run: ./scripts/live-capture-check.py
 
+  windows:
+    name: the suite on Windows
+    runs-on: windows-latest
+    # The win32 capture backend lands here before there is a Windows machine
+    # in anyone's loop, so this job is what stops a Linux-only assumption
+    # reaching a user first. It has already earned its place twice: a
+    # `Path.home()` test that only held where HOME decides the home directory,
+    # and thirty-three rendering assertions that silently required `ruff` on
+    # PATH. Neither is visible on the ubuntu runners.
+    #
+    # Nothing here can install a low-level input hook -- a CI runner has no
+    # interactive desktop -- so what this proves is what the fakes prove, on
+    # the platform they describe: every module imports, the suite collects,
+    # and the tests written to run anywhere pass.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version: this job is about the platform, and Python-to-Python
+          # differences are the `tests` matrix's business.
+          python-version: "3.12"
+
+      # `x11` is deliberately absent: python-xlib is a Linux dependency and
+      # the win32 backend needs nothing installed. `dev` brings ruff, which
+      # the generator shells out to -- without it the rendering assertions
+      # skip rather than fail, and a skip here would hide what this job is
+      # for.
+      #
+      # pyguitest comes from git rather than PyPI, and only on this job.
+      # Windows support is merged on pyguitest's main but not yet in any
+      # release, and no release imports on Windows at all -- `session.py`
+      # has a module-scope `import grp`, which does not exist here. Against
+      # the released version every test touching the installed Session (the
+      # generator's validation, the resolver, the CLI) fails on that import,
+      # and the win32 tests skip themselves for the missing key vocabulary
+      # (see backends/win32._NO_PYGUITEST_WIN32) -- so this job would be
+      # measuring the dependency rather than this package.
+      #
+      # Drop the second line, and raise the pyguitest floor in pyproject.toml,
+      # as soon as a release carries `pyguitest.backends.win32`. Until then
+      # this is what makes the job a real gate instead of a swallowed red.
+      #
+      # `--force-reinstall --no-deps` is not belt-and-braces. pyguitest's main
+      # still carries version 0.10.1 -- the same string PyPI serves -- so pip
+      # sees the requirement already satisfied by the release `-e '.[dev]'`
+      # just pulled in and skips the git install without a word. The first
+      # attempt at this bridge did exactly that and the job failed on the
+      # identical `import grp`. `--no-deps` because pyguitest has no hard
+      # runtime dependencies and the line above has already resolved the
+      # recorder's own. One line, too: this job's default shell is PowerShell,
+      # where a trailing `\` is not a line continuation -- split that way, pip
+      # was handed `\` as a directory to install and said so.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          pip install --force-reinstall --no-deps "pyguitest @ git+https://github.com/ctrondlp/pyguitest@main"
+
+      # Proves the bridge above actually delivered it: without this, a
+      # pyguitest that silently lacked the module would send every win32
+      # test into the skip path and the job would pass having tested none of
+      # what it exists for.
+      - name: Check the installed pyguitest carries the win32 backend
+        run: python -c "import pyguitest.backends.win32"
+
+
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Check the formatter-dependent tests actually ran
+        shell: bash
+        # A skip for *want of ruff* is the correct answer without it and the
+        # wrong one here: `dev` installs it, so that skip would mean the
+        # marker is firing when it should not and thirty-three assertions had
+        # quietly stopped running on the one platform this job exists for.
+        #
+        # Matched on the conftest's own reason rather than on the word
+        # "skipped", which the summary line carries whenever *any* selected
+        # test skips for *any* reason -- the first version of this check
+        # failed the job over one unrelated platform skip while all
+        # thirty-three had in fact run. `-rs` prints every skip reason, so
+        # the log says which and why without anyone re-running it.
+        run: |
+          set -eo pipefail
+          python -m pytest -q -m needs_ruff -rs 2>&1 | tee marked.txt
+          if grep -q "is not on PATH" marked.txt; then
+            echo "::error::ruff-dependent tests skipped despite the dev extra"
+            exit 1
+          fi
+
   build:
     name: build sdist and wheel
     runs-on: ubuntu-latest

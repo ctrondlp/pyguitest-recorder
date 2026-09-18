@@ -5,9 +5,26 @@ rather than in a section, and the precedence between file and command line
 are four separate mechanisms, and they fail in four different ways.
 """
 
+from pathlib import Path
+
 import pytest
 
 from pyguitest_recorder.config import ConfigError, Settings, config_paths, load_settings
+from pyguitest_recorder.config import settings as settings_module
+
+
+class _FakePlatform:
+    """Stands in for the `sys` module, with only `platform` pinned.
+
+    `config.settings` reads `sys.platform` to choose where configuration lives,
+    and patching the attribute on the real `sys` would change what `pathlib`,
+    `os` and every import does inside the same test. Swapping the module
+    reference the one function looks it up on is the narrower move -- the
+    shape pyguitest's own `_platform()` seam exists for.
+    """
+
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
 
 
 def test_defaults_when_no_file_exists(tmp_path, monkeypatch):
@@ -25,8 +42,45 @@ def test_xdg_config_home_is_respected(tmp_path, monkeypatch):
 
 
 def test_config_home_defaults_under_home(tmp_path, monkeypatch):
+    # Path.home() reads USERPROFILE on Windows and ignores HOME, so the
+    # platform is pinned rather than inherited: setting HOME and asserting the
+    # result followed it was a Linux-only assumption, and it failed on
+    # Windows for that reason rather than for a fault in config_paths.
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(settings_module, "sys", _FakePlatform("linux"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert config_paths()[0].is_relative_to(tmp_path / ".config")
+
+
+def test_config_home_is_appdata_on_windows(tmp_path, monkeypatch):
+    # ~/.config is neither conventional nor discoverable on Windows: `~` there
+    # is the profile root a user sees in Explorer, and %APPDATA% is the
+    # directory Windows itself backs up and roams.
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(settings_module, "sys", _FakePlatform("win32"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    assert config_paths()[0] == (
+        tmp_path / "Roaming" / "pyguitest-recorder" / "config.toml"
+    )
+
+
+def test_xdg_config_home_still_wins_on_windows(tmp_path, monkeypatch):
+    # An explicit instruction, and a Cygwin or MSYS2 session that sets it
+    # means it -- so the platform default never overrides it.
+    monkeypatch.setattr(settings_module, "sys", _FakePlatform("win32"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    assert config_paths()[0] == tmp_path / "cfg" / "pyguitest-recorder" / "config.toml"
+
+
+def test_windows_without_appdata_falls_back_rather_than_failing(tmp_path, monkeypatch):
+    # %APPDATA% is set on every ordinary login, but a stripped service
+    # environment can lack it, and "no config file anywhere" is a worse
+    # answer than the path every other platform uses.
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(settings_module, "sys", _FakePlatform("win32"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     assert config_paths()[0].is_relative_to(tmp_path / ".config")
 
 
