@@ -165,15 +165,22 @@ jobs:
 
       - name: Check the formatter-dependent tests actually ran
         shell: bash
-        # A skip is the correct answer without ruff and the wrong one here:
-        # `dev` installs it, so any skip on this row means the marker is
-        # firing when it should not and thirty-three assertions have quietly
-        # stopped running on the one platform this job exists to cover.
+        # A skip for *want of ruff* is the correct answer without it and the
+        # wrong one here: `dev` installs it, so that skip would mean the
+        # marker is firing when it should not and thirty-three assertions had
+        # quietly stopped running on the one platform this job exists for.
+        #
+        # Matched on the conftest's own reason rather than on the word
+        # "skipped", which the summary line carries whenever *any* selected
+        # test skips for *any* reason -- the first version of this check
+        # failed the job over one unrelated platform skip while all
+        # thirty-three had in fact run. `-rs` prints every skip reason, so
+        # the log says which and why without anyone re-running it.
         run: |
           set -eo pipefail
-          if python -m pytest -q -m needs_ruff 2>&1 | tee /tmp/marked.txt | grep -q skipped; then
+          python -m pytest -q -m needs_ruff -rs 2>&1 | tee marked.txt
+          if grep -q "is not on PATH" marked.txt; then
             echo "::error::ruff-dependent tests skipped despite the dev extra"
-            cat /tmp/marked.txt
             exit 1
           fi
 
