@@ -35,6 +35,33 @@ was released.
 
 ### Fixed
 
+- **A hover that kept running through typing was replayed after it, so the
+  wait that let a window appear landed after the text that needed it.** A
+  hover is deliberately not ended by keyboard input -- the pointer resting
+  while someone types is not someone hovering something -- so its length is
+  only known once something else closes it, and `Normalizer.flush()` can hand
+  it over last still carrying the time it began at. `Recording.add` appended
+  that, `max(0.0, ...)` clamped its negative delay to zero, and the script
+  moved the pointer only after the typing it preceded. The normalizer's own
+  rule is "the hover began first and must be emitted first"; `add` now keeps
+  events in timestamp order so that holds however they arrive, and
+  `Recording.from_dict` sorts on load so `--regenerate` repairs a recording
+  already saved out of order.
+
+  Measured on a real Windows recording: clicking **OK** in the Run dialog
+  launched a console, and the next line typed into it with nothing in
+  between -- no `expect_window`, no wait -- so the typing went nowhere. With
+  the order restored the script waits for the console before addressing it.
+
+- **Generated scripts named mechanisms Windows does not have.** A control
+  that published no action was described as having "offered AT-SPI no click
+  or press action" in a Windows script, and a recording's notes spoke of "the
+  recorded display" and an accessibility bus "not scoped to one X display" --
+  all three naming machinery that desktop has never had. `platforms.py` now
+  answers what a given session calls these things, and the generator asks it
+  about the *recording's* platform rather than the machine rendering it, so
+  regenerating a Windows recording on Linux still says UI Automation.
+
 - **A Windows recording resolved no window and no element, so every click was
   a bare screen coordinate.** `_open_session` named `x11` and `atspi` on every
   platform, and neither can open on Windows -- no X server for the first, no

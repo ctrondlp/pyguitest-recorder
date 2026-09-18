@@ -1175,3 +1175,28 @@ def test_an_app_id_seen_later_is_adopted():
     made.resolve(1, 2)
     session.window = Handled(1, title="App", app_id="org.example.App")
     assert made.resolve(1, 2).window.app_id == "org.example.App"
+
+
+class TestPlatformWordingInNotes:
+    """The notes a recording carries must describe the platform it was made on.
+
+    These strings end up in the generated script's own footer, where a Windows
+    reader told about "the recorded display" and "one X display" is being sent
+    after machinery their desktop does not have.
+    """
+
+    def test_windows_notes_name_no_display(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        phrase = resolver_module._scope_phrase()
+        assert "display" not in phrase
+        assert phrase == "in this recording"
+
+    def test_other_platforms_keep_the_recorded_display(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        assert resolver_module._scope_phrase() == "on the recorded display"

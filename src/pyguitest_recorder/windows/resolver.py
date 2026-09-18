@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ..model import ElementRef, Target, WindowRef
+from ..platforms import foreign_element_reason, foreign_focus_reason, is_windows
 
 __all__ = ["ContextResolver", "NullResolver", "DesktopResolver", "Observation"]
 
@@ -84,6 +85,15 @@ for afresh at most this often -- a few lookups a second where there were hundred
 -- which bounds how long a stacking change can go unnoticed and how much a
 recording pays to notice it.
 """
+
+
+def _scope_phrase() -> str:
+    """How to describe the set of windows this recording covers.
+
+    "the recorded display" is an X11 idea; on Windows the recording covers the
+    desktop this process is attached to and there is no display to name.
+    """
+    return "in this recording" if is_windows() else "on the recorded display"
 
 
 @dataclass(frozen=True)
@@ -553,8 +563,7 @@ class DesktopResolver:
             return self._describe(self._best_owner(owned, element))
         self._warn(
             f"ignored keyboard focus in pid {element.pid}, which owns no window "
-            "on the recorded display; the accessibility bus is not scoped to "
-            "one X display, so it came from another session"
+            f"{_scope_phrase()}; {foreign_focus_reason()}"
         )
         return None
 
@@ -659,9 +668,8 @@ class DesktopResolver:
             if self.session is None:
                 return True
             self._warn(
-                "ignored accessible elements that no window on the recorded "
-                "display accounts for; the accessibility bus is not scoped to "
-                "one X display, so they came from another session"
+                f"ignored accessible elements that no window {_scope_phrase()} "
+                f"accounts for; {foreign_element_reason()}"
             )
             return False
         if window.pid is not None and element.pid is not None:

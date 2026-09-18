@@ -2031,3 +2031,51 @@ class TestKeyActionSettle:
             ]
         )
         assert "gui.wait(0.60)" not in source
+
+
+class TestNoForeignPlatformVocabulary:
+    """A generated script must not name mechanisms the platform lacks.
+
+    Read by someone at the machine the recording was made on: "offered AT-SPI
+    no click action" in a Windows script sends them after an accessibility bus
+    their machine has never had.
+    """
+
+    def _script(self, session_type):
+        window = WindowRef(title="Run", app_id="run", pid=7, geometry=(0, 0, 400, 200))
+        element = ElementRef(role="push button", name="OK", actions=())
+        recording = Recording(environment=Environment(session_type=session_type))
+        recording.add(
+            Click(
+                timestamp=1.0,
+                target=Target(x=20, y=30, window=window, element=element),
+            )
+        )
+        return generate(recording)
+
+    def test_a_windows_script_names_ui_automation_not_atspi(self):
+        source = self._script("SessionType.WIN32")
+        assert "AT-SPI" not in source
+        assert "UI Automation" in source
+
+    def test_a_linux_script_still_names_atspi(self):
+        source = self._script("SessionType.X11")
+        assert "AT-SPI" in source
+        assert "UI Automation" not in source
+
+    def test_a_windows_script_mentions_no_x11_concept_anywhere(self):
+        # The whole vocabulary, not just the one comment: $DISPLAY, the X
+        # display and the accessibility bus have all reached generated output.
+        source = self._script("SessionType.WIN32")
+        for absent in ("$DISPLAY", "X display", "accessibility bus", "XWayland"):
+            assert absent not in source, f"{absent!r} leaked into a Windows script"
+
+    def test_regenerating_a_windows_recording_anywhere_still_says_windows(
+        self, monkeypatch
+    ):
+        # The recording's platform decides, not the machine regenerating it --
+        # `--regenerate` on Linux for a Windows recording is ordinary.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        assert "UI Automation" in self._script("SessionType.WIN32")

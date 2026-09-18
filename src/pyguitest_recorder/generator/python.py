@@ -66,6 +66,7 @@ from ..model import (
     WindowRef,
     describe_assertion,
 )
+from ..platforms import element_api
 
 __all__ = [
     "GeneratorOptions",
@@ -422,6 +423,12 @@ class _State:
     bare_click_pending: bool = False
     """Whether the last line emitted was a coordinate click with nothing --
     no wait, no other action -- after it. See _COORDINATE_CLICK_SETTLE."""
+    session_type: str = ""
+    """The recording's own session type, for naming what that platform has.
+
+    The recording's rather than this machine's: regenerating a Windows
+    recording on Linux is ordinary, and a comment in the output naming AT-SPI
+    would be describing the wrong desktop. See `platforms.element_api`."""
     key_action_pending: bool = False
     """Whether the last event rendered was a keystroke or a chord.
 
@@ -865,6 +872,7 @@ class PythonGenerator:
         """Return the complete generated module for `recording`."""
         state = _State()
         state.natural_motion = _NATURAL_MOTION in _session_methods()
+        state.session_type = recording.environment.session_type
         if self.options.locators == "element":
             state.element_scopes, scope_warnings = _compute_element_scopes(recording)
             state.warnings.extend(scope_warnings)
@@ -1178,8 +1186,9 @@ class PythonGenerator:
             or self.options.locators != "element"
         ):
             return
+        api = element_api(state.session_type)
         state.lines.append(
-            f"# {element.name!r} was named, but offered AT-SPI no click or"
+            f"# {element.name!r} was named, but offered {api} no click or"
         )
         state.lines.append("# press action, so this has to stay a coordinate")
 
