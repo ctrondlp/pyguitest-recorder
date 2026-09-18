@@ -106,21 +106,6 @@ jobs:
     # interactive desktop -- so what this proves is what the fakes prove, on
     # the platform they describe: every module imports, the suite collects,
     # and the tests written to run anywhere pass.
-    #
-    # continue-on-error until pyguitest ships its own Windows support, and
-    # this is a dependency-ordering fact rather than a tolerance for red.
-    # pip installs the *released* pyguitest here, and no release yet imports
-    # on Windows at all: `session.py` has a module-scope `import grp`, which
-    # does not exist on this platform. Every test that touches the installed
-    # Session -- the generator's validation, the resolver, the CLI -- fails on
-    # that import, and nothing in this repository can fix it. The win32 tests
-    # themselves skip cleanly (see backends/win32._NO_PYGUITEST_WIN32), so
-    # what is left failing is exactly the dependency.
-    #
-    # Remove this line when the recorder's pyguitest floor names a release
-    # carrying `pyguitest.backends.win32`; at that point the skips light up
-    # and this job becomes a real gate.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
@@ -135,8 +120,34 @@ jobs:
       # the generator shells out to -- without it the rendering assertions
       # skip rather than fail, and a skip here would hide what this job is
       # for.
+      #
+      # pyguitest comes from git rather than PyPI, and only on this job.
+      # Windows support is merged on pyguitest's main but not yet in any
+      # release, and no release imports on Windows at all -- `session.py`
+      # has a module-scope `import grp`, which does not exist here. Against
+      # the released version every test touching the installed Session (the
+      # generator's validation, the resolver, the CLI) fails on that import,
+      # and the win32 tests skip themselves for the missing key vocabulary
+      # (see backends/win32._NO_PYGUITEST_WIN32) -- so this job would be
+      # measuring the dependency rather than this package.
+      #
+      # Drop the second line, and raise the pyguitest floor in pyproject.toml,
+      # as soon as a release carries `pyguitest.backends.win32`. Until then
+      # this is what makes the job a real gate instead of a swallowed red.
       - name: Install
-        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          pip install "pyguitest @ git+https://github.com/ctrondlp/pyguitest@main"
+
+      # Proves the bridge above actually delivered it: without this, a
+      # pyguitest that silently lacked the module would send every win32
+      # test into the skip path and the job would pass having tested none of
+      # what it exists for.
+      - name: Check the installed pyguitest carries the win32 backend
+        run: python -c "import pyguitest.backends.win32"
+
+
 
       - name: Run the test suite
         run: python -m pytest -q
