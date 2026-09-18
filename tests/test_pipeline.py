@@ -3,12 +3,13 @@
 Everything except the capture backend itself, which needs a live X server.
 """
 
+from dataclasses import fields
 from pathlib import Path
 
 from conftest import FakeResolver
 from pyguitest_recorder.analyzer import Normalizer
 from pyguitest_recorder.backends.base import RawEvent
-from pyguitest_recorder.config import load_settings
+from pyguitest_recorder.config import Settings, load_settings
 from pyguitest_recorder.generator import generate, validate
 from pyguitest_recorder.model import ElementRef, Environment, Recording, WindowRef
 
@@ -26,6 +27,22 @@ def test_example_config_parses_and_sets_only_known_keys():
     # "teleport" being the default is not self-explanatory.
     assert settings.motion == "teleport"
     assert settings.max_waypoints == 32
+
+
+def test_the_example_config_is_the_defaults_written_down():
+    # The file says so at the top, and it is the file people copy: a default
+    # that moves while the example does not is a config change on install.
+    settings, _ = load_settings(EXAMPLE_CONFIG)
+    assert settings == Settings()
+
+
+def test_every_setting_is_named_in_the_example_config():
+    # The direction that bites a reader -- a setting that exists and cannot be
+    # found in the file they copied. Commented-out keys count: `display`,
+    # `output` and `session_file` are documented that way on purpose.
+    text = EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    missing = sorted(f.name for f in fields(Settings) if f.name not in text)
+    assert missing == []
 
 
 def test_a_recorded_interaction_becomes_a_runnable_script():

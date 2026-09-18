@@ -30,6 +30,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from ..stopkey import StopKey
 from .base import CaptureUnavailable, RawEvent
 
 __all__ = ["X11CaptureBackend", "available", "unavailable_reason"]
@@ -100,10 +101,24 @@ class X11CaptureBackend:
 
     name = "xrecord"
 
-    def __init__(self, display: str | None = None, screen: int = 0) -> None:
-        """Prepare a capture backend against `display`, or $DISPLAY."""
+    def __init__(
+        self,
+        display: str | None = None,
+        screen: int = 0,
+        stop_key: StopKey | None = None,
+    ) -> None:
+        """Prepare a capture backend against `display`, or $DISPLAY.
+
+        `stop_key` is the recogniser used to end the stream where the user's own
+        press completed the chord -- see `stop_pressed_at`. Without one, capture
+        ends when `stop` is called, and only the consumer's view of the stop key
+        decides where the recording does.
+        """
         self.display_name = display
         self.screen = screen
+        self.stop_pressed_at: float | None = None
+        self._stop_key = stop_key
+        self._finished = False
         self._control: Any = None
         self._pump: Any = None
         self._context: Any = None
@@ -171,7 +186,19 @@ class X11CaptureBackend:
             self._queue.put(_SENTINEL)
 
     def _handle(self, reply: Any) -> None:
-        """Parse one record reply into raw events."""
+        """Parse one record reply into raw events.
+
+        Runs on the pump thread, and this is where the stop key is recognised as
+        well as where it is consumed: the presses arrive here long before the
+        consumer reaches them, and a recording that fell behind live input had
+        no other way to end where the user asked -- see `stopkey`. Nothing is
+        withheld until the chord completes, so a single Escape pressed to close
+        a dialog is still handed on and recorded; the completing presses are
+        handed on too, and the stream simply ends after them, which is what
+        makes a recording end at the press however far behind consumption is.
+        """
+        if self._finished:
+            return
         if reply.category != 0 or reply.client_swapped:
             return
         if not isinstance(reply.data, bytes) or reply.data[0] < 2:
@@ -185,8 +212,24 @@ class X11CaptureBackend:
                 .parse_binary_value(data, self._pump.display, None, None)
             )
             raw = self._translate(event)
-            if raw is not None:
-                self._queue.put(raw)
+            if raw is None:
+                continue
+            self._queue.put(raw)
+            if self._stop_key is not None and self._stop_key.feed(raw).stop:
+                self._finish_at_stop(raw.timestamp)
+                return
+
+    def _finish_at_stop(self, timestamp: float) -> None:
+        """End the stream where the stop key completed, and say when that was.
+
+        Everything captured after this press belongs to the session, not to the
+        recording, so it is never handed over: the alternative is a queue that
+        grows for as long as someone keeps using the desktop after asking the
+        recording to stop.
+        """
+        self.stop_pressed_at = timestamp
+        self._finished = True
+        self._queue.put(_SENTINEL)
 
     def _translate(self, event: Any) -> RawEvent | None:
         """Convert one X event into a RawEvent, or None if it carries nothing."""
@@ -288,6 +331,33 @@ class X11CaptureBackend:
                 return
             if isinstance(item, Exception):
                 raise CaptureUnavailable(str(item)) from item
+            yield item
+
+    def drain(self) -> Iterator[RawEvent]:
+        """Yield what the pump has already delivered, without waiting for more.
+
+        The queue is read once, up to the size it had when this was called.
+        Draining until it is empty would never return on a session that is
+        still being used, and everything captured before this call is what a
+        recording that ended mid-flight is owed: anything after it belongs to
+        whatever happens next.
+
+        The end-of-stream marker is put back rather than swallowed, so a reader
+        that calls `events` afterwards still terminates. An error from the pump
+        is skipped: `events` raises it, but here the run is already over and
+        this exists to salvage what arrived before the failure -- raising would
+        throw away the events queued behind it, which are the point.
+        """
+        for _ in range(self._queue.qsize()):
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:  # pragma: no cover - qsize raced a consumer
+                return
+            if item is _SENTINEL:
+                self._queue.put(_SENTINEL)
+                return
+            if isinstance(item, Exception):
+                continue
             yield item
 
     def stop(self) -> None:

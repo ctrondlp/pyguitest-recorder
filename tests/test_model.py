@@ -10,6 +10,7 @@ import pytest
 from pyguitest_recorder.model import (
     Assertion,
     Click,
+    Drag,
     ElementRef,
     Environment,
     HotKey,
@@ -151,6 +152,25 @@ def test_unambiguous_app_id_is_addressable():
 def test_hotkey_keys_round_trip_as_tuple():
     rebuilt = event_from_dict(HotKey(keys=("ctrl", "s")).to_dict())
     assert rebuilt.keys == ("ctrl", "s")
+
+
+def test_a_drag_route_round_trips_as_points(window):
+    # A gesture's path is a list of the same points every other event carries,
+    # and it has to come back as one: a drag that loses its route on the way
+    # through storage replays as a straight line.
+    drag = Drag(
+        timestamp=1.0,
+        start=Target(x=10, y=10, window=window),
+        end=Target(x=200, y=90, window=window),
+        route=(
+            Target(x=60, y=40, window=window),
+            Target(x=120, y=70, window=window),
+        ),
+    )
+    rebuilt = event_from_dict(drag.to_dict())
+    assert isinstance(rebuilt, Drag)
+    assert [(point.x, point.y) for point in rebuilt.route] == [(60, 40), (120, 70)]
+    assert rebuilt.route[0].window.app_id == "org.example.App"
 
 
 def test_origin_survives_round_trip():

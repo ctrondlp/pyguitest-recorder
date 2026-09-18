@@ -1319,6 +1319,102 @@ def test_a_drag_inside_a_window_that_stayed_put_is_still_relative(window):
     assert "moved the window it began in" not in source
 
 
+def drag_with_route(window, *route, start=(150, 100), end=(300, 200)):
+    """A drag between two points of one window, through `route`."""
+    return Drag(
+        start=Target(x=start[0], y=start[1], window=window),
+        end=Target(x=end[0], y=end[1], window=window),
+        route=tuple(Target(x=x, y=y, window=window) for x, y in route),
+    )
+
+
+def test_a_drag_carries_the_route_it_was_dragged_along(window):
+    # `pyguitest.drag` glides between the two ends, so without this a recorded
+    # curve replays as a straight line -- and a straight drag between the same
+    # points is a different gesture from the one that was made.
+    source = render(
+        drag_with_route(window, (200, 120), (240, 160), (280, 140)),
+        locators="absolute",
+    )
+    assert "gui.drag(" in source
+    assert "(240, 160)" in waypoints(source)
+    assert validate(source) == []
+
+
+def test_a_drag_with_no_recorded_route_is_still_a_plain_drag(window):
+    # Nothing is invented for a recording made without `record_motion`: the two
+    # ends are all it has, and `gui.drag` is what renders them.
+    source = render(drag_with_route(window), locators="absolute")
+    assert "gui.drag((150, 100), (300, 200))" in source
+    assert "via=" not in source
+    assert validate(source) == []
+
+
+def test_a_straight_drag_route_needs_no_waypoints(window):
+    # Collinear points carry nothing the endpoints do not, exactly as they do
+    # not for a movement.
+    source = render(
+        drag_with_route(window, (200, 133), (250, 166)),
+        locators="absolute",
+    )
+    assert "via=" not in source
+
+
+def test_a_drag_inside_one_window_writes_its_route_relative_to_that_window(window):
+    # The ordinary case: one origin serves the whole list, so the route reads
+    # like everything else in the script.
+    source = render(drag_with_route(window, (200, 120), (240, 160), (280, 140)))
+    assert "example_x +" in source
+    assert len(waypoints(source)) == 3
+    assert validate(source) == []
+
+
+def test_a_route_that_crossed_windows_is_written_in_screen_coordinates(window):
+    # One `window_x`/`window_y` read serves a `via` list, so a route with no
+    # single origin cannot be measured against one. Screen coordinates always
+    # can be -- and a drag whose endpoints are in two windows is exactly that.
+    other = WindowRef(
+        title="Other", app_id="org.example.Other", pid=99, geometry=(0, 0, 800, 600)
+    )
+    source = render(
+        Drag(
+            start=Target(x=150, y=100, window=window),
+            end=Target(x=300, y=200, window=other),
+            route=(
+                Target(x=200, y=170, window=window),
+                Target(x=240, y=110, window=other),
+            ),
+        )
+    )
+    kept = waypoints(source)
+    assert len(kept) == 2
+    assert all("_x +" not in point for point in kept)
+    assert validate(source) == []
+
+
+def test_a_drag_that_moved_its_window_keeps_its_route_in_screen_coordinates(window):
+    # Written in screen coordinates every point stands alone, so the whole
+    # route goes in even though the window travelled underneath it.
+    before = WindowRef(title="Calculator", geometry=(100, 100, 400, 300))
+    after = WindowRef(title="Calculator", geometry=(300, 250, 400, 300))
+    source = render(
+        Drag(
+            start=Target(x=150, y=140, window=before),
+            end=Target(x=350, y=290, window=after),
+            route=(
+                Target(x=200, y=170, window=before),
+                Target(x=260, y=150, window=after),
+            ),
+        )
+    )
+    assert "gui.drag((150, 140), (350, 290)" in source
+    assert "(200, 170)" in waypoints(source)
+    # Literals, as the drag's own two ends are: nothing is measured against a
+    # window that was travelling underneath the gesture.
+    assert "calculator_x" not in source
+    assert validate(source) == []
+
+
 def test_a_hover_renders_as_a_move_and_the_wait_that_makes_it_one(window):
     source = render(
         MouseMove(target=Target(x=165, y=97, window=window), dwell=0.9),
@@ -1346,13 +1442,15 @@ def test_a_very_long_hover_is_capped(window):
 
 # -- how a pointer move is rendered -----------------------------------------
 #
-# One axis, three values: `teleport` (what this always did), `natural` (one
-# shaped call, the same length) and `recorded` (that, plus the route as thinned
-# waypoints). Every test below asserts on the generated *text*, which is the
-# point: the choice is made while rendering and never touches a display, so it
-# behaves the same on X11, on XWayland, on a Wayland session and on a BSD with
-# none of the three. What varies by platform is whether pyguitest can inject at
-# all, and that is the capability preamble's business, not this one's.
+# One axis, four values: `teleport` (what this always did), `natural` (one
+# shaped call, the same length), `recorded` (that, plus the route as thinned
+# waypoints) and `verbatim` (every position with the wait that preceded it,
+# which is the only one that replays the recorded clock too). Every test below
+# asserts on the generated *text*, which is the point: the choice is made while
+# rendering and never touches a display, so it behaves the same on X11, on
+# XWayland, on a Wayland session and on a BSD with none of the three. What
+# varies by platform is whether pyguitest can inject at all, and that is the
+# capability preamble's business, not this one's.
 
 
 def moves(window, *points, dwell=0.0, screen=0):
@@ -1361,6 +1459,34 @@ def moves(window, *points, dwell=0.0, screen=0):
         MouseMove(target=Target(x=x, y=y, screen=screen, window=window), dwell=dwell)
         for x, y in points
     ]
+
+
+def timed_moves(window, *stamped):
+    """MouseMove events for a path, each carrying when it was recorded."""
+    return [
+        MouseMove(timestamp=t, target=Target(x=x, y=y, window=window))
+        for t, x, y in stamped
+    ]
+
+
+def menu_route(window):
+    """The route a hand takes out of a menu: right along a row, then down.
+
+    Positions from a real recording on MATE -- into the Applications menu's
+    first row, along it, and then down the submenu column that opened from it.
+    The shape is the whole point of it: it never crosses another row of the
+    menu itself, which is what a shaped path does instead.
+    """
+    return moves(
+        window,
+        (77, 41),
+        (170, 36),
+        (221, 57),
+        (232, 76),
+        (236, 132),
+        (212, 250),
+        (212, 345),
+    )
 
 
 def _to_segment(point, start, end):
@@ -1395,6 +1521,86 @@ def waypoints(source):
     return []
 
 
+def test_verbatim_motion_is_every_position_with_the_wait_before_it(window):
+    # The one value that replays the clock as well as the path. Three recorded
+    # positions 6ms apart are three events 6ms apart and not one call: what the
+    # interface saw in between is that interval, and a menu row deciding
+    # whether the pointer has *stayed* is reacting to exactly it.
+    source = render(
+        *timed_moves(window, (0.5, 200, 200), (0.506, 205, 203), (0.512, 210, 206)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert source.count("gui.move_mouse(") == 3
+    assert source.count("gui.wait(0.006)") == 2
+    # Nothing is invented between them, and no route is claimed either.
+    assert "move_mouse_naturally(" not in source
+    assert waypoints(source) == []
+    assert validate(source) == []
+
+
+def test_verbatim_motion_does_not_sleep_through_the_recordings_opening_gap(window):
+    # The first event has no earlier statement to be measured from, and the
+    # recording's own lead-in is not something a script should replay: the
+    # pointer was simply already there before anything happened.
+    source = render(
+        *timed_moves(window, (3.5, 200, 200), (3.51, 210, 210)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert "gui.wait(3.500)" not in source
+    assert source.count("gui.wait(0.010)") == 1
+
+
+def test_a_hover_wait_is_not_charged_again_to_the_position_that_leaves_it(window):
+    # A rest is one recorded interval, and the position that leaves it is that
+    # interval's *end* -- so emitting the hover's wait and then the next
+    # event's own timestamp gap would wait out the dwell twice. On the menu
+    # this was built for, that dwell is what opened the submenu.
+    source = render(
+        MouseMove(timestamp=1.0, target=Target(x=57, y=40, window=window), dwell=0.6),
+        MouseMove(timestamp=1.6, target=Target(x=180, y=45, window=window)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert "gui.wait(0.60)" in source
+    assert source.count("gui.wait(") == 1
+
+
+def test_a_gap_too_short_to_deliver_is_not_a_statement(window):
+    # Below a millisecond there is nothing to replay -- `time.sleep` does not
+    # deliver it -- and a line of noise between every pair of samples is what
+    # `verbatim` would otherwise be made of. The 40ms gap after it still is one.
+    source = render(
+        *timed_moves(window, (0.5, 200, 200), (0.5005, 201, 200), (0.5404, 210, 200)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert "gui.wait(0.000)" not in source
+    assert source.count("gui.wait(") == 1
+
+
+def test_an_idle_pause_is_not_slept_through_twice_under_verbatim(window):
+    # An explicit Pause is timestamped where the idle it stands for *began* --
+    # see `_gap` -- and the event that ended that idle sits at the other end of
+    # the same seconds. `verbatim` replays the clock from the last statement it
+    # emitted, so the sleep a Pause writes has to carry it forward: without
+    # that, the interruption is waited out once as the Pause and again as the
+    # gap after it, and a 2.5s recording becomes 4.5s of waiting -- on the one
+    # value whose whole point is replaying the recorded clock.
+    source = render(
+        MouseMove(timestamp=0.5, target=Target(x=200, y=200, window=window)),
+        Pause(timestamp=1.0, seconds=2.0),
+        MouseMove(timestamp=3.0, target=Target(x=210, y=200, window=window)),
+        motion="verbatim",
+        locators="absolute",
+    )
+    assert source.count("gui.wait(") == 2
+    assert "gui.wait(0.500)" in source  # the gap before the idle began
+    assert "gui.wait(2.00)" in source  # the idle itself, once
+    assert "gui.wait(2.000)" not in source  # not again as the gap that ended it
+
+
 def test_teleport_motion_is_unchanged_and_still_the_default(window):
     # The whole reason it is the default: a recording nobody asked anything of
     # comes out exactly as it did before this option existed.
@@ -1415,7 +1621,83 @@ def test_natural_motion_is_one_call_and_carries_no_waypoints(window):
     assert validate(source) == []
 
 
-def test_a_straight_route_needs_no_waypoints_even_when_recorded(window):
+def test_a_natural_move_that_started_at_a_rest_keeps_the_route_it_took(window):
+    # Live, on MATE: the pointer rested on the Applications menu's first row --
+    # which is what opens that row's submenu -- and then travelled right and
+    # *down the submenu column* to the item it clicked. Collapsed into one leg
+    # and shaped, the path bows by a fraction of that leg (pyguitest's own
+    # `arc`), which crosses the menu's other rows; each of those opens its own
+    # submenu on the way past, so the click landed on an item the recording
+    # never chose and the application never opened. The route *is* the
+    # interaction here, not travel between two places.
+    rest = moves(window, (57, 40), dwell=0.6)[0]
+    source = render(
+        rest,
+        *menu_route(window),
+        motion="natural",
+        locators="absolute",
+    )
+    route = [ast.literal_eval(point) for point in waypoints(source)]
+    assert route, "the route through the menu was dropped"
+    # Right along the first row, then down inside the submenu column: the part
+    # of the trip below that row never goes back across the menu's own width.
+    below_the_first_row = [(x, y) for x, y in route if y > 100]
+    assert below_the_first_row
+    assert all(x > 200 for x, _ in below_the_first_row)
+    assert validate(source) == []
+
+
+def test_a_natural_move_that_ended_at_a_rest_keeps_the_route_it_took(window):
+    # The other end of the same rule. Where the pointer comes to rest is where
+    # something reacted to it, and it got there by the path it took.
+    source = render(
+        *menu_route(window),
+        moves(window, (212, 345), dwell=0.6)[0],
+        motion="natural",
+        locators="absolute",
+    )
+    assert waypoints(source)
+    assert validate(source) == []
+
+
+def test_a_natural_move_with_no_rest_next_to_it_is_still_shaped_and_route_free(window):
+    # The reason `natural` still exists: a movement with nothing settled on
+    # either side of it is travel, and shaping travel is what it is for. Same
+    # route as the test above, no rest: no waypoints.
+    source = render(*menu_route(window), motion="natural", locators="absolute")
+    assert source.count("gui.move_mouse_naturally(") == 1
+    assert waypoints(source) == []
+    assert validate(source) == []
+
+
+def test_a_straight_move_that_touched_a_rest_still_needs_no_waypoints(window):
+    # Collinear samples carry nothing the endpoints do not, rest or no rest --
+    # a `via` here would be claiming a route that was never there.
+    source = render(
+        moves(window, (200, 200), dwell=0.5)[0],
+        *moves(window, (240, 200), (280, 200), (320, 200)),
+        motion="natural",
+        locators="absolute",
+    )
+    assert waypoints(source) == []
+
+
+def test_a_click_between_movements_does_not_confuse_the_run_split(window):
+    # A click has no dwell -- only a pointer position does -- and every event
+    # is being asked about, not only the movements. Raising an AttributeError
+    # here is how the run splitter announced that it had assumed otherwise.
+    # Three calls, not two: each run folds to one, and the click positions the
+    # pointer for itself again.
+    source = render(
+        *moves(window, (10, 10), (40, 40)),
+        Click(target=Target(x=60, y=60, window=window)),
+        *moves(window, (90, 90), (120, 120)),
+        motion="natural",
+        locators="absolute",
+    )
+    assert source.count("gui.move_mouse_naturally(") == 3
+    assert "gui.click()" in source
+    assert validate(source) == []
     # Collinear samples carry nothing the endpoints do not, so a `via` here
     # would be claiming a route that was never there.
     source = render(

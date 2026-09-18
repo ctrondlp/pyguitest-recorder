@@ -41,6 +41,24 @@ def test_sections_are_flattened(tmp_path):
     assert settings.locators == "absolute"
 
 
+def test_a_key_works_under_any_heading_at_all(tmp_path):
+    # A section is grouping for whoever reads the file, not a namespace the
+    # loader knows the names of. Reading only a fixed list of section names
+    # meant a block under any other heading did nothing at all, silently --
+    # the newest way for a setting to be ignored without saying so.
+    path = tmp_path / "c.toml"
+    path.write_text("[my-own-heading]\nmotion_threshold = 25\n")
+    settings, _ = load_settings(path)
+    assert settings.motion_threshold == 25
+
+
+def test_an_unknown_key_is_refused_under_any_heading_at_all(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[my-own-heading]\nnonsense = 1\n")
+    with pytest.raises(ConfigError, match="unknown setting"):
+        load_settings(path)
+
+
 def test_top_level_keys_also_work(tmp_path):
     path = tmp_path / "c.toml"
     path.write_text("record_raw = true\n")

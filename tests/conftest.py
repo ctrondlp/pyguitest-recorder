@@ -30,6 +30,10 @@ class FakeResolver:
                 break
         return Target(x=x, y=y, screen=screen, window=self.window, element=element)
 
+    def resolve_window(self, x, y, screen=0):
+        """The window only, as the recorder asks for a recorded move."""
+        return Target(x=x, y=y, screen=screen, window=self.window)
+
     def inspect(self, x, y, screen=0):
         return Observation(
             target=self.resolve(x, y, screen),

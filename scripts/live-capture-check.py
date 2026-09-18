@@ -13,6 +13,7 @@ this at a real session would capture whatever else you happened to type.
 
     scripts/live-capture-check.py              # start Xvfb, run, tear down
     scripts/live-capture-check.py --display :5 # use a server already running
+    scripts/live-capture-check.py --record-motion   # the costly setting too
 
 Xvfb is the requirement (`xorg-x11-server-Xvfb` on Fedora, `xvfb` on Debian).
 A rootless XWayland is *not* a substitute: the compositor owns the pointer
@@ -255,6 +256,29 @@ def start_second_window(display: str) -> subprocess.Popen[bytes] | None:
     return app if app.poll() is None else None
 
 
+def sweep_pointer(connection, xtest, motion, *, start, end, steps: int = 60) -> None:
+    """Walk the pointer between two points, the way a hand crosses a window.
+
+    The one input shape that makes recorded motion expensive, and the shape
+    nothing else in this check produces: one event per *position* rather than
+    one per action. With `record_motion` on that is what a recording spends its
+    whole time consuming, and it is what a recorder that cannot keep up falls
+    behind on. Deliberately not the `point` helper inside `send_input`, whose
+    0.2s pause per step exists to make each move stand as its own hover-able
+    event, and which would turn sixty positions into twelve seconds of input.
+    """
+    for step in range(steps):
+        fraction = step / steps
+        xtest.fake_input(
+            connection,
+            motion,
+            x=int(start[0] + (end[0] - start[0]) * fraction),
+            y=int(start[1] + (end[1] - start[1]) * fraction),
+        )
+        connection.sync()
+        time.sleep(0.005)
+
+
 def send_input(
     display: str,
     rectangle: tuple[int, int, int, int],
@@ -309,14 +333,25 @@ def send_input(
         The intermediate points are what makes it a drag: they are what the
         recorder sees between the press and the release, where a single jump
         would be a press and a release with nothing in between.
+
+        They bow, too. A straight interpolation is a straight route, and a
+        straight route is the one case where the recorded path adds nothing --
+        so a check meant to exercise the path has to be curved, or it agrees
+        with any amount of dropping it. See `sweep_pointer` for the same
+        reasoning about motion at all.
         """
         point(from_x, from_y)
         xtest.fake_input(connection, X.ButtonPress, 1)
         connection.sync()
+        bow = 18 if to_y >= from_y else -18
         for step in range(1, 6):
+            fraction = step / 5
+            # An arc: furthest from the straight line halfway along, back on it
+            # at both ends, so the route has a shape to record.
+            arc = int(bow * 4 * fraction * (1 - fraction))
             point(
-                from_x + (to_x - from_x) * step // 5,
-                from_y + (to_y - from_y) * step // 5,
+                from_x + int((to_x - from_x) * fraction),
+                from_y + int((to_y - from_y) * fraction) + arc,
             )
         xtest.fake_input(connection, X.ButtonRelease, 1)
         connection.sync()
@@ -325,6 +360,15 @@ def send_input(
     x, y, width, height = rectangle
     point(x + width // 2, y + height // 2)
     click()
+    # Sixty positions across the window, before anything else is done: cheap to
+    # ignore and the only thing that costs anything to record.
+    sweep_pointer(
+        connection,
+        xtest,
+        X.MotionNotify,
+        start=(x + 20, y + 20),
+        end=(x + width - 20, y + height - 20),
+    )
     for char in "Ada":
         tap(key(char)) if char.islower() else tap(key("Shift_L"), key(char.lower()))
     tap(key("Control_L"), key("s"))
@@ -349,19 +393,30 @@ def send_input(
     connection.sync()
     time.sleep(0.5)
     # The panic key, which is also the only way a real recording ends without
-    # the terminal it was started from. Exercised here rather than described.
+    # the terminal it was started from. Exercised here rather than described --
+    # and pressed *twice*, because the default chord is two presses: a single
+    # press that never finds a second is handed on and recorded as the
+    # application's own keystroke, which is the behaviour that keeps "press
+    # Escape to close the dialog" recordable. This used to tap it once and let
+    # the watchdog end the run, so the stop key was never exercised at all.
+    tap(key("Pause"))
+    time.sleep(0.4)
     tap(key("Pause"))
     time.sleep(0.5)
     connection.close()
 
 
-def check(display: str) -> int:
+def check(display: str, record_motion: bool = False) -> int:
     """Capture, render, and report. Returns the process exit status.
 
     Driven through `Recorder` rather than the capture backend alone, so the
     window resolver, the environment block and the panic key are exercised too
     -- a bare `Normalizer` resolves nothing, which leaves every inference rule
     with no evidence to work from and proves much less than it appears to.
+
+    `record_motion` turns on the one setting whose cost is the reason this
+    check has a note about falling behind in it at all: every pointer position
+    is resolved and emitted, rather than only where the pointer rested.
     """
     os.environ["DISPLAY"] = display
     reason = unavailable_reason()
@@ -370,7 +425,12 @@ def check(display: str) -> int:
 
     app = start_app(display)
     second_app = start_second_window(display)
-    settings = Settings(display=display, record_raw=True, stop_key="Pause")
+    settings = Settings(
+        display=display,
+        record_raw=True,
+        stop_key="Pause",
+        record_motion=record_motion,
+    )
     recorder = Recorder(settings=settings)
     recorder.start()
     print(f"capturing on {display}")
@@ -479,6 +539,12 @@ def report(recording: Recording) -> None:
                 f"geometry={target.window.geometry if target.window else None}"
             )
     print("screens:", recording.environment.screens)
+    for event in recording.events:
+        route = getattr(event, "route", None)
+        if route:
+            print(
+                f"    route: {len(route)} points recorded in a {type(event).__name__}"
+            )
     for note in recording.environment.notes:
         print(f"    note: {note}")
 
@@ -514,6 +580,12 @@ def main() -> int:
         help="a private X server to use; without this one is started and stopped",
     )
     parser.add_argument("--number", type=int, default=99, help="display for Xvfb")
+    parser.add_argument(
+        "--record-motion",
+        action="store_true",
+        help="record every pointer position rather than only the rests, which is "
+        "the setting whose cost this check exists to measure",
+    )
     args = parser.parse_args()
 
     reexec_on_a_private_bus()
@@ -526,7 +598,7 @@ def main() -> int:
             display = f":{args.number}"
         a11y = start_a11y_bus()
         print("accessibility bus:", "private" if a11y else "none (elements off)")
-        return check(display)
+        return check(display, record_motion=args.record_motion)
     except Failure as exc:
         print(f"live-capture-check: {exc}", file=sys.stderr)
         return 2

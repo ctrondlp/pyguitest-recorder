@@ -12,6 +12,7 @@ from pyguitest_recorder.model import (
     Drag,
     ElementRef,
     KeyStroke,
+    MouseMove,
     Pause,
     Recording,
     Target,
@@ -293,6 +294,38 @@ def test_typing_does_not_count_as_switching_windows():
     ]
     out = infer_synchronization(events)
     assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_a_move_into_another_window_does_not_raise_it():
+    # A bare move says where the pointer is, not what it is doing there. Seen
+    # live: a recording that crossed the desktop on its way to the panel came
+    # out with `focus_window(<the desktop>)` for the crossing back, and a raise
+    # part-way through a script puts a window in front of whatever the next
+    # line was about to use. The dwell makes this one a hover; the check is the
+    # same either way, dwell-less motion included.
+    events = [
+        click(1.0, window=MAIN),
+        click(2.0, window=DIALOG),
+        MouseMove(timestamp=3.0, target=Target(x=1, y=1, window=MAIN), dwell=0.5),
+        click(4.0, window=DIALOG),
+    ]
+    out = infer_synchronization(events)
+    assert not [e for e in out if isinstance(e, WindowActivate)]
+
+
+def test_the_click_back_after_a_move_still_raises_where_it_is_needed():
+    # What a move must not do is *count* as acting in the window underneath:
+    # a click that genuinely returns to one is still a return, and still asks
+    # for its raise -- at the click, which is where it is needed.
+    events = [
+        click(1.0, window=MAIN),
+        click(2.0, window=DIALOG),
+        MouseMove(timestamp=3.0, target=Target(x=1, y=1, window=MAIN)),
+        click(4.0, window=MAIN),
+    ]
+    raised = [e for e in infer_synchronization(events) if isinstance(e, WindowActivate)]
+    assert [e.window.app_id for e in raised] == ["org.x.Editor"]
+    assert raised[0].timestamp == 4.0
 
 
 def test_the_raise_survives_into_the_generated_script():

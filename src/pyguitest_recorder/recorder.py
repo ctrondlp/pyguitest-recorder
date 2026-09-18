@@ -23,16 +23,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-from .analyzer import (
-    MODIFIERS,
-    Normalizer,
-    NormalizerOptions,
-    chord_matches,
-    parse_chord,
-)
+from .analyzer import Normalizer, NormalizerOptions
 from .backends.base import CaptureBackend, CaptureUnavailable
 from .config import Settings
 from .model import Assertion, Environment, Recording
+from .stopkey import StopKey
 from .windows import ContextResolver, DesktopResolver, NullResolver
 
 __all__ = [
@@ -43,6 +38,53 @@ __all__ = [
     "probe_context",
     "scoped_environment",
 ]
+
+
+_LAG_WARN_SECONDS = 1.0
+"""How far behind live input the recorder may fall before it says so.
+
+Consuming an event is not free -- a window lookup, and for a hover or a click
+the element hit-test behind it as well -- so a busy recording consumes slower
+than the hand making it. Two things make that worth saying rather than hiding.
+The stop key is read off the same stream, so until the backlog has been worked
+through a stop press cannot be answered at all, which looks exactly like a stop
+key that does not work. And the queue lives only in memory: whatever is still
+in it when the run ends is gone.
+"""
+
+_LAG_REPORT_INTERVAL = 5.0
+"""Seconds between "still behind" reports.
+
+Once per event would be a wall of them on a recording that is behind by
+minutes, which is precisely the recording that produces them.
+"""
+
+
+def _lag_note(lag: float, stopped_at: float | None) -> str:
+    """What to say about a recording that fell behind the input it consumed.
+
+    Two endings, and they are not the same story. A run that ended at the stop
+    key's own press has everything before that press in it, because the backend
+    ends the stream where the chord completed -- so what is missing is what was
+    done *after* the press, while the recorder was still catching up to it,
+    which is exactly the input a late stop tempts someone into making. A run
+    that ended any other way has no such boundary: whatever was still queued
+    when it ended is only as complete as `CaptureBackend.drain` could collect,
+    and saying so is the whole point of the note.
+    """
+    if stopped_at is not None:
+        return (
+            f"the recorder fell {lag:.1f}s behind live input, so the stop key "
+            "took about that long to answer: this recording ends at the press "
+            "itself, and anything done while waiting for the recorder to catch "
+            "up to it is not in this recording"
+        )
+    return (
+        f"the recorder fell {lag:.1f}s behind live input before the run ended, "
+        "so the end of this recording may be missing: an event costs a window "
+        "lookup to consume, more when it names an element, and only what "
+        "capture had already delivered could be collected"
+    )
 
 
 @dataclass
@@ -100,7 +142,15 @@ def choose_backend(settings: Settings) -> CaptureBackend:
     reason = unavailable_reason()
     if reason is not None:
         raise CaptureUnavailable(reason)
-    return X11CaptureBackend(display=settings.display, screen=settings.screen)
+    # Handed the stop key so capture can end the stream where the chord
+    # completed, rather than only where the consumer finally reaches it -- see
+    # `stopkey`. It is a second recogniser over the same stream, from the same
+    # settings, so the two cannot disagree about what stops a recording.
+    return X11CaptureBackend(
+        display=settings.display,
+        screen=settings.screen,
+        stop_key=StopKey.from_settings(settings),
+    )
 
 
 def describe_environment(
@@ -194,15 +244,40 @@ class Recorder:
     this rather than `Recorder` needing to know how to print anything.
     """
 
+    on_lag: Callable[[float], None] | None = None
+    """Called with how many seconds behind live input the recorder is.
+
+    Fired when that crosses `_LAG_WARN_SECONDS`, and then at most once per
+    `_LAG_REPORT_INTERVAL` for as long as it stays there. `None` (the default)
+    reports nothing, matching `on_stop_progress`: the recording carries the
+    fact in its own notes either way, so a caller wanting it live sets this.
+    """
+
     _backend: CaptureBackend | None = field(default=None, init=False)
     _session: Any = field(default=None, init=False)
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
-    _stop_pending: list[Any] = field(default_factory=list, init=False)
-    _mods: set[str] = field(default_factory=set, init=False)
-    _stop_passed: int = field(default=0, init=False)
-    """Stop-key presses that were handed on rather than ending the run."""
+    _stop_key: StopKey = field(init=False)
+    """The stop-key recogniser, from the settings this recorder was built with.
+
+    One here and another inside the capture backend, both from the same
+    settings and both fed the same stream -- see `stopkey`. Built up front
+    rather than on demand because the settings cannot change afterwards:
+    `merged` returns a new `Settings` and the caller builds the recorder with
+    it, so a recogniser that disagreed with the file would be a bug, not a
+    feature.
+    """
+
+    _worst_lag: float = field(default=0.0, init=False)
+    """The furthest behind live input consumption ever fell during this run."""
+
+    _lag_reported_at: float = field(default=0.0, init=False)
+    """When `on_lag` was last called, so it is not called per event."""
+
+    def __post_init__(self) -> None:
+        """Build the recogniser this recorder's settings ask for."""
+        self._stop_key = StopKey.from_settings(self.settings)
 
     def __enter__(self) -> Recorder:
         """Open the capture backend and the context session."""
@@ -256,20 +331,33 @@ class Recorder:
         """
         if self._backend is None or self._normalizer is None:
             raise RuntimeError("start() must be called before run()")
+        interrupted = False
         try:
             for raw in self._backend.events():
-                ready, stop = self._stop_sequence(raw)
-                if stop:
+                if self._absorb(raw):
                     break
-                self._consume(ready)
         except KeyboardInterrupt:
-            pass
+            interrupted = True
+        if interrupted:
+            # Nothing has been consumed since the interrupt, so the backend's
+            # queue is the only copy of what capture already delivered. An
+            # interrupted run is one the user was still making, so its tail
+            # belongs in the recording -- and sorting it in the same way as
+            # live input means a stop press that could not be answered while
+            # the recorder was behind still ends the run, instead of landing
+            # in the script as a hundred keystrokes.
+            for raw in self._backend.drain():
+                if self._absorb(raw):
+                    break
         # Presses held for a stop run that never completed are the
         # application's, not the recorder's, so they belong in the recording.
-        self._consume(self._stop_pending)
-        self._stop_pending = []
+        self._consume(self._stop_key.release())
         for event in self._normalizer.flush():
             self.recording.add(event)
+        if self._worst_lag > _LAG_WARN_SECONDS:
+            self.recording.environment.notes.append(
+                _lag_note(self._worst_lag, self._stop_pressed_at())
+            )
         self._collect_warnings()
         return self.recording
 
@@ -284,7 +372,52 @@ class Recorder:
         close the dialog" recordable) but it surprises people exactly once, and
         a line at the end costs nothing.
         """
-        return self._stop_passed
+        return self._stop_key.passed
+
+    def _stop_pressed_at(self) -> float | None:
+        """When the backend's own stop recognition ended the stream, if it did.
+
+        Read off the backend rather than tracked here, because on a recording
+        that fell behind, the press that ended it was *consumed* long after it
+        was made -- so what capture saw is the only honest answer about which
+        way the run ended. `getattr` because a backend is free not to recognise
+        the chord itself, in which case this recogniser is what ends the run and
+        the note has to read the other way round.
+        """
+        return getattr(self._backend, "stop_pressed_at", None)
+
+    def _absorb(self, raw: Any) -> bool:
+        """Sort one raw event in, live or collected. True means stop.
+
+        The two sources of events differ only in where they came from, so they
+        are sorted the same way: a stop press in the collected tail has to mean
+        what it would have meant live, or an interrupted run would hand the
+        application's escape presses to the script as keystrokes.
+        """
+        self._note_lag(raw)
+        keep, stop = self._stop_sequence(raw)
+        if not stop:
+            self._consume(keep)
+        return stop
+
+    def _note_lag(self, raw: Any) -> None:
+        """Notice when consumption has fallen behind the input it is consuming.
+
+        Capture stamps every event with the same monotonic clock, so the age of
+        the event in hand *is* the backlog: the recording is that far behind
+        the hand that made it. Worth knowing live, because the stop key cannot
+        be answered from behind a backlog, and worth keeping afterwards,
+        because whatever is still queued when the run ends is lost.
+        """
+        now = _now()
+        lag = now - getattr(raw, "timestamp", now)
+        if lag <= _LAG_WARN_SECONDS:
+            return
+        self._worst_lag = max(self._worst_lag, lag)
+        if self.on_lag is None or now - self._lag_reported_at < _LAG_REPORT_INTERVAL:
+            return
+        self._lag_reported_at = now
+        self.on_lag(lag)
 
     def _consume(self, raws: list[Any]) -> None:
         """Record and normalize raw events that are known not to be the stop key."""
@@ -320,77 +453,39 @@ class Recorder:
         screen, which is most of the time. So the stop key is read here,
         before normalization, and swallowed.
 
-        The default is Escape pressed twice, which needs more than matching a
-        keysym: a single Escape belongs to the application being recorded, so
-        presses are held until the run either completes -- and the recording
-        ends, discarding them -- or is broken, at which point they are handed
-        on in order and recorded like any other key. That is what keeps
-        "press Escape to close the dialog" recordable while Escape is also
-        what stops the recording. Nothing is held across the end of the
-        stream: `run` flushes whatever is pending before finishing.
-        """
-        held = self._modifiers_after(raw)
-        if not self._is_stop_event(raw, held):
-            pending, self._stop_pending = self._stop_pending, []
-            self._stop_passed += sum(1 for e in pending if e.kind == "key_press")
-            return ([*pending, raw], False)
-        if self._stop_pending and (
-            raw.timestamp - self._stop_pending[-1].timestamp
-            > self.settings.stop_key_interval
-        ):
-            # Too slow to be one run, so the earlier presses were the
-            # application's and this one starts a new run of its own.
-            pending, self._stop_pending = self._stop_pending, [raw]
-            self._stop_passed += sum(1 for e in pending if e.kind == "key_press")
-            self._report_stop_progress(raw)
-            return (pending, False)
-        self._stop_pending.append(raw)
-        presses = sum(1 for e in self._stop_pending if e.kind == "key_press")
-        if presses >= max(1, self.settings.stop_key_presses):
-            self._stop_pending = []
-            return ([], True)
-        self._report_stop_progress(raw)
-        return ([], False)
+        The state machine itself is `StopKey.feed`, which the capture backend
+        runs over the same stream -- see `stopkey`. The default is Escape
+        pressed twice, and what that needs beyond matching a keysym is there:
+        a single Escape belongs to the application being recorded, so presses
+        are held until the run either completes -- and the recording ends,
+        discarding them -- or is broken, at which point they are handed on in
+        order and recorded like any other key. That is what keeps "press Escape
+        to close the dialog" recordable while Escape is also what stops the
+        recording. Nothing is held across the end of the stream: `run` releases
+        whatever is pending before finishing.
 
-    def _report_stop_progress(self, raw: Any) -> None:
+        What lives here is what the answer means for a *recording*, and the one
+        thing a stream cannot know: that a press which registered but did not
+        complete the run is worth saying out loud, because a single Escape has
+        no visible effect and silence reads as the key not working.
+        """
+        outcome = self._stop_key.feed(raw)
+        if outcome.registered:
+            self._report_stop_progress()
+        return (outcome.record, outcome.stop)
+
+    def _report_stop_progress(self) -> None:
         """Tell `on_stop_progress` how many stop-key presses have registered.
 
-        Only on a press, not a release: a release enters `_stop_pending` too
-        (see `_is_stop_event`), but what someone waiting to see whether their
-        press was seen wants counted is presses, not the release in between
-        them.
+        Only on a press, and never on the one that completes the run: what
+        someone waiting to see whether their press was seen wants counted is
+        presses, not the release in between them -- and a completed run needs no
+        line, because the recording ending is the line.
         """
-        if self.on_stop_progress is None or raw.kind != "key_press":
+        if self.on_stop_progress is None:
             return
-        presses = sum(1 for e in self._stop_pending if e.kind == "key_press")
-        self.on_stop_progress(presses, max(1, self.settings.stop_key_presses))
-
-    def _is_stop_event(self, raw: Any, held: set[str]) -> bool:
-        """Whether this event belongs to a run of stop-key presses.
-
-        Releases count as belonging to the run without advancing it, so the
-        release between two presses does not read as the run being broken.
-        """
-        if raw.kind not in ("key_press", "key_release"):
-            return False
-        if raw.kind == "key_release":
-            _, key = parse_chord(self.settings.stop_key)
-            return bool(key) and raw.keysym == key and bool(self._stop_pending)
-        return chord_matches(self.settings.stop_key, held, raw.keysym)
-
-    def _modifiers_after(self, raw: Any) -> set[str]:
-        """Track which modifiers are down, which the normalizer cannot do for us.
-
-        The stop key is recognized before normalization by design, so its
-        modifier state has to be tracked here as well as there.
-        """
-        modifier = MODIFIERS.get(getattr(raw, "keysym", "") or "")
-        if modifier is not None:
-            if raw.kind == "key_press":
-                self._mods.add(modifier)
-            elif raw.kind == "key_release":
-                self._mods.discard(modifier)
-        return self._mods
+        needed = max(1, self.settings.stop_key_presses)
+        self.on_stop_progress(self._stop_key.pending_presses, needed)
 
     def stop(self) -> None:
         """Stop capture and close everything opened by `start`."""

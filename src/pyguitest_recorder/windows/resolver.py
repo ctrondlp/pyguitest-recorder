@@ -94,6 +94,16 @@ class ContextResolver(Protocol):
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the target at this point, with whatever context is available."""
 
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the target at this point with no element looked up.
+
+        For events whose element is never read: a pointer move is rendered as a
+        coordinate and the origin of the window it was in, and nothing else, so
+        the element half of `resolve` is a cost with no buyer -- and it is the
+        expensive half, an accessibility hit-test rather than a window list
+        lookup. `record_motion` would pay it once per motion event.
+        """
+
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Return the target at this point along with what it currently reads."""
 
@@ -110,6 +120,10 @@ class NullResolver:
 
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the point with no context attached."""
+        return Target(x=x, y=y, screen=screen)
+
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the point with no context attached; this floor has no windows."""
         return Target(x=x, y=y, screen=screen)
 
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
@@ -156,6 +170,10 @@ class DesktopResolver:
     _resolves_elements: bool = field(default=False, init=False)
     _warned: list[str] = field(default_factory=list, init=False)
     _scaled: bool = field(default=False, init=False)
+    _motion_cache: tuple[int, Any] | None = field(default=None, init=False)
+    """The screen and window the last lookup answered, for a recorded move to
+    reuse -- see `_recent_window`. Set by `_window`, so a click leaves the
+    motion path a warm answer behind it."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -300,6 +318,60 @@ class DesktopResolver:
         if element is not None and not self._belongs(element, window):
             return Target(x=x, y=y, screen=screen, window=window)
         return Target(x=x, y=y, screen=screen, window=window, element=element)
+
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the toplevel under this point, looking for no element in it.
+
+        The window still has to be right: every coordinate rendered from this
+        target is an offset into that window's origin, so skipping the window
+        too would turn a window-relative move into a bare screen coordinate.
+        What is skipped is the accessibility hit-test -- the half nothing reads
+        for a move, and the half that costs a round trip to the application.
+
+        What is skipped *after the first event* is the hit test as well: a
+        pointer moving inside one window is the common case by far, so
+        `_recent_window` answers from the last lookup for as long as this point
+        is inside the rectangle that lookup covered. The rectangle itself is
+        read again every time, so a window that moved is noticed exactly as
+        before; what goes away is a window list and a geometry read per window
+        on the desktop, hundreds of times a second. Measured live before that:
+        572 motion events over a 21-second session left the recorder 4.6s
+        behind the hand making it, with the input piling up in the capture
+        queue and the stop key answered only once the backlog had been worked
+        through.
+        """
+        window = self._recent_window(x, y, screen)
+        if window is None:
+            window = self._window(x, y, screen)
+        return Target(x=x, y=y, screen=screen, window=window)
+
+    def _recent_window(self, x: int, y: int, screen: int) -> WindowRef | None:
+        """The window the last lookup answered, if it still covers this point.
+
+        A recorded move needs a window for one reason -- the origin its
+        coordinate is rendered against -- and a pointer crossing one window asks
+        the same question hundreds of times a second. The rectangle is read
+        afresh on every call rather than cached with the identity, so a window
+        that moved or resized is answered for where it is *now*, which is what
+        the rest of this file depends on: the origin a coordinate is rendered
+        against has to be the origin it had when the coordinate was captured.
+        Nothing else is re-derived -- the identity was settled the first time
+        this window was seen and deliberately does not move, see `_identify`.
+        """
+        cached = self._motion_cache
+        if cached is None:
+            return None
+        cached_screen, window = cached
+        if cached_screen != screen:
+            return None
+        described = self._describe(window)
+        geometry = described.geometry
+        if geometry is None:
+            return None
+        wx, wy, width, height = geometry
+        if wx <= x < wx + width and wy <= y < wy + height:
+            return described
+        return None
 
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Resolve this point and read the state of whatever is under it.
@@ -628,6 +700,10 @@ class DesktopResolver:
             return None
         if window.pid in self.ignore_pids:
             return None
+        # Kept for the motion path, which asks the same question once per
+        # pointer event -- see `resolve_window`. A click resolving a window
+        # leaves exactly the answer the moves after it would have got.
+        self._motion_cache = (screen, window)
         return self._describe(window)
 
     def _resolve_window(self, x: int, y: int, screen: int) -> Any:

@@ -262,7 +262,7 @@ class GeneratorOptions:
     locators: Literal["element", "relative", "absolute"] = "element"
     """Preferred locator. Each falls back to the next on the way to absolute."""
 
-    motion: Literal["teleport", "natural", "recorded"] = "teleport"
+    motion: Literal["teleport", "natural", "recorded", "verbatim"] = "teleport"
     """How to render a pointer move. Off is the old behaviour, deliberately.
 
     `teleport` is `gui.move_mouse()`, exactly as recorded: the pointer is never
@@ -279,8 +279,18 @@ class GeneratorOptions:
     for a recording whose hover and approach behaviour matters.
 
     `recorded` goes further and puts the route itself back, as `via=` waypoints
-    thinned to the corners that mattered. It is the only one of the three that
-    can make a script long, which is why it is asked for rather than assumed.
+    thinned to the corners that mattered. It is one of the two that can make a
+    script long, which is why it is asked for rather than assumed.
+
+    `verbatim` is every position the recording has, each with the wait that
+    preceded it -- the only value that replays the *timing* too, since every
+    other one drops it and leaves the travel to a shaper or to no clock at all.
+    That is what a gesture whose meaning is in when the pointer was where needs:
+    a menu row that opens its submenu once the pointer has hovered it, and pops
+    down when the pointer leaves for long enough, is decided by those intervals
+    and not by the route alone. It is the longest by a wide margin -- a few
+    hundred positions per few seconds of motion, so a thousand-line script for
+    one menu trip -- and it wants `record_motion` for anything to replay.
     """
 
     max_waypoints: int = 32
@@ -375,6 +385,15 @@ class _State:
     bare_click_pending: bool = False
     """Whether the last line emitted was a coordinate click with nothing --
     no wait, no other action -- after it. See _COORDINATE_CLICK_SETTLE."""
+    replayed_until: float | None = None
+    """The recording time the script has replayed up to, under `verbatim`.
+
+    None until the first event is rendered -- the recording's own opening gap
+    is not something a script should sleep through, and there is no earlier
+    statement to measure it from. A hover advances this past its own wait, so
+    the position that leaves the rest is not charged for the dwell twice. Only
+    `_wait_for_gap` reads it.
+    """
     secrets: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     element_scopes: dict[_ElementKey, tuple[str, str]] = field(default_factory=dict)
@@ -404,49 +423,87 @@ class _MotionRun:
 
     moves: tuple[MouseMove, ...]
 
+    touches_a_rest: bool = False
+    """Whether the pointer had settled at either end of this movement.
+
+    The one thing a recording can say about whether a movement was *steering*
+    or merely travelling: a run that begins or ends where the pointer came to
+    rest was made by someone positioning it, so where it went on the way is
+    part of what the recording did. `_emit_motion_run` keeps the route for one
+    of these whichever shaping was asked for.
+    """
+
     @property
     def last(self) -> MouseMove:
         """Where the movement ended -- the only position it has to reach."""
         return self.moves[-1]
 
 
-def _flush_run(run: Sequence[MouseMove]) -> list[Event | _MotionRun]:
+def _flush_run(
+    run: Sequence[MouseMove], *, after_a_rest: bool, before_a_rest: bool
+) -> list[Event | _MotionRun]:
     """One movement for a run of positions, or the positions if there is one.
 
     A single position is not a run: rendering it through the same path as a
     real one would add a call that means nothing.
+
+    `after_a_rest` and `before_a_rest` say whether the event on either side of
+    the run was a hover, which is what `_MotionRun.touches_a_rest` is built
+    from -- the run is being described by its neighbours, so it has to be told
+    about them here rather than left to work them out later.
     """
-    return [_MotionRun(tuple(run))] if len(run) > 1 else list(run)
+    if len(run) < 2:
+        return list(run)
+    return [_MotionRun(tuple(run), touches_a_rest=after_a_rest or before_a_rest)]
 
 
-def _same_frame(first: MouseMove, second: MouseMove) -> bool:
-    """Whether two positions share a window, a screen, and a window origin.
+def _same_frame(first: Target, second: Target) -> bool:
+    """Whether two points share a screen, a window, and a window origin.
 
     The origin is the one that is not obvious. A relative coordinate is an
-    offset into where its window was *at the moment that event was captured*,
-    and one `via=[...]` renders every point of it against a single
-    `window_x`/`window_y` read -- so a window that moved partway through the
-    run would have its earlier points measured from an origin the script no
-    longer has. `_ensure_geometry` exists for that same reason within a single
-    event; this is the version of it that spans a run.
+    offset into where its window was *at the moment it was captured*, and one
+    `via=[...]` renders every point of it against a single `window_x`/`window_y`
+    read -- so a window that moved partway through the points would have its
+    earlier ones measured from an origin the script no longer has.
+    `_ensure_geometry` exists for that same reason within a single event; this
+    is the version of it that spans several.
     """
     return (
-        first.target.screen == second.target.screen
-        and first.target.window == second.target.window
-        and getattr(first.target.window, "geometry", None)
-        == getattr(second.target.window, "geometry", None)
+        first.screen == second.screen
+        and first.window == second.window
+        and getattr(first.window, "geometry", None)
+        == getattr(second.window, "geometry", None)
     )
+
+
+_VERBATIM_WAIT_FLOOR = 0.001
+"""Shortest recorded gap under `motion = "verbatim"` still worth a statement.
+
+A pointer's own sample spacing lands around 6-8ms, so anything at or above a
+millisecond is real travel time and is replayed. Below it there is nothing to
+replay: `time.sleep` does not deliver sub-millisecond precision, and a
+`gui.wait(0.000)` between two moves would be a line of pure noise. Zero would
+still be the recorded order of the events, which is what the rest of the
+generator already gives without the wait.
+"""
 
 
 def _shaped(motion: str) -> bool:
     """Whether a `motion` value asks for a shaped move at all.
 
-    Only the two documented values do. An unrecognised one falls back to the
-    recorded behaviour rather than silently selecting one of the new ones --
+    Only the two shaped values do. `verbatim` deliberately does not: it is the
+    recorded positions and nothing else, so there is no path for pyguitest to
+    invent between them. An unrecognised value falls back to the recorded
+    behaviour rather than silently selecting one of the shaped ones --
     `load_settings` rejects an unknown *key*, but nothing validates a *value*,
     so `motion = "naturl"` reaches here intact.
     """
     return motion in ("natural", "recorded")
+
+
+def _is_rest(event: Event) -> bool:
+    """Whether this event is the pointer coming to rest -- what a dwell says."""
+    return isinstance(event, MouseMove) and event.dwell > 0
 
 
 def _group_motion(
@@ -456,28 +513,45 @@ def _group_motion(
 
     Returns the events untouched unless the setting asks for a shaped move,
     which renders every position it was handed, one `gui.move_mouse` per line
-    -- the behaviour every recording got before this option existed.
+    -- the behaviour every recording got before this option existed. `verbatim`
+    takes that path too, and keeps the recorded spacing between those lines;
+    see `_wait_for_gap`.
 
     Otherwise a run of positions becomes a single movement: `natural` keeps
     only where it ended, and `recorded` keeps the route between. Both are
     strictly shorter than the wall of teleports, which is the point -- that
     wall is what `record_motion` costs today.
+
+    Each movement is told whether the pointer had settled on either side of it
+    (`_MotionRun.touches_a_rest`). Only a dwell says that: a rest is where the
+    pointer stopped, so a run next to one is a move made from or to a place
+    the pointer was being *aimed* at. Anything else leaves the flag as it was,
+    because only a position moves the pointer -- and the asymmetry is
+    deliberate, since keeping a route is faithful and dropping one is a guess.
     """
     if not _shaped(options.motion):
         return list(events)
     grouped: list[Event | _MotionRun] = []
     run: list[MouseMove] = []
+    settled = False
     for event in events:
-        if not isinstance(event, MouseMove) or event.dwell:
-            grouped.extend(_flush_run(run))
+        if _is_rest(event) or not isinstance(event, MouseMove):
+            grouped.extend(
+                _flush_run(run, after_a_rest=settled, before_a_rest=_is_rest(event))
+            )
             run = []
             grouped.append(event)
+            settled = _is_rest(event)
             continue
-        if run and not _same_frame(run[-1], event):
-            grouped.extend(_flush_run(run))
+        if run and not _same_frame(run[-1].target, event.target):
+            # A window moved under the run, so this position belongs to the
+            # next one. What precedes that one is a position, not whatever
+            # settled before this one did.
+            grouped.extend(_flush_run(run, after_a_rest=settled, before_a_rest=False))
             run = []
+            settled = False
         run.append(event)
-    grouped.extend(_flush_run(run))
+    grouped.extend(_flush_run(run, after_a_rest=settled, before_a_rest=False))
     return grouped
 
 
@@ -755,13 +829,24 @@ class PythonGenerator:
         return _format(source) if self.options.format_output else source
 
     def _emit_motion_run(self, run: _MotionRun, state: _State) -> None:
-        """Render one movement: where it ended, and its route if asked for.
+        """Render one movement: where it ended, and its route where it needs one.
 
-        Under `natural` the route is dropped. The endpoints are the
-        recording's and pyguitest shapes what happens between them, which is
-        the same call length as a teleport and a much better account of the
-        travel -- the pointer is genuinely on the way, so a hover reveal or a
-        hot corner fires on the approach rather than at the destination.
+        Under `natural` a movement is normally the endpoints alone -- pyguitest
+        shapes what happens between them, which is a better account of travel
+        than a straight line and the same call length as a teleport.
+
+        Not for a movement that began or ended where the pointer had settled,
+        though. The route is then part of what the recording *did* rather than
+        travel between two places, and a shaped one is a different path. Seen
+        live, on MATE: the pointer rested on the Applications menu's first row
+        (which is what opens that row's submenu), then travelled right and *down
+        the submenu column* to the item it clicked. Collapsed into one leg, the
+        shaped path bows across the menu's other rows -- `arc` is a fraction of
+        the leg, pyguitest's own default -- each of which opens its own submenu
+        on the way past, so the click landed on an item the recording never
+        chose and the application the demo was opening never opened. Keeping the
+        route costs a `via=[...]` and is the only thing that replays that
+        interaction; `recorded` keeps every route that is not straight at all.
 
         Under `recorded` the route comes back as waypoints, thinned first (see
         `_thin`), so a few hundred motion events become the handful of points
@@ -769,7 +854,7 @@ class PythonGenerator:
         """
         state.capabilities.add("POINTER_MOVE")
         via: list[Target] = []
-        if self.options.motion == "recorded":
+        if self.options.motion == "recorded" or run.touches_a_rest:
             route = [move.target for move in run.moves[:-1]]
             # Straightness is asked of the whole route, destination included:
             # the recorded samples alone can all be collinear while the move
@@ -787,11 +872,42 @@ class PythonGenerator:
         if handler is None:
             state.warnings.append(f"no renderer for {type(event).__name__}")
             return
+        if self.options.motion == "verbatim":
+            # Before the note, not after it: the wait is what the recording did
+            # before this event, and the note is about the event itself.
+            self._wait_for_gap(event, state)
         if self.options.comments and event.note:
             state.lines.append(f"# {event.note}")
         if isinstance(event, _SEPARATES_CLICKS):
             state.bare_click_pending = False
         handler(event, state)
+
+    def _wait_for_gap(self, event: Event, state: _State) -> None:
+        """Sleep for the time the recording spent before this event.
+
+        The half of a recording that `natural` and `recorded` both drop: each
+        keeps a path and leaves the clock behind, so the pointer reaches the
+        right place at the wrong speed. What an interface saw between two
+        positions *is* the interval between them, and for a menu row held open
+        by a hover -- or popped down by leaving one for long enough -- that
+        interval is the input, not the route.
+
+        Gaps are measured between the events this script replays rather than
+        between the recording's events as written, so a hover's own wait covers
+        the dwell and the position that leaves the rest is not asked for it
+        again. Three decimals rather than the two every other wait here takes:
+        these are the millisecond intervals themselves, and 6ms rounded to
+        0.01 would be a 50% error on every one of them.
+        """
+        if state.replayed_until is None:
+            state.replayed_until = event.timestamp
+            return
+        gap = event.timestamp - state.replayed_until
+        state.replayed_until = max(state.replayed_until, event.timestamp)
+        if gap < _VERBATIM_WAIT_FLOOR:
+            return
+        state.capabilities.add("TIMING")
+        state.lines.append(f"gui.wait({gap:.3f})")
 
     def _emit_comment(self, event: Comment, state: _State) -> None:
         """Render a standalone comment."""
@@ -804,6 +920,15 @@ class PythonGenerator:
         if self.options.comments:
             state.lines.append("# no state change to synchronize on here")
         state.lines.append(f"gui.wait({event.seconds:.2f})")
+        if self.options.motion == "verbatim":
+            # A Pause is timestamped where the idle it stands for *began* (see
+            # `_gap`), so `_wait_for_gap` has only carried the clock as far as
+            # the idle's start -- while the event that ended that idle sits at
+            # the other end of the same seconds. Advancing the clock by the
+            # sleep just emitted is what stops the interruption being replayed
+            # twice, once as a Pause and again as the gap after it.
+            replayed = event.timestamp + event.seconds
+            state.replayed_until = max(state.replayed_until or 0.0, replayed)
 
     def _emit_sync(self, event: Sync, state: _State) -> None:
         """Round-trip the input stream."""
@@ -826,7 +951,13 @@ class PythonGenerator:
             " -- a hover, not a move on the way somewhere",
             state,
         )
-        state.lines.append(f"gui.wait({min(event.dwell, _HOVER_WAIT_CAP):.2f})")
+        waited = min(event.dwell, _HOVER_WAIT_CAP)
+        state.lines.append(f"gui.wait({waited:.2f})")
+        if self.options.motion == "verbatim":
+            # The wait just emitted *is* the recorded interval up to the
+            # position that leaves this rest, so the clock moves with it --
+            # otherwise that position would be waited for twice.
+            state.replayed_until = event.timestamp + waited
         state.bare_click_pending = False
 
     def _emit_click(self, event: Click, state: _State) -> None:
@@ -1088,6 +1219,7 @@ class PythonGenerator:
         while looking like it does.
         """
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON", "TIMING"})
+        button = "" if event.button == 1 else f", button={event.button}"
         if _dragged_its_own_window(event):
             self._comment(
                 "this drag moved the window it began in, so its endpoints are "
@@ -1098,14 +1230,48 @@ class PythonGenerator:
             start = f"{event.start.x}, {event.start.y}"
             end = f"{event.end.x}, {event.end.y}"
             state.pointer = None
-            button = "" if event.button == 1 else f", button={event.button}"
-            state.lines.append(f"gui.drag(({start}), ({end}){button})")
+            route = self._drag_route(event, state, screen_coordinates=True)
+            state.lines.append(f"gui.drag(({start}), ({end}){button}{route})")
             return
         start = self._point(event.start, state)
         end = self._point(event.end, state)
-        button = "" if event.button == 1 else f", button={event.button}"
-        state.lines.append(f"gui.drag(({start}), ({end}){button})")
+        route = self._drag_route(event, state, screen_coordinates=False)
+        state.lines.append(f"gui.drag(({start}), ({end}){button}{route})")
         state.pointer = end
+
+    def _drag_route(
+        self, event: Drag, state: _State, *, screen_coordinates: bool
+    ) -> str:
+        """The `via=` argument for a drag's recorded route, or nothing.
+
+        The route *is* the gesture, and pyguitest's `drag` glides between one
+        end and the other: without this a recorded curve replays as a straight
+        line, which is a different thing to have dragged. Points come thinned
+        to the corners the hand turned on, as a movement's do.
+
+        There are two ways to write one, and which is available decides itself.
+        When every point of the route shares a frame with the drag's end, the
+        whole list is measured against that window's origin -- one
+        `window_x`/`window_y` read serves it -- and reads like the rest of the
+        script. When it does not, because the drag crossed into another window
+        or a window moved underneath it, there is no single origin to measure
+        the list against, so every point is written as a screen coordinate
+        instead, exactly as the drag's own two ends are once its window has
+        moved. Screen coordinates are less portable and always valid; a route
+        without them is a gesture that did not happen.
+        """
+        one_frame = all(_same_frame(point, event.end) for point in event.route)
+        points = list(event.route)
+        if not points or _straight([*points, event.end]):
+            return ""
+        kept = _thin(points, self.options.max_waypoints)
+        rendered = []
+        for point in kept:
+            if screen_coordinates or not one_frame:
+                rendered.append(f"({point.x}, {point.y})")
+            else:
+                rendered.append(f"({self._point(point, state)})")
+        return f", via=[{', '.join(rendered)}]"
 
     def _emit_scroll(self, event: Scroll, state: _State) -> None:
         """Render wheel movement in detents, at the point it was recorded at.
