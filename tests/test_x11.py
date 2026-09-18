@@ -17,7 +17,10 @@ from Xlib.protocol import display as pdisplay  # noqa: E402
 from Xlib.protocol import event as xevent  # noqa: E402
 
 from pyguitest_recorder.backends import x11 as x11_module  # noqa: E402
-from pyguitest_recorder.backends.base import CaptureUnavailable  # noqa: E402
+from pyguitest_recorder.backends.base import (  # noqa: E402
+    CaptureBackend,
+    CaptureUnavailable,
+)
 from pyguitest_recorder.backends.x11 import (  # noqa: E402
     X11CaptureBackend,
     _group_switch_mask,
@@ -25,6 +28,7 @@ from pyguitest_recorder.backends.x11 import (  # noqa: E402
     _keysym_names,
     _printable,
 )
+from pyguitest_recorder.stopkey import StopKey  # noqa: E402
 
 
 class FakeProtocolDisplay:
@@ -140,13 +144,20 @@ def motion(x=7, y=8):
     )
 
 
-def backend(keymap=None, screen=0, group_mask=None):
-    made = X11CaptureBackend(screen=screen)
+def backend(keymap=None, screen=0, group_mask=None, stop_key=None):
+    made = X11CaptureBackend(screen=screen, stop_key=stop_key)
     made._control = FakeConnection(keymap)
     made._pump = FakeConnection(keymap)
     made._keysyms = _keysym_names({"XK": __import__("Xlib.XK", fromlist=["XK"])})
     made._group_mask = group_mask
     return made
+
+
+def escape_backend(stop_key=None):
+    """A backend whose keycode 9 is Escape, which the stop key is by default."""
+    from Xlib import XK
+
+    return backend(keymap={(9, 0): XK.XK_Escape}, stop_key=stop_key)
 
 
 def drain(made):
@@ -424,11 +435,108 @@ def test_start_closes_both_connections_when_creating_the_context_fails(monkeypat
     assert made._context is None
 
 
+def test_the_stream_ends_where_the_stop_chord_completed():
+    # The reason capture recognises the chord at all: a recording that fell
+    # behind live input used to answer the stop key only once it had worked
+    # through the backlog in front of it, and while input outpaced consumption
+    # that moment never came -- the run could not be stopped. Ending the stream
+    # at the press means the recording always ends where it was asked to.
+    made = escape_backend(StopKey())
+    made._handle(FakeReply(key(9)))
+    assert made.stop_pressed_at is None
+    made._handle(FakeReply(key(9)))
+    assert made.stop_pressed_at is not None
+    # Both presses reach the consumer first, so the recording still ends at the
+    # press the way it always did, and the presses are swallowed there.
+    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+
+
+def test_what_followed_the_stop_chord_in_the_same_reply_is_never_parsed():
+    made = escape_backend(StopKey())
+    made._handle(FakeReply(key(9), key(9), motion()))
+    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+    assert drain(made) == []
+
+
+def test_a_reply_after_the_stop_chord_is_ignored_entirely():
+    # Everything captured after the press belongs to the session, not to the
+    # recording: handing it on would grow the queue for as long as someone
+    # keeps using the desktop after asking the recording to stop.
+    made = escape_backend(StopKey())
+    made._handle(FakeReply(key(9), key(9)))
+    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+    made._handle(FakeReply(press(), motion()))
+    assert drain(made) == []
+
+
+def test_a_single_press_is_handed_on_and_capture_keeps_going():
+    # One Escape belongs to the application being recorded, so nothing is
+    # withheld from the queue while a run might still complete.
+    made = escape_backend(StopKey())
+    made._handle(FakeReply(key(9), motion()))
+    assert made.stop_pressed_at is None
+    assert [e.kind for e in drain(made)] == ["key_press", "motion"]
+
+
+def test_without_a_recogniser_capture_never_ends_the_stream_itself():
+    # A backend left to itself still hands over what it captures and waits to be
+    # stopped; only the consumer's own view of the stop key ends that recording.
+    made = escape_backend()
+    made._handle(FakeReply(key(9), key(9)))
+    assert made.stop_pressed_at is None
+    assert [e.kind for e in drain(made)] == ["key_press", "key_press"]
+
+
+def test_it_is_a_capture_backend():
+    # The protocol is runtime-checkable so that a member added to it is checked
+    # against every backend without anyone having to remember which they are --
+    # the Windows one was missing two when this was written, and nothing on the
+    # platform it was written on could see it.
+    assert isinstance(backend(), CaptureBackend)
+
+
 def test_events_yields_what_was_captured_and_stops_at_the_end():
     made = backend()
     made._handle(FakeReply(press()))
     made.stop()
     assert [e.kind for e in made.events()] == ["button_press"]
+
+
+def test_drain_returns_what_was_already_captured_without_waiting():
+    # `events` blocks, so it cannot be used to collect what a run that ended
+    # mid-flight is owed: waiting for input would hang instead.
+    made = backend()
+    made._handle(FakeReply(press(), release()))
+    assert [e.kind for e in made.drain()] == ["button_press", "button_release"]
+
+
+def test_drain_takes_only_what_was_queued_when_it_was_called():
+    # A session that keeps being used must not be able to extend the drain:
+    # what is owed is what had already arrived, not what arrives next.
+    made = backend()
+    made._handle(FakeReply(press()))
+    assert [e.kind for e in made.drain()] == ["button_press"]
+    made._handle(FakeReply(release()))
+    assert [e.kind for e in made.drain()] == ["button_release"]
+
+
+def test_drain_leaves_the_end_of_stream_marker_for_a_reader():
+    # Swallowing the sentinel would leave a later `events` call blocked
+    # forever on a queue nothing else will ever fill.
+    made = backend()
+    made.stop()
+    assert list(made.drain()) == []
+    assert list(made.events()) == []
+
+
+def test_drain_skips_the_pumps_own_error_and_keeps_what_is_behind_it():
+    # `events` raises the pump's failure, which is right while it is running.
+    # At the end of a run there is nothing left to raise it for, and the
+    # events queued behind it are the whole reason to drain.
+    made = backend()
+    made._queue.put(RuntimeError("the X server went away"))
+    made._handle(FakeReply(press()))
+    assert [e.kind for e in made.drain()] == ["button_press"]
 
 
 def test_an_error_on_the_pump_thread_surfaces_as_capture_unavailable():

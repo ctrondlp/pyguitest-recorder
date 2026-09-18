@@ -238,13 +238,21 @@ class Click(Event):
 
 @dataclass(kw_only=True)
 class Drag(Event):
-    """A press, motion and release, recorded as one gesture."""
+    """A press, motion and release, recorded as one gesture.
+
+    `route` is what the pointer travelled through between the two ends, and it
+    is the gesture: a press, a glide and a release between the same two points
+    is a different thing to drag -- a straight one. Empty unless motion was
+    being recorded in its own right (`record_motion`), which is the setting
+    whose own description names a drag as the case it exists for.
+    """
 
     kind: ClassVar[str] = "drag"
 
     start: Target
     end: Target
     button: int = 1
+    route: tuple[Target, ...] = ()
 
 
 @dataclass(kw_only=True)
@@ -469,9 +477,16 @@ EVENT_TYPES: dict[str, type[Event]] = {
 
 
 def _rebuild(cls: type, data: Any) -> Any:
-    """Rebuild one nested context object from its dict form."""
+    """Rebuild one nested context object, or a sequence of them, from its form.
+
+    A sequence is rebuilt element-wise and handed back as a tuple, which is how
+    a gesture's recorded route comes back: it is a list of points of the same
+    kind as any single one.
+    """
     if data is None:
         return None
+    if isinstance(data, (list, tuple)):
+        return tuple(_rebuild(cls, item) for item in data)
     if cls is Target:
         return Target(
             x=data["x"],
@@ -507,6 +522,7 @@ _CONTEXT_FIELDS = {
     "target": Target,
     "start": Target,
     "end": Target,
+    "route": Target,
     "window": WindowRef,
     "element": ElementRef,
 }

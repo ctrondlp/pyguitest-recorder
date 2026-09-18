@@ -126,14 +126,19 @@ class NormalizerOptions:
     """Seconds of inactivity that become an explicit Pause event."""
 
     record_motion: bool = False
-    """Emit pointer motion in its own right, not only as part of a drag.
+    """Emit every pointer position, not only where the pointer rested.
 
-    Off by default because emitting *every* motion event resolves the window
-    and element under each one -- hundreds of resolver calls a second, some
-    of them subprocesses -- and renders a wall of `gui.move_mouse(...)` no
-    one wants to read. `hover_threshold` below is the cheap half of the same
-    idea: the pointer is tracked either way, but only where it *rested* is
-    resolved and emitted.
+    Off by default because a position costs a window lookup to consume -- see
+    `_window_target`, the half a move is rendered from -- and renders a line of
+    its own, which under `motion = "teleport"` is a wall of `gui.move_mouse`
+    nobody wants to read. It is for the route itself -- a drag, a drawing, a
+    gesture, all of which are *made* of their path -- rather than for what the
+    pointer reveals: the rests are recorded as hovers either way, so
+    `hover_threshold` below is what anything driven by hovering actually needs.
+
+    A drag is where that promise was not kept: its travel used to be dropped
+    outright, leaving an event with two ends and a straight line between them,
+    which is a different gesture. See `_record_route`.
     """
 
     hover_threshold: float = 0.3
@@ -183,6 +188,11 @@ class _Pending:
     timestamp: float
     moved: bool = False
     last: tuple[int, int] = (0, 0)
+    route: list[Target] = field(default_factory=list)
+    """Where the pointer went while this button was down, when that is recorded.
+
+    The gesture, not decoration: see `_record_route`.
+    """
 
 
 @dataclass
@@ -194,6 +204,27 @@ class _Typed:
     timestamp: float = 0.0
     last: float = 0.0
     sensitive: bool = False
+
+
+@dataclass
+class _Rest:
+    """A rest in progress: where it opened, and where the pointer stopped.
+
+    Two positions, because they answer different questions. `where` is the
+    sample that opened the still window and stays the anchor the
+    `motion_threshold` tolerance is measured from, so a hand trembling over a
+    menu row is still one rest rather than a new arrival on every jitter.
+    `settled` is the last position still inside that window -- where the pointer
+    actually came to a stop -- and it is the one the hover is emitted and
+    resolved at. Reporting the rest at the point it *began* puts the pointer up
+    to `motion_threshold` from where the interface saw it stop, which on a menu
+    row is the width of a row.
+    """
+
+    where: tuple[int, int]
+    settled: tuple[int, int]
+    since: float
+    screen: int
 
 
 @dataclass
@@ -211,8 +242,8 @@ class Normalizer:
     _click_at: float = field(default=0.0, init=False)
     _clicked: Target | None = field(default=None, init=False)
     _last_input: float | None = field(default=None, init=False)
-    _rest: tuple[tuple[int, int], float, int] | None = field(default=None, init=False)
-    """Where the pointer has been sitting, since when, and on which screen.
+    _rest: _Rest | None = field(default=None, init=False)
+    """The rest the pointer is sitting in, if it is sitting in one.
     Set only by real motion, so a pointer that simply has not moved since a
     click is not mistaken for someone hovering. See `_dwell`."""
 
@@ -261,10 +292,9 @@ class Normalizer:
         """
         out = self._flush_click()
         if self._rest is not None:
-            where, since, screen = self._rest
-            self._rest = None
-            until = since if self._last_input is None else self._last_input
-            out.extend(self._dwell(where, since, until, screen))
+            rest, self._rest = self._rest, None
+            until = rest.since if self._last_input is None else self._last_input
+            out.extend(self._dwell(rest.settled, rest.since, until, rest.screen))
         out.extend(self._flush_text())
         return out
 
@@ -280,11 +310,18 @@ class Normalizer:
     def _on_motion(self, raw: RawEvent) -> list[Event]:
         """Track motion; emit it only when it is meaningful on its own.
 
-        Two ways it can be meaningful. `record_motion` emits every event, for
-        a recording that wants the whole path. Otherwise the pointer is still
-        followed -- cheaply, position and time only, no resolver -- so that
-        somewhere it *rested* can be emitted as the hover it was. See
-        `hover_threshold`.
+        Two ways it can be meaningful. `record_motion` emits every position, for
+        a recording that wants the whole path -- and it tracks the rests as
+        well, so that somewhere the pointer *rested* is still emitted as the
+        hover it was: a recorded path replays a pointer passing *through* the
+        points it visited, and a submenu that opened because the pointer stayed
+        is not opened by that. Otherwise the pointer is still followed --
+        cheaply, position and time only, no resolver -- and only the rests are
+        emitted. See `hover_threshold`.
+
+        Both cases resolve a rest fully and a position for its window only:
+        naming what was hovered is the entire point of a hover, while the
+        element under a move is never read at all -- see `_window_target`.
         """
         for pending in self._held.values():
             if _distance(pending.last, (raw.x, raw.y)) >= self.options.motion_threshold:
@@ -293,44 +330,87 @@ class Normalizer:
         if self._held:
             # Motion under a held button is a drag being dragged, not a rest.
             self._rest = None
+            self._record_route(raw)
             return []
+        out = self._close_rest(raw)
         if self.options.record_motion:
-            return [
-                MouseMove(
-                    timestamp=self._at(raw),
-                    target=self._target(raw),
-                )
-            ]
+            out.append(
+                MouseMove(timestamp=self._at(raw), target=self._window_target(raw))
+            )
+        return out
+
+    def _record_route(self, raw: RawEvent) -> None:
+        """Keep where a dragged pointer went, which is the gesture itself.
+
+        A drag is press, travel, release -- and the travel used to be thrown
+        away, with the event keeping only where it began and where it ended: a
+        straight line between them is a *different* gesture from the one made.
+        A real recording showed it as a 1.97s hole in the motion stream, which
+        is what a drag leaves behind when nothing records its path.
+
+        Only when motion is being recorded in its own right, which is the
+        setting whose own description names this case ("the route itself -- a
+        drag, a drawing, a gesture"). Each position is resolved for its window
+        only: a drag is rendered from coordinates and one origin, and the
+        element under the pointer is not what it is drawn from -- see
+        `_window_target`.
+        """
+        if not self.options.record_motion:
+            return
+        for pending in self._held.values():
+            pending.route.append(self._window_target(raw))
+
+    def _close_rest(self, raw: RawEvent) -> list[Event]:
+        """End the rest in progress, emitting it if it turned out to be a hover.
+
+        Run on every motion event, whichever way motion is recorded: a rest is
+        only known to have been one once the pointer leaves the place it rested
+        at, and the event that leaves it is the first event of the next one.
+        Emitted ahead of the move that leaves it, because that is the order the
+        two happened in.
+        """
         here = (raw.x, raw.y)
         if self._rest is None:
-            self._rest = (here, raw.timestamp, raw.screen)
+            self._rest = _Rest(here, here, raw.timestamp, raw.screen)
             return []
-        where, since, screen = self._rest
-        if _distance(where, here) < self.options.motion_threshold:
-            # Still resting. The arrival time deliberately stays the earliest
-            # one, so a hand that trembles over a menu entry still reads as
-            # one rest rather than restarting the clock on every jitter.
+        rest = self._rest
+        if _distance(rest.where, here) < self.options.motion_threshold:
+            # Still resting. The window stays anchored where it opened and the
+            # arrival time deliberately stays the earliest one, so a hand that
+            # trembles over a menu entry still reads as one rest rather than
+            # restarting the clock on every jitter. Where the pointer *stopped*
+            # moves with the pointer, though: that is the position the rest is
+            # reported at, and it is where a replay has to park it.
+            rest.settled = here
             return []
-        self._rest = (here, raw.timestamp, raw.screen)
-        return self._dwell(where, since, raw.timestamp, screen)
+        self._rest = _Rest(here, here, raw.timestamp, raw.screen)
+        return self._dwell(rest.settled, rest.since, raw.timestamp, rest.screen)
 
     def _flush_dwell(self, raw: RawEvent) -> list[Event]:
         """Emit the hover the pointer was in the middle of, if it was one."""
         if self._rest is None:
             return []
-        where, since, screen = self._rest
-        self._rest = None
-        if _distance(where, (raw.x, raw.y)) < self.options.motion_threshold:
+        rest, self._rest = self._rest, None
+        if _distance(rest.settled, (raw.x, raw.y)) < self.options.motion_threshold:
             # The action is happening where the pointer already was: whatever
             # renders it will move there itself, so a move saying the same
-            # thing would only be noise.
+            # thing would only be noise. Compared against where the pointer
+            # came to rest, not where the rest opened -- a click on the point
+            # the pointer settled on needs no move, and one on the point the
+            # rest happened to open at is a different place.
             return []
-        return self._dwell(where, since, raw.timestamp, screen)
+        return self._dwell(rest.settled, rest.since, raw.timestamp, rest.screen)
 
     def _dwell(
-        self, where: tuple[int, int], since: float, until: float, screen: int
+        self, settled: tuple[int, int], since: float, until: float, screen: int
     ) -> list[Event]:
         """A MouseMove for a point the pointer rested at long enough to mean it.
+
+        `settled` is where the pointer came to a stop rather than where the rest
+        began -- see `_Rest` -- and the element is resolved there, because that
+        is the point a replay has to put the pointer on for the interface to see
+        what this recording saw. `since` is when the rest began, which is what
+        the dwell is measured from, drift included.
 
         The only place hover detection pays the resolver, and it pays it once
         per hover rather than once per motion event -- which is the whole
@@ -342,7 +422,7 @@ class Normalizer:
             return []
         hover = MouseMove(
             timestamp=max(0.0, since - self.started),
-            target=self.resolver.resolve(where[0], where[1], screen),
+            target=self.resolver.resolve(settled[0], settled[1], screen),
             dwell=round(rested, 2),
         )
         # A buffered click always predates this hover: a button press flushes
@@ -390,6 +470,7 @@ class Normalizer:
                     start=pending.target,
                     end=self._target(raw),
                     button=raw.button,
+                    route=tuple(pending.route),
                 ),
             ]
         # Where the button went down and came up is what decides this, not
@@ -636,6 +717,20 @@ class Normalizer:
     def _target(self, raw: RawEvent) -> Target:
         """Resolve what was under the pointer when this event happened."""
         return self.resolver.resolve(raw.x, raw.y, raw.screen)
+
+    def _window_target(self, raw: RawEvent) -> Target:
+        """Resolve only the window under the pointer, for a recorded move.
+
+        A move is rendered from its coordinates and the origin of the window it
+        was in -- the generator reads `target.window` and `target.relative` for
+        one and never the element -- so the element half of `_target` is nothing
+        but the accessibility hit-test behind it. Under `record_motion` that is
+        once per motion event, hundreds of times a second, which is what made a
+        live recording consume slower than the hand making it. Hovers and clicks
+        still resolve fully: a rest is one call per rest, and naming an element
+        is the reason a click is resolved at all.
+        """
+        return self.resolver.resolve_window(raw.x, raw.y, raw.screen)
 
     def _at(self, raw: RawEvent) -> float:
         """Seconds since the recording started.

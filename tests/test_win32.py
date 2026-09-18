@@ -22,7 +22,7 @@ import threading
 import pytest
 
 from pyguitest_recorder.backends import win32 as win32_module
-from pyguitest_recorder.backends.base import CaptureUnavailable
+from pyguitest_recorder.backends.base import CaptureBackend, CaptureUnavailable
 from pyguitest_recorder.backends.win32 import (
     _KBDLLHOOKSTRUCT,
     _MSLLHOOKSTRUCT,
@@ -795,3 +795,95 @@ class TestStartStopEvents:
         made.start()
         made.stop()
         assert sorted(fake.unhooked) == [1, 2]
+
+
+class TestTheCaptureBackendProtocol:
+    """This backend offers everything `Recorder` asks a capture backend for."""
+
+    def test_it_is_a_capture_backend(self):
+        # `CaptureBackend` grew `drain` and `stop_pressed_at` with the work that
+        # made a run that fell behind live input recoverable, and this backend
+        # was not given them: an interrupted recording on Windows would have died
+        # with an AttributeError after it had been made. Nothing on Linux could
+        # see it, because type-checking there skips the `sys.platform == "win32"`
+        # branch that builds this class. The protocol is runtime-checkable for
+        # exactly this, so whatever is added to it next is checked here without
+        # anyone having to remember to.
+        assert isinstance(Win32CaptureBackend(), CaptureBackend)
+
+    def test_it_does_not_recognise_the_stop_chord_at_capture(self):
+        # Said out loud rather than left as an absence: the consumer's own
+        # recogniser ends a recording here, and `Recorder` reads this to decide
+        # which note a recording that fell behind should carry.
+        assert Win32CaptureBackend().stop_pressed_at is None
+
+
+class TestDrain:
+    """What an interrupted run is owed: whatever the hooks already delivered."""
+
+    def test_returns_what_the_hooks_already_delivered_without_waiting(
+        self, monkeypatch
+    ):
+        # Delivered through the installed callbacks, as Windows would from inside
+        # `GetMessageW`, and drained while the backend is still running -- which
+        # is the state an interrupted recording is in. `events` would block here
+        # waiting for input that is not coming.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        try:
+            proc = fake.hook_proc(WH_MOUSE_LL)
+            for x, message in ((10, WM_LBUTTONDOWN), (10, WM_LBUTTONUP)):
+                lparam, _info = mouse_lparam(x=x, y=20)
+                proc(HC_ACTION, message, lparam)
+            drained = list(made.drain())
+        finally:
+            made.stop()
+        assert [e.kind for e in drained] == ["button_press", "button_release"]
+
+    def test_a_backend_with_nothing_buffered_yields_nothing_and_returns(self):
+        assert list(Win32CaptureBackend().drain()) == []
+
+    def test_takes_only_what_was_queued_when_it_was_asked(self, monkeypatch):
+        # A session that keeps being used must not be able to extend the drain:
+        # what is owed is what had already arrived, not what arrives next.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        try:
+            proc = fake.hook_proc(WH_MOUSE_LL)
+            lparam, _info = mouse_lparam(x=1, y=2)
+            proc(HC_ACTION, WM_LBUTTONDOWN, lparam)
+            assert [e.kind for e in made.drain()] == ["button_press"]
+            proc(HC_ACTION, WM_LBUTTONUP, lparam)
+            assert [e.kind for e in made.drain()] == ["button_release"]
+        finally:
+            made.stop()
+
+    def test_leaves_the_end_of_stream_marker_for_a_reader(self):
+        # Swallowing the sentinel would leave a later `events` call blocked
+        # forever on a queue nothing else will ever fill.
+        made = Win32CaptureBackend()
+        made.stop()
+        assert list(made.drain()) == []
+        assert list(made.events()) == []
+
+    def test_skips_the_pumps_own_error_and_keeps_what_is_behind_it(self, monkeypatch):
+        # `events` raises the pump's failure, which is right while it is running.
+        # At the end of a run there is nothing left to raise it for, and the
+        # events queued behind it are the whole reason to drain.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        try:
+            made._queue.put(RuntimeError("the hook thread died"))
+            proc = fake.hook_proc(WH_MOUSE_LL)
+            lparam, _info = mouse_lparam(x=3, y=4)
+            proc(HC_ACTION, WM_LBUTTONDOWN, lparam)
+            drained = list(made.drain())
+        finally:
+            made.stop()
+        assert [e.kind for e in drained] == ["button_press"]

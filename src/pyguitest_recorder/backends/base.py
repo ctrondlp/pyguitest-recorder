@@ -94,5 +94,28 @@ class CaptureBackend(Protocol):
     def events(self) -> Iterator[RawEvent]:
         """Yield raw events until `stop` is called."""
 
+    def drain(self) -> Iterator[RawEvent]:
+        """Yield what has already been captured, without waiting for more.
+
+        `events` blocks, which is right for the recording loop and wrong at the
+        end of it: a run that was interrupted has to be able to keep whatever
+        arrived before the interrupt, and waiting for input that is not coming
+        would throw it away instead. A backend with nothing buffered yields
+        nothing and returns immediately.
+        """
+
+    @property
+    def stop_pressed_at(self) -> float | None:
+        """When the stop key completed, on the capture clock, or None.
+
+        A backend that recognises the stop chord as it captures it sets this and
+        ends the stream there, so a recording ends where the press was made
+        rather than where the consumer finally reached it. That distinction is
+        the whole of the note a lagging recording carries: a run that ended at
+        the press has everything before it, and one interrupted some other way
+        may not. A backend that does not recognise the chord leaves this None
+        and the consumer's own recogniser ends the recording.
+        """
+
     def stop(self) -> None:
         """Stop capturing and release the display connection."""

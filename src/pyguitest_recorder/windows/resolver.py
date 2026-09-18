@@ -69,6 +69,39 @@ dialog; 40 gives headroom for taller themes without reaching far enough to
 swallow a genuinely different window sitting flush against this one.
 """
 
+MOTION_TRUST_SECONDS = 0.25
+"""How long a recorded move takes the last window lookup on trust, in seconds.
+
+A pointer crossing one window asks the same question hundreds of times a second
+and a lookup costs a round trip per window on the desktop, so a move reuses the
+last answer -- but "the point is still inside the rectangle that answer covered"
+is not evidence the window is still the one *under* it. A window stacked on top
+of the answered one covers the same point, and the moves that entered it would be
+attributed to the window beneath for as long as the pointer stayed inside the
+first one's rectangle: the whole of a menu or dialog drawn over a bigger window,
+which is where a recording spends its time. So the answer expires, and is asked
+for afresh at most this often -- a few lookups a second where there were hundreds
+-- which bounds how long a stacking change can go unnoticed and how much a
+recording pays to notice it.
+"""
+
+
+@dataclass(frozen=True)
+class _Lookup:
+    """What one window lookup answered, and when, for a recorded move to reuse."""
+
+    screen: int
+    window: Any
+    """The pyguitest window that was under the point, or None if nothing was.
+
+    A miss is remembered as well as a hit, for the same interval. A pointer
+    crossing bare desktop is the common case a hit-only cache did nothing for,
+    and a miss is the expensive answer: the whole lookup, and then the same
+    lookup again for the settle-and-retry a click gets.
+    """
+
+    at: float
+
 
 @dataclass(frozen=True)
 class Observation:
@@ -94,6 +127,16 @@ class ContextResolver(Protocol):
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the target at this point, with whatever context is available."""
 
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the target at this point with no element looked up.
+
+        For events whose element is never read: a pointer move is rendered as a
+        coordinate and the origin of the window it was in, and nothing else, so
+        the element half of `resolve` is a cost with no buyer -- and it is the
+        expensive half, an accessibility hit-test rather than a window list
+        lookup. `record_motion` would pay it once per motion event.
+        """
+
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Return the target at this point along with what it currently reads."""
 
@@ -110,6 +153,10 @@ class NullResolver:
 
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the point with no context attached."""
+        return Target(x=x, y=y, screen=screen)
+
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the point with no context attached; this floor has no windows."""
         return Target(x=x, y=y, screen=screen)
 
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
@@ -156,6 +203,10 @@ class DesktopResolver:
     _resolves_elements: bool = field(default=False, init=False)
     _warned: list[str] = field(default_factory=list, init=False)
     _scaled: bool = field(default=False, init=False)
+    _motion_cache: _Lookup | None = field(default=None, init=False)
+    """The last window lookup, for a recorded move to reuse while it is fresh --
+    see `_recent_lookup`. Set by `_window`, so a click leaves the motion path a
+    warm answer behind it."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -300,6 +351,87 @@ class DesktopResolver:
         if element is not None and not self._belongs(element, window):
             return Target(x=x, y=y, screen=screen, window=window)
         return Target(x=x, y=y, screen=screen, window=window, element=element)
+
+    def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
+        """Return the toplevel under this point, looking for no element in it.
+
+        The window still has to be right: every coordinate rendered from this
+        target is an offset into that window's origin, so skipping the window
+        too would turn a window-relative move into a bare screen coordinate.
+        What is skipped is the accessibility hit-test -- the half nothing reads
+        for a move, and the half that costs a round trip to the application.
+
+        What is skipped *after the first event* is the hit test as well: a
+        pointer moving inside one window is the common case by far, so
+        `_recent_window` answers from the last lookup while it is fresh
+        (`MOTION_TRUST_SECONDS`) and this point is still inside the rectangle
+        that lookup covered. The rectangle itself is read again every time, so a
+        window that moved is noticed exactly as before; what goes away is a
+        window list and a geometry read per window on the desktop, hundreds of
+        times a second. Measured live before that: 572 motion events over a
+        21-second session left the recorder 4.6s behind the hand making it, with
+        the input piling up in the capture queue and the stop key answered only
+        once the backlog had been worked through.
+
+        Freshness is what keeps that answer honest. Containment alone cannot say
+        whether a window stacked *above* the answered one now covers the point,
+        and the moves that entered it would be attributed to the window beneath
+        for as long as the pointer stayed inside the first one's rectangle.
+
+        Nor does a move wait out a miss. A click that finds no window sleeps and
+        asks again, because a window still animating in is worth waiting for --
+        but a pointer move is one of hundreds and the next will ask anyway, so it
+        takes the first answer, and a miss is remembered for as long as a hit is.
+        Bare desktop is where a pointer spends much of its time, and a lookup
+        that finds nothing plus two sleeps of 50ms is a tenth of a second per
+        move: a recorder that cannot keep up with a hand on the one stretch of
+        screen nothing is drawn.
+        """
+        if self._recently_missed(screen):
+            return Target(x=x, y=y, screen=screen)
+        window = self._recent_window(x, y, screen)
+        if window is None:
+            window = self._window(x, y, screen, patient=False)
+        return Target(x=x, y=y, screen=screen, window=window)
+
+    def _recent_lookup(self, screen: int) -> _Lookup | None:
+        """The last window lookup, if it was on this screen and has not expired."""
+        lookup = self._motion_cache
+        if lookup is None or lookup.screen != screen:
+            return None
+        if _now() - lookup.at >= MOTION_TRUST_SECONDS:
+            return None
+        return lookup
+
+    def _recently_missed(self, screen: int) -> bool:
+        """Whether a lookup a moment ago found nothing at all on this screen."""
+        lookup = self._recent_lookup(screen)
+        return lookup is not None and lookup.window is None
+
+    def _recent_window(self, x: int, y: int, screen: int) -> WindowRef | None:
+        """The window the last lookup answered, if it is fresh and covers this point.
+
+        A recorded move needs a window for one reason -- the origin its
+        coordinate is rendered against -- and a pointer crossing one window asks
+        the same question hundreds of times a second. The rectangle is read
+        afresh on every call rather than cached with the identity, so a window
+        that moved or resized is answered for where it is *now*, which is what
+        the rest of this file depends on: the origin a coordinate is rendered
+        against has to be the origin it had when the coordinate was captured.
+        Nothing else is re-derived -- the identity was settled the first time
+        this window was seen and deliberately does not move, see `_identify`.
+        """
+        lookup = self._recent_lookup(screen)
+        if lookup is None or lookup.window is None:
+            return None
+        described = self._describe(lookup.window)
+        geometry = described.geometry
+        if geometry is None:
+            return None
+        wx, wy, width, height = geometry
+        if wx <= x < wx + width and wy <= y < wy + height:
+            return described
+        return None
 
     def inspect(self, x: int, y: int, screen: int = 0) -> Observation:
         """Resolve this point and read the state of whatever is under it.
@@ -592,7 +724,9 @@ class DesktopResolver:
 
     # -- windows -------------------------------------------------------------
 
-    def _window(self, x: int, y: int, screen: int) -> WindowRef | None:
+    def _window(
+        self, x: int, y: int, screen: int, *, patient: bool = True
+    ) -> WindowRef | None:
         """Find the toplevel under the point, falling back to the active one.
 
         The fallback is a guess and is checked before it is believed. When the
@@ -614,20 +748,29 @@ class DesktopResolver:
         live subprocess round trip queried for it (kdotool, via KWin's
         scripting interface) is what is occasionally too slow to answer in
         time for a fast second click, not the window itself being unfindable.
+
+        `patient` says whether that retry is worth its wait. It is for a click,
+        which is one event a recording cannot do without. It is not for a
+        pointer move, which is one of hundreds and is asked again by the next --
+        see `resolve_window`.
         """
         if self.session is None:
             return None
         window = self._resolve_window(x, y, screen)
-        if window is None:
+        if window is None and patient:
             for _ in range(2):
                 time.sleep(0.05)
                 window = self._resolve_window(x, y, screen)
                 if window is not None:
                     break
-        if window is None:
+        # Kept for the motion path, which asks the same question once per
+        # pointer event -- see `resolve_window`. A click resolving a window
+        # leaves exactly the answer the moves after it would have got, and a
+        # miss leaves the answer a run of moves over bare desktop would have.
+        if window is None or window.pid in self.ignore_pids:
+            self._motion_cache = _Lookup(screen, None, _now())
             return None
-        if window.pid in self.ignore_pids:
-            return None
+        self._motion_cache = _Lookup(screen, window, _now())
         return self._describe(window)
 
     def _resolve_window(self, x: int, y: int, screen: int) -> Any:
@@ -916,3 +1059,13 @@ def _ancestry(element: Any) -> tuple[tuple[str, str], ...]:
             break
         current = parent
     return tuple(reversed(path))
+
+
+def _now() -> float:
+    """The clock a remembered window lookup ages by.
+
+    Monotonic, so an adjusted system clock cannot make an old answer look new. A
+    function rather than a call inline so a test can move time without touching
+    the `time` module every other thing in the process reads.
+    """
+    return time.monotonic()

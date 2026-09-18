@@ -3,15 +3,17 @@
 Everything except the capture backend itself, which needs a live X server.
 """
 
+import re
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 from conftest import FakeResolver
-from pyguitest_recorder.analyzer import Normalizer
+from pyguitest_recorder.analyzer import Normalizer, NormalizerOptions
 from pyguitest_recorder.backends.base import RawEvent
-from pyguitest_recorder.config import load_settings
-from pyguitest_recorder.generator import generate, validate
+from pyguitest_recorder.config import Settings, load_settings
+from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.model import ElementRef, Environment, Recording, WindowRef
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parents[1] / "config.example.toml"
@@ -28,6 +30,22 @@ def test_example_config_parses_and_sets_only_known_keys():
     # "teleport" being the default is not self-explanatory.
     assert settings.motion == "teleport"
     assert settings.max_waypoints == 32
+
+
+def test_the_example_config_is_the_defaults_written_down():
+    # The file says so at the top, and it is the file people copy: a default
+    # that moves while the example does not is a config change on install.
+    settings, _ = load_settings(EXAMPLE_CONFIG)
+    assert settings == Settings()
+
+
+def test_every_setting_is_named_in_the_example_config():
+    # The direction that bites a reader -- a setting that exists and cannot be
+    # found in the file they copied. Commented-out keys count: `display`,
+    # `output` and `session_file` are documented that way on purpose.
+    text = EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    missing = sorted(f.name for f in fields(Settings) if f.name not in text)
+    assert missing == []
 
 
 @pytest.mark.needs_ruff
@@ -248,3 +266,64 @@ def test_an_editor_that_renames_itself_while_typing_stays_one_window():
     assert validate(source) == []
     assert source.count("gui.expect_window") == 1
     assert "New Document" in source
+
+
+def _hand_at_a_menu_row(rest, tremor):
+    """The pointer arrives at a menu row, rests there, and leaves.
+
+    Positions the way a hand makes them: a few on the way in, then -- if it
+    trembles -- one every 34ms for as long as the rest lasts, then two on the
+    way out. Returns the raw events and the seconds from first to last.
+    """
+    stream = [RawEvent(kind="motion", timestamp=0.0, x=100, y=100)]
+    for at, x in ((0.05, 140), (0.10, 180), (0.15, 200)):
+        stream.append(RawEvent(kind="motion", timestamp=at, x=x, y=100))
+    left = round(0.15 + rest, 4)
+    if tremor:
+        for i in range(1, int(rest / 0.034) + 1):
+            at = round(0.15 + 0.034 * i, 4)
+            stream.append(
+                RawEvent(kind="motion", timestamp=at, x=200 + i % 3, y=100 + i % 2)
+            )
+        left = round(stream[-1].timestamp + 0.05, 4)
+    stream.append(RawEvent(kind="motion", timestamp=left, x=300, y=140))
+    stream.append(
+        RawEvent(kind="motion", timestamp=round(left + 0.05, 4), x=340, y=160)
+    )
+    return stream, stream[-1].timestamp - stream[0].timestamp
+
+
+@pytest.mark.parametrize(
+    "tremor", [True, False], ids=["a trembling hand", "a still one"]
+)
+@pytest.mark.parametrize("rest", [0.6, 1.7, 3.5])
+def test_verbatim_replays_a_rest_for_as_long_as_it_lasted(rest, tremor):
+    # The whole pipeline, because the *order* the analyzer emits things in is the
+    # whole of what went wrong: a hover is stamped where its rest began but only
+    # known once the pointer leaves, so it follows the positions inside it. A
+    # script that then waits out the dwell as well sleeps through a 1.7s rest for
+    # 3.6s, and a rest of a second or more is also an inferred Pause over the
+    # same interval. Either way the script's own sleeping has to add up to the
+    # time the recording took.
+    window = WindowRef(
+        title="Menu", app_id="mate.panel", pid=7, geometry=(0, 0, 1000, 800)
+    )
+    normalizer = Normalizer(
+        options=NormalizerOptions(record_motion=True),
+        resolver=FakeResolver(window=window),
+        started=0.0,
+    )
+    stream, elapsed = _hand_at_a_menu_row(rest, tremor)
+    recording = Recording(environment=Environment(session_type="x11"))
+    for raw in stream:
+        for event in normalizer.feed(raw):
+            recording.add(event)
+    for event in normalizer.flush():
+        recording.add(event)
+
+    source = generate(
+        recording, GeneratorOptions(motion="verbatim", locators="absolute")
+    )
+    slept = sum(float(n) for n in re.findall(r"gui\.wait\(([0-9.]+)\)", source))
+    assert slept == pytest.approx(elapsed, rel=0.02, abs=0.05)
+    assert validate(source) == []

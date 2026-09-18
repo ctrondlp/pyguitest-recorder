@@ -275,6 +275,7 @@ def test_motion_has_flags_and_not_only_config_keys():
     parser = build_parser()
     assert _overrides(parser.parse_args(["--natural-motion"]))["motion"] == "natural"
     assert _overrides(parser.parse_args(["--recorded-motion"]))["motion"] == "recorded"
+    assert _overrides(parser.parse_args(["--verbatim-motion"]))["motion"] == "verbatim"
     assert _overrides(parser.parse_args(["--teleport-motion"]))["motion"] == "teleport"
     assert _overrides(parser.parse_args(["--max-waypoints", "3"]))["max_waypoints"] == 3
     # Unset overrides nothing, so a config file's choice survives.

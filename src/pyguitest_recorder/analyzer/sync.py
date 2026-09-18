@@ -161,8 +161,11 @@ class _Inferencer:
         just appeared, so it already has focus, and `_announce` has put a
         `wait_for_window` there instead -- raising it as well would be noise on
         the common path of a dialog opening.
+
+        Only an event that *acts* in a window can say the recording came back
+        to one; a move cannot -- see `_RAISING_EVENTS`.
         """
-        if not self.options.activation or not isinstance(event, _POINTER_EVENTS):
+        if not self.options.activation or not isinstance(event, _RAISING_EVENTS):
             return []
         if _spans_two_windows(event):
             # A drag whose ends landed in different windows says nothing
@@ -301,6 +304,21 @@ class _Inferencer:
 # -- reading the event stream ------------------------------------------------
 
 _POINTER_EVENTS = (Click, Drag, MouseMove, Scroll)
+"""Events that put the pointer somewhere, for "what was this pause waiting for"."""
+
+_RAISING_EVENTS = (Click, Drag, Scroll)
+"""Pointer events that mean the recording is *acting* in a window.
+
+A move is deliberately not one of them. It says where the pointer is, not what
+it is doing there -- a hover, or under `record_motion` every position along a
+route -- and neither means the recording went into the window underneath, which
+is the only thing a raise is evidence of. Treating it as an action was seen
+live: a recording that crossed the desktop on its way to the panel emitted
+`focus_window` for the desktop on the way back, and a raise part-way through a
+script puts a window in front of whatever the next line was about to use. The
+raise a real switch needs still comes from the click that acts in the window --
+the same fallback the drag rule below already relies on.
+"""
 
 _AIMED_EVENTS = (*_POINTER_EVENTS, Assertion)
 """Events whose target the user chose, for "what was this pause waiting for".

@@ -727,6 +727,18 @@ class Win32CaptureBackend:
 
     name = "win32"
 
+    stop_pressed_at: float | None = None
+    """Always None: this backend does not recognise the stop chord as it captures.
+
+    `X11CaptureBackend` does, and ends its stream at the completing press so a
+    recording that fell behind live input still ends where the key was pressed.
+    Here the consumer's own recogniser is what ends a recording, which is what
+    `CaptureBackend.stop_pressed_at` says a backend that leaves this None gets.
+    Running one in a hook callback would put work in the one place that is kept
+    to reading a structure and enqueueing it -- see `_on_keyboard_event` for
+    why -- and there is no Windows machine to measure what it would cost.
+    """
+
     def __init__(self, display: str | None = None, screen: int = 0) -> None:
         """Prepare a capture backend. `display` is accepted and ignored.
 
@@ -988,6 +1000,39 @@ class Win32CaptureBackend:
                 return
             if isinstance(item, Exception):
                 raise CaptureUnavailable(str(item)) from item
+            yield item
+
+    def drain(self) -> Iterator[RawEvent]:
+        """Yield what the hooks have already delivered, without waiting for more.
+
+        `events` blocks, which is right for the recording loop and wrong at the
+        end of it: an interrupted run has to be able to keep whatever arrived
+        before the interrupt, and waiting for input that is not coming would
+        throw it away instead.
+
+        The queue is read once, up to the size it had when iteration began.
+        Draining until it is empty would never return on a session that is
+        still being used, and everything captured before the interrupt is what
+        an interrupted recording is owed: anything after it belongs to whatever
+        happens next.
+
+        The end-of-stream marker is put back rather than swallowed, so a reader
+        that calls `events` afterwards still terminates. An error from the pump
+        is skipped: `events` raises it, but here the run is already over and
+        this exists to salvage what arrived before the failure -- raising would
+        throw away the events queued behind it, which are the point. The same
+        contract as `X11CaptureBackend.drain`.
+        """
+        for _ in range(self._queue.qsize()):
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:  # pragma: no cover - qsize raced a consumer
+                return
+            if item is _SENTINEL:
+                self._queue.put(_SENTINEL)
+                return
+            if isinstance(item, Exception):
+                continue
             yield item
 
     def stop(self) -> None:

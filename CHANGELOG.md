@@ -5,7 +5,131 @@ was released.
 
 ## [Unreleased]
 
+### Added
+
+- **`motion = "verbatim"`: every recorded position, each with the wait that
+  preceded it.** The rest of the axis replays *where* the pointer went and
+  drops the clock -- `teleport` and `natural` keep one position per movement
+  and no timing at all, and `recorded` keeps the corners and still hands them
+  to a shaper with a duration derived from distance. A hover-driven menu is
+  decided by the clock: a row opens its submenu once the pointer has stayed on
+  it, and pops down once the pointer has been away from it for long enough, and
+  neither of those is in the route. Found on a third live take of the MATE demo
+  that produced the two menu fixes here: the route was by then exactly right --
+  the corners the hand turned on, down the submenu column -- and the replay
+  still clicked something the recording never chose, because it crossed the
+  menu's rows in 0.6s where the hand had taken 1.7s and rested on none of them.
+  `verbatim` is the value that answers that, and it is the longest by a long
+  way: the 602 recorded positions above become a script of some twelve hundred
+  lines, which is why it is asked for rather than assumed. Gaps are measured
+  between the events the script actually replays rather than between the
+  recording's own, so a hover's wait is not charged a second time to the
+  position that leaves the rest, and the recording's opening gap is not slept
+  through. `--verbatim-motion` sets it from the command line.
+
+- **A Windows CI job.** The suite on `windows-latest`, which is what would
+  have caught both of the portability bugs below before they reached a user.
+  It also asserts the `needs_ruff` tests actually ran, since the `dev` extra
+  installs ruff and a skip there would mean thirty-three assertions had
+  quietly stopped running on the one platform the job exists to cover.
+
 ### Fixed
+
+- **`motion = "verbatim"` replayed a rest for up to twice as long as it
+  lasted.** A rest is stamped where it *began* and only known to have been one
+  once the pointer leaves, so its hover comes out after the positions taken
+  inside it -- and under `record_motion` a resting hand takes plenty, a tremor
+  every few tens of milliseconds, each replayed with the wait that preceded it.
+  The hover then waited out the whole dwell on top of that. Found by running
+  the shape of a real recording through both halves rather than by reading
+  either: a pointer that arrived at a menu row, trembled there for 1.7s and
+  left came out as a script that slept for 3.58s over a 1.92s recording. A
+  hand that stopped dead was no better once the rest passed `pause_threshold`,
+  because an idle that long is also an inferred `Pause` over the same interval,
+  and that spent it in full a second time. The hover's wait is now whatever is
+  left of it: the clock is brought up to the end of the rest and no further, so
+  the positions inside it and a `Pause` beside it have each already spent their
+  part, and the position that leaves it is measured from there. The same
+  recordings now replay at the length they were made at, trembling or still, at
+  0.6s, 1.7s and 3.5s. The test that covered this built a hover with nothing
+  inside it, which is not what a hand makes. The other three values are not
+  touched: a hover and a `Pause` over one idle still both wait there.
+
+- **A recorded move was attributed to the window beneath the one it was over,
+  until the pointer left that window.** The cache that lets a run of moves skip
+  the window lookup (`_recent_window`) answered from the last lookup for as long
+  as the point stayed inside the rectangle that lookup had covered -- and
+  containing the point is not the same as being under it. A pointer that began
+  over bare desktop and moved onto an application drawn over it stayed inside
+  the desktop's rectangle the whole way, so every move on the application came
+  out against the desktop's origin and not its own, until a click looked the
+  window up properly: three of five moves in a two-window reproduction. The
+  answer now expires (`MOTION_TRUST_SECONDS`, a quarter of a second), so a
+  stacking change goes unnoticed for at most that long, and a recording pays a
+  few lookups a second to notice it where the uncached version paid hundreds.
+  It is a bound and not exactness -- a window that opens over the pointer is
+  still attributed to the one beneath for up to that long -- because pyguitest
+  offers no cheaper question than the window list whose cost the cache exists to
+  avoid.
+
+- **A pointer move over nothing waited out a retry meant for a click, and asked
+  the whole question again on the next move.** `_window` sleeps 50ms and asks
+  twice more when it finds no window at all, a retry earned by a click that
+  landed while a window was still animating in, and the motion path went
+  through it -- uncached, because only a *hit* was ever remembered. A miss is
+  any point no listed window covers, so each move there cost three full
+  lookups and two sleeps, on the stretch of screen where a pointer spends much
+  of its time. Found reading the motion path end to end for what else it costs per
+  event, once the cache had made the hit case cheap. A move now takes the first
+  answer and does not retry, and a miss is remembered for as long as a hit is;
+  a click keeps its patience.
+
+- **A second Ctrl-C while an interrupted recording was collecting its tail lost
+  the whole recording, and the note on the terminal said the opposite of what
+  interrupting did.** `Recorder.run` collects what capture had already
+  delivered when it is interrupted, at the pace consuming anything goes -- on a
+  recording that fell behind, that is the very thing that made the tail long,
+  so it is a wait a user cuts short with another Ctrl-C. Only the live loop was
+  guarded against `KeyboardInterrupt`, so the second one raised out of `run`
+  and past everything it had collected. It now gives the rest of the tail up
+  and keeps the recording as it stands, with a note saying its end is missing.
+  The line the CLI prints while the recorder is behind said that interrupting
+  "would drop whatever is still queued", which stopped being true when the tail
+  started being collected; it now says the stop key and Ctrl-C both wait for
+  the backlog, and that Ctrl-C a second time gives up on the rest. A backend
+  with no `drain` at all -- the protocol asks for one, but a recording is worth
+  more than its tail -- no longer costs the recording either.
+
+  That last case was the Windows backend, which was merged after the interrupt
+  path was written and had no `drain`: the same Ctrl-C there ended in an
+  `AttributeError` once the recording had been made, and nothing on Linux could
+  see it, because type-checking there skips the `sys.platform == "win32"`
+  branch that builds the class. It has one now, with the contract
+  `X11CaptureBackend.drain` has, and each backend's tests ask it whether it
+  offers the whole `CaptureBackend` protocol, so a member added to the protocol
+  next is checked without anyone remembering to. `mypy --platform win32`, which
+  is how this was found, is clean. What Windows still does not do is recognise
+  the stop chord at capture: `stop_pressed_at` is always None there, so a
+  Windows recording that falls behind answers the stop key only once the backlog
+  has been worked through.
+
+- **A rest was reported at the position where it *began*, up to
+  `motion_threshold` away from where the pointer actually stopped, so a replay
+  waited there and then moved elsewhere.** The still window has to stay
+  anchored where it opened -- that is what keeps a hand trembling over a menu
+  row one rest rather than a new arrival on every jitter -- but the position
+  it was *reported* at was that same opening sample, and a pointer that drifts
+  7px on its way to stopping reported the 7px it had passed through. Read off
+  a live recording of MATE's Applications menu: the rest that opens the
+  submenu holding "Text Editor" spans y=41 to y=48, and the generated script
+  waited 0.67s at y=41 before moving back *down* to y=48. A third of a menu row
+  above where the hand had settled is exactly what decides whose submenu is
+  open when the next click lands, and the element named for the hover was read
+  from that same stale point. A rest now keeps the window's opening time and
+  the pointer's final position (`_Rest`), so the wait happens where the
+  interface saw the pointer stop and the hover names what is under it there.
+  The move to a hover is also dropped where the route before it already ended
+  at that point, which is now the common case rather than the exception.
 
 - **A pyguitest without `backends.win32` crashed the win32 backend instead of
   explaining itself.** The key vocabulary this backend records against --
@@ -87,13 +211,196 @@ was released.
   dropped by `_dwell`'s own threshold check rather than this inventing a
   duration nothing observed.
 
-### Added
+- **A recording that fell behind live input lost its tail without saying so,
+  and could not be stopped.** Consuming an event is not free -- a window
+  lookup, and under `record_motion` an element hit-test for every motion -- so
+  a busy recording consumes slower than the hand making it. Capture's queue is
+  unbounded, so nothing is dropped while that lasts, and that is what hid it:
+  the stop key is read off that same stream, so a press made from behind the
+  backlog had not stopped working, it had not arrived yet -- and whatever was
+  still queued when the run ended went with it. Found live on a demo recording:
+  39 seconds of wall clock, 209 motions and one click consumed, the first 1.92
+  seconds of input, while over a hundred Escape presses and every keystroke
+  typed during it stayed in the queue. The generated script had no typing in it
+  at all, and the presses could not stop a recorder that had never seen them.
+  The notes did carry the whole demo's worth of window titles, because the
+  resolver reads the window list live: it was watching the text arrive while
+  still working through the motions that preceded it.
 
-- **A Windows CI job.** The suite on `windows-latest`, which is what would
-  have caught both of the portability bugs above before they reached a user.
-  It also asserts the `needs_ruff` tests actually ran, since the `dev` extra
-  installs ruff and a skip there would mean thirty-three assertions had
-  quietly stopped running on the one platform the job exists to cover.
+  An interrupted run now collects what capture had already delivered before it
+  finishes (`CaptureBackend.drain`), and sorts that tail exactly as live input
+  is, so a stop press inside it still ends the run instead of landing in the
+  script as keystrokes. Falling behind is said out loud as well, on the
+  terminal while it lasts (`Recorder.on_lag`, wired up by the CLI) and in the
+  recording's own notes, which the generated script's header carries -- a
+  script whose end is missing now says so.
+
+- **A pointer move raised the window it crossed, part-way through a script.**
+  `_activation` counted any pointer event as the recording *acting* in a
+  window, and a move is not one: it says where the pointer is, not what it is
+  doing there. A recording of the demo desktop came out with three of them --
+  `focus_window` for the desktop and for the panel, between moves -- because
+  crossing the desktop/panel boundary on the way to the panel reads as a return
+  to each. Raising a window mid-script puts it in front of whatever the next
+  line was about to use, which is the failure the drag rule beside it already
+  refuses to guess at. Only a click, a drag or a scroll raises a window now;
+  the raise a real switch needs still comes from the click that acts in it,
+  which is what the drag rule relies on as well.
+
+- **`record_motion` cost an accessibility hit-test per motion event, which is
+  what let a recording fall behind live input in the first place.** The element
+  under a pointer move is never read -- a move is rendered from its coordinates
+  and the origin of the window it was in, and `_point` looks at nothing else --
+  so resolving one bought nothing while paying for a round trip to the
+  application, hundreds of times a second. Recorded motion now resolves its
+  window only (`ContextResolver.resolve_window`, used by
+  `Normalizer._window_target`); hovers and clicks still resolve fully, a rest
+  being one call per rest and a click being the reason elements are resolved at
+  all. What is left per motion event is a window-list lookup, so a recording can
+  keep up with the hand making it instead of queueing behind it. The pause
+  rules do lose one thing they were never meant to have: a recorded move no
+  longer marks the element it crossed as "already seen", so an inferred wait
+  can no longer be aimed at one. It only shows up on a recording that has
+  pauses to infer from, and recorded motion is the setting that suppresses them
+  -- every motion event counts as input, so the idle clock rarely reaches
+  `pause_threshold` at all.
+
+- **The window lookup left in the motion path costs a window list per motion
+  event, so `record_motion` still fell behind live input.** The change above
+  took the accessibility hit-test out of a recorded move and took what was left
+  -- a hit test of the window list -- to be affordable hundreds of times a
+  second. It is not: `Session.window_at` lists every toplevel and reads a
+  rectangle for each one, so "which window is this point in" is O(windows)
+  round trips on *every* motion event. Measured on a real demo recording (MATE
+  on X11, 21 seconds of wall clock): 583 events consumed, 572 of them motion,
+  and the recorder 4.6s behind the hand making it -- about five times the
+  throughput that produced the original 39-second recording that started this
+  work, and nowhere near enough. The stop key was answered 4.6s late as a
+  result, which is the whole of the note that recording carries.
+
+  A recorded move now reuses the window the last lookup answered for as long as
+  the point stays inside the rectangle that lookup covered
+  (`DesktopResolver._recent_window`), and reads that rectangle again every time,
+  so a window that moved is noticed exactly as before. What is left per motion
+  event is one geometry read where there was a window list. Clicks and hovers
+  are untouched: both still resolve fully, and a click leaves its answer behind
+  for the moves that follow it.
+
+- **A recording that fell behind could not be stopped, and said the wrong thing
+  about the end it lost.** The stop key is read off the same stream as
+  everything else, so a press made from behind the backlog was answered only
+  once the loop had worked through everything done *before* it -- and while
+  input outpaced consumption that moment never arrived at all. Over a hundred
+  presses stayed in the queue unread, which is what "the stop key does not
+  work" looks like from the outside. Capture now recognises the chord as it
+  captures it and ends the stream at the completing press (`StopKey`, one
+  implementation, run by both the pump thread and the consumer), handing over
+  nothing captured after it. A recording therefore ends where the press was
+  made however far behind consumption is, and the presses still reach the
+  consumer first, so a single Escape is still recorded as the application's
+  keystroke and "press again within 2s" still appears. Presses handed back
+  because a run never completed are counted in one place now, so a press still
+  held when a run ends some other way is reported as the keystroke it becomes
+  instead of going into the script unmentioned.
+
+  The lag note can tell the two endings apart now, which it could not before. A
+  run that ended at the stop key has everything before that press in it, and
+  says so -- what is missing is what was done *while waiting* for the recorder
+  to catch up to the press, which is exactly what a stop that appears not to
+  work tempts someone into doing. That was the note on the 21-second recording
+  above, and it read as though the end had been dropped mid-demo. A run
+  interrupted some other way still warns that its end may be short.
+
+- **`record_motion` recorded no hovers at all, which is very often what it is
+  turned on for.** The whole-path branch returned before the rest bookkeeping
+  ran, so somewhere the pointer *stayed* was recorded as a run of positions and
+  nothing else: that same session held 572 motion events and not one dwell, and
+  the generator's hover wait -- the one thing that opens a submenu at replay,
+  its own comment saying a replay that arrives and leaves in the same instant
+  gets no submenu, no tooltip, and then clicks a coordinate that only exists
+  because of them -- could not appear in the script at all. Rests are tracked
+  whichever way motion is recorded now, so a rest is emitted as the hover it
+  was, resolved fully and once per rest, ahead of the move that leaves it, while
+  the path keeps every position it had.
+
+- **A menu interaction did not replay: `motion = "natural"` replaced the route
+  the pointer took with one it invented, straight across the menu.** Seen live
+  on MATE, recording the Applications menu. The recording had it exactly right
+  -- the pointer rested on the menu's first row (0.60s, which is what opens that
+  row's submenu), travelled right along that row, then *down the submenu column*
+  to the item at (212, 361) and clicked it. What the script had was a single
+  `move_mouse_naturally(212, 352)` from where the pointer rested, because
+  `natural` folds a run of positions to its endpoint and hands the rest to
+  pyguitest. pyguitest's path bows perpendicular to each leg by a fraction of
+  that leg's length (`arc`, 0.15 by default), so one leg from (57, 40) to
+  (212, 352) -- 347px long -- bows some 51px across the menu's own rows:
+  computed both ways the bow's apex sits at x≈89-180, inside the menu's column,
+  where the recorded route at those heights was at x≈212-218, inside the
+  submenu. Every row the bowed path crossed opened its own submenu, replacing
+  the one the recording depended on, so the click landed on an item that
+  recording never chose and the application the demo was opening never opened --
+  while the menu itself did open, which is what made it look like a click
+  problem rather than a path problem.
+
+  A movement that begins or ends where the pointer came to rest now keeps its
+  recorded route whichever shaping is asked for
+  (`_MotionRun.touches_a_rest`), rendered as `via=` waypoints thinned to the
+  corners it turned on. The rest is the evidence: the pointer had settled
+  somewhere, so where it went next was steered rather than travelled, and a
+  shaped path is then a *different* path rather than a smoother account of the
+  same one. `natural` still folds and shapes every movement that has no rest
+  beside it, which is what keeps its scripts short, and `recorded` is unchanged
+  -- it keeps every route that is not straight at all. On the recording above,
+  the same move now carries the seven points the hand turned on: right along the
+  first row, then down inside the submenu column.
+
+- **`natural` motion across a run of positions could ask a non-movement for a
+  dwell.** `_group_motion` decides where one movement ends and the next begins,
+  and now asks each event in the stream whether the pointer had settled beside
+  it -- asked of a `Click`, that is an `AttributeError` and the whole render
+  fails. Found by re-rendering the recording above rather than by a test, which
+  is why it has one now.
+
+- **A drag's path was not recorded at all, so `record_motion` did not do what it
+  says it does.** Motion under a held button was dropped outright by the
+  analyzer -- the drag event kept where it began and where it ended and nothing
+  between -- and a straight line between those two points is a *different*
+  gesture from the one that was made. It showed up as a hole in a real
+  recording: 494 positions across 16.68 seconds, with a 1.97-second stretch
+  between 11.56s and 13.53s in which no motion event existed at all, and one
+  drag sitting in the middle of it. `record_motion`'s own description names
+  this exact case ("the route itself -- a drag, a drawing, a gesture"), so the
+  setting was promising something the code never did.
+
+  A drag now carries its route (`Drag.route`), collected only when motion is
+  being recorded in its own right, each position resolved for its window only
+  as a recorded move is -- the element under the pointer is not what a drag is
+  drawn from. It is serialized as points, so `--regenerate` keeps it, and it
+  renders as pyguitest's own `drag(..., via=[...])`, thinned to the corners the
+  hand turned on. Written in screen coordinates -- a drag that moved its own
+  window, or a script asking for absolute locators -- the whole route goes in;
+  relative to a window, one `window_x`/`window_y` read serves the list, so only
+  the points sharing the *end*'s origin can, which is the limit `_group_motion`
+  already refused to cross. A recording made before this keeps its drags as
+  they were: there is no route in it to render, and none is invented.
+
+  The live capture check's drag now arcs deliberately rather than interpolating
+  straight, because a straight route is the one case where the recorded path
+  adds nothing -- a check that cannot tell the two apart agrees with any amount
+  of dropping it.
+
+- **A configuration block under any heading the loader did not recognise was
+  ignored in silence.** Five section names were hard-coded and only those were
+  read, so a file grouped any other way -- or one whose heading was simply
+  misspelled -- contributed nothing at all: the settings were in the file, the
+  file was in force, and none of it applied, with no error and nothing to say
+  why. Every table in the file is flattened now, whatever it is called, so a
+  section is grouping for the reader and nothing else; an unknown *key* is
+  still refused by name, in whichever section it appears. Found by auditing
+  every key in the example against the code -- which is also what turned up the
+  stale `record_motion` notes above. Two guards came out of it: the example is
+  asserted to *be* the defaults, and every setting is asserted to be named in
+  it.
 
 ## [0.3.0] — 2026-09-13
 

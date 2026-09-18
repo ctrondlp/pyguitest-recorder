@@ -80,6 +80,55 @@ def test_press_move_release_is_a_drag(press, release):
     assert (events[0].start.x, events[0].end.x) == (10, 300)
 
 
+def test_a_drag_records_the_route_it_was_dragged_along(press, release):
+    # The path *is* the gesture: a press, a glide and a release between the
+    # same two points is a straight drag, which is a different thing to have
+    # done. The route used to be dropped outright, and a real recording showed
+    # exactly what that leaves -- a 1.97s hole in the motion stream with the
+    # drag's two endpoints sitting either side of it.
+    events = drain(
+        Normalizer(options=NormalizerOptions(record_motion=True)),
+        [
+            press(1.0, x=10, y=10),
+            motion(1.05, 60, 40),
+            motion(1.10, 120, 70),
+            release(1.15, x=200, y=90),
+        ],
+    )
+    (drag,) = [event for event in events if isinstance(event, Drag)]
+    assert [(point.x, point.y) for point in drag.route] == [(60, 40), (120, 70)]
+
+
+def test_a_drag_records_no_route_unless_motion_is_recorded_in_its_own_right(
+    press, release
+):
+    events = drain(
+        Normalizer(),
+        [press(1.0, x=10, y=10), motion(1.05, 60, 40), release(1.1, x=200, y=90)],
+    )
+    (drag,) = [event for event in events if isinstance(event, Drag)]
+    assert drag.route == ()
+
+
+def test_the_drag_route_is_resolved_for_its_window_only(window):
+    # A drag is rendered from coordinates and one origin, so the element under
+    # the pointer is asked for no more than it is for a recorded move.
+    element = ElementRef(role="push button", name="Save")
+    resolver = FakeResolver(window=window, elements=[((0, 0, 400, 400), element)])
+    events = drain(
+        Normalizer(options=NormalizerOptions(record_motion=True), resolver=resolver),
+        [
+            RawEvent(kind="button_press", timestamp=1.0, x=10, y=10, button=1),
+            motion(1.05, 60, 40),
+            RawEvent(kind="button_release", timestamp=1.1, x=200, y=90, button=1),
+        ],
+    )
+    (drag,) = [event for event in events if isinstance(event, Drag)]
+    assert drag.route
+    assert all(point.element is None for point in drag.route)
+    assert drag.route[0].window is window
+
+
 def test_printable_keys_coalesce_into_one_string(key):
     events = drain(
         Normalizer(),
@@ -675,6 +724,66 @@ def test_a_hover_becomes_a_mouse_move_carrying_how_long_it_lasted():
     assert events[0].dwell == pytest.approx(0.9)
 
 
+def test_a_recorded_move_resolves_its_window_and_not_its_element(window):
+    # The element under a move is never read: it is rendered as a coordinate
+    # plus its window's origin. Resolving one anyway is an accessibility
+    # hit-test per motion event, which is what made `record_motion` expensive
+    # enough to consume slower than the hand making the recording.
+    element = ElementRef(role="push button", name="Save")
+    resolver = FakeResolver(window=window, elements=[((0, 0, 100, 100), element)])
+    events = drain(
+        Normalizer(options=NormalizerOptions(record_motion=True), resolver=resolver),
+        [motion(1.0, 65, 47)],
+    )
+    assert [type(e).__name__ for e in events] == ["MouseMove"]
+    assert events[0].target.window is window
+    assert events[0].target.element is None
+
+
+def test_a_recorded_move_that_rests_is_still_recorded_as_a_hover(window):
+    # Found live on a 21-second session: `record_motion` recorded 572 positions
+    # and not one rest, because the whole-path branch returned before any rest
+    # bookkeeping. So a menu that opened because the pointer *stayed* on it was
+    # recorded as a pointer passing through -- which is not what opens it at
+    # replay, and is the one thing a hover is for.
+    element = ElementRef(role="push button", name="Save")
+    resolver = FakeResolver(window=window, elements=[((0, 0, 100, 100), element)])
+    events = drain(
+        Normalizer(options=NormalizerOptions(record_motion=True), resolver=resolver),
+        [motion(1.0, 65, 47), motion(1.7, 400, 400)],
+    )
+    hovers = [e for e in events if e.dwell]
+    assert len(hovers) == 1
+    assert (hovers[0].target.x, hovers[0].target.y) == (65, 47)
+    assert hovers[0].dwell == pytest.approx(0.7)
+    # A rest is resolved fully, element and all, and there is one per rest
+    # rather than one per motion event -- which is what keeps this affordable.
+    assert hovers[0].target.element == element
+    # The move that ended the rest follows it, as a plain position.
+    assert events[-1].target.x == 400
+    assert not events[-1].dwell
+
+
+def test_a_recorded_move_that_never_rests_is_never_a_hover():
+    events = drain(
+        Normalizer(options=NormalizerOptions(record_motion=True)),
+        [motion(1.0, 10, 10), motion(1.05, 200, 200), motion(1.1, 400, 400)],
+    )
+    assert [type(e).__name__ for e in events] == ["MouseMove"] * 3
+    assert not [e for e in events if e.dwell]
+
+
+def test_recorded_motion_respects_hover_detection_being_switched_off(window):
+    events = drain(
+        Normalizer(
+            options=NormalizerOptions(record_motion=True, hover_threshold=0),
+            resolver=FakeResolver(window=window),
+        ),
+        [motion(1.0, 65, 47), motion(1.9, 400, 400)],
+    )
+    assert not [e for e in events if e.dwell]
+
+
 def test_passing_through_a_point_is_not_a_hover():
     events = drain(Normalizer(), [motion(1.0, 65, 47), motion(1.1, 400, 400)])
     assert events == []
@@ -694,6 +803,53 @@ def test_jitter_does_not_restart_the_clock():
     )
     assert len(events) == 1
     assert events[0].dwell == pytest.approx(1.0)
+    # ...and reported where the pointer came to a stop, not where the window
+    # opened: (67, 47), the last position still inside the tolerance.
+    assert (events[0].target.x, events[0].target.y) == (67, 47)
+
+
+def test_a_hover_is_reported_where_the_pointer_stopped_not_where_it_arrived():
+    # Read off a live recording of MATE's Applications menu: the rest that
+    # opens the submenu holding "Text Editor" is spent drifting from y=41 to
+    # y=48, and the hover came out at (91, 41) -- the sample that opened the
+    # window, 7px above where the pointer stopped. A replay parked there for
+    # the dwell sits a third of a row away from the row the hand had settled
+    # on, and on a menu row that is the difference between one row and the
+    # next.
+    events = drain(
+        Normalizer(),
+        [motion(1.0, 91, 41), motion(1.14, 91, 48), motion(1.72, 400, 400)],
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], MouseMove)
+    assert (events[0].target.x, events[0].target.y) == (91, 48)
+    # The clock still starts when the rest did: the drift is part of the wait
+    # the interface saw, and jitter must not restart it.
+    assert events[0].dwell == pytest.approx(0.72)
+
+
+def test_a_hover_names_the_element_under_where_the_pointer_stopped(window):
+    # The element is named so a replay can find it again, so it has to be the
+    # one under the pointer where it stopped -- not under the point the rest
+    # happened to open at, which can be a different row of the same menu.
+    settled = ElementRef(role="menu item", name="Text Editor")
+    resolver = FakeResolver(window=window, elements=[((85, 45, 40, 20), settled)])
+    events = drain(
+        Normalizer(resolver=resolver),
+        [motion(1.0, 91, 41), motion(1.14, 91, 48), motion(1.72, 400, 400)],
+    )
+    assert events[0].target.element == settled
+
+
+def test_a_press_on_the_point_a_rest_opened_at_still_needs_a_move(press, release):
+    # The pointer drifted off that point while it rested, so a press there is
+    # somewhere the pointer is not: dropping the hover move would click at
+    # wherever the rest left the pointer instead.
+    events = drain(
+        Normalizer(),
+        [motion(1.0, 200, 200), motion(1.05, 206, 206), press(1.8), release(1.85)],
+    )
+    assert [type(e).__name__ for e in events] == ["MouseMove", "Click"]
 
 
 def test_a_click_where_the_pointer_already_rested_adds_no_move(press, release):
@@ -773,13 +929,16 @@ def test_typing_during_a_hover_the_recording_ended_inside_still_comes_out_after(
 
 def test_a_hover_open_at_the_end_of_the_recording_is_not_dropped():
     # No further motion after the pointer settles: only flush() can still
-    # emit this hover, since nothing else will ever flush it.
+    # emit this hover, since nothing else will ever flush it. Flushed through
+    # the same reporting rule as any other rest, so it lands on the last
+    # position the pointer was seen at (65, 48), not the one the window opened
+    # at, with the dwell still measured from where the rest began.
     events = drain(
         Normalizer(), [motion(1.0, 65, 47), motion(1.4, 66, 47), motion(1.8, 65, 48)]
     )
     assert len(events) == 1
     assert isinstance(events[0], MouseMove)
-    assert (events[0].target.x, events[0].target.y) == (65, 47)
+    assert (events[0].target.x, events[0].target.y) == (65, 48)
     assert events[0].dwell == pytest.approx(0.8)
 
 

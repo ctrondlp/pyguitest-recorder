@@ -6,6 +6,9 @@
 #
 # Precedence is built-in defaults, then this file, then command-line flags.
 # Every key below shows its default; delete what you do not want to change.
+# The section headings are grouping for the reader -- a key works under any of
+# them, or under none -- and a key that is not a setting is refused by name,
+# whichever section it appears in.
 
 [capture]
 # display = ":0"          # unset means $DISPLAY
@@ -45,10 +48,17 @@ hover_threshold = 0.3       # seconds the pointer must rest somewhere for that
                             # replays onto whatever is there with no submenu
                             # open. Set to 0 for clicks, drags and keys only.
 record_motion = false       # emit *every* pointer motion, not just the rests.
-                            # Full fidelity, and expensive: each one resolves
-                            # the window and element under it, and renders a
-                            # line of its own. hover_threshold above covers the
-                            # case this used to be needed for.
+                            # For the route itself -- a drag, a drawing, a
+                            # gesture, all of which are *made* of their path --
+                            # not for what the pointer reveals: each position
+                            # resolves the window it was in and renders a line
+                            # of its own, so under "teleport" it is a wall of
+                            # moves, while "natural"/"recorded" is what the
+                            # shaping is for. A drag's path goes into its own
+                            # call as via= either way. Rests are still recorded
+                            # as hovers. hover_threshold above is the cheap half
+                            # of the same thing, and is what anything driven by
+                            # hovering actually needs.
 
 # Synchronization inference: work out what each pause was waiting for, and
 # emit that instead of a sleep. A window that opened becomes wait_for_window,
@@ -61,22 +71,37 @@ infer_idle = true
 
 [generator]
 locators = "element"        # "element", "relative" or "absolute"
-motion = "teleport"         # "teleport", "natural" or "recorded" -- how a
-                            # pointer move is rendered. "teleport" is
+motion = "teleport"         # "teleport", "natural", "recorded" or "verbatim":
+                            # how a pointer move is rendered. "teleport" is
                             # gui.move_mouse(), exactly as recorded. "natural"
                             # is gui.move_mouse_naturally(): the same call
                             # length and the same recorded endpoints, with a
                             # path pyguitest shapes, so a hover reveal or a hot
                             # corner fires on the approach rather than at the
-                            # destination. "recorded" also puts the route back
-                            # as via= waypoints thinned to the corners it
-                            # turned on -- the only one of the three that can
-                            # make a script long. Teleport stays the default
-                            # because the move before a click is rendered here
-                            # too, and a derived 0.25-1.5s per click adds up.
-                            # Needs a pyguitest with that method: without one
-                            # the recording still renders, as teleports, and
-                            # says so.
+                            # destination. "recorded" puts the route back as
+                            # via= waypoints thinned to the corners it turned
+                            # on. "verbatim" is every recorded position, each
+                            # with the wait that preceded it -- the only value
+                            # that replays the recorded *timing* as well, which
+                            # is what a menu row that opens its submenu on a
+                            # hover, and pops down once the pointer has left for
+                            # long enough, is reacting to. It needs
+                            # record_motion for anything to replay, and it turns
+                            # a few seconds of motion into a thousand-line
+                            # script.
+                            # One exception either way: a move that starts or
+                            # ends where the pointer came to rest keeps its
+                            # recorded route whichever setting is in force. A
+                            # route taken from a rest was steered, not travelled
+                            # -- a menu opens its submenu on that rest, and the
+                            # path out of it has to be the one that was walked,
+                            # or a shaped one crosses other rows and opens
+                            # theirs. Teleport stays the default because the
+                            # move before a click is rendered here too, and a
+                            # derived 0.25-1.5s per click adds up. Needs a
+                            # pyguitest with that method: without one the
+                            # recording still renders, as teleports, and says
+                            # so.
 max_waypoints = 32          # cap on via points under "recorded"; 0 or less for
                             # no cap. A backstop above what thinning produces,
                             # not a budget: reaching a much smaller number

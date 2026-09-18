@@ -24,8 +24,6 @@ else:  # Python 3.10 predates tomllib; tomli is the same parser
 
 __all__ = ["Settings", "config_paths", "load_settings", "ConfigError"]
 
-_SECTIONS = ("capture", "analyzer", "generator", "privacy", "output")
-
 
 class ConfigError(Exception):
     """The configuration file could not be read, or names something unknown."""
@@ -140,13 +138,20 @@ class Settings:
     # -- generator -------------------------------------------------------
     locators: Literal["element", "relative", "absolute"] = "element"
 
-    motion: Literal["teleport", "natural", "recorded"] = "teleport"
+    motion: Literal["teleport", "natural", "recorded", "verbatim"] = "teleport"
     """How a pointer move is rendered -- see GeneratorOptions.motion.
 
     Off by default, and on purpose: `_move` positions the pointer before a
     click and a scroll too, so shaping every move would put a derived
     0.25-1.5s in front of each one. Turn it on for a recording whose hover and
     approach behaviour is what has to replay.
+
+    `verbatim` is the longest and the most faithful: every recorded position
+    with the wait that preceded it, so the recorded *timing* is replayed as
+    well as the route. That is what a menu row that opens its submenu on a
+    hover, and pops down when the pointer leaves for long enough, is actually
+    reacting to. It needs `record_motion` for anything to replay, and it turns
+    a few seconds of motion into a thousand-line script.
     """
 
     max_waypoints: int = 32
@@ -263,14 +268,25 @@ def load_settings(path: str | Path | None = None) -> tuple[Settings, Path | None
 
 
 def _read(path: Path) -> Settings:
-    """Parse one TOML file into Settings, rejecting unknown keys."""
+    """Parse one TOML file into Settings, rejecting unknown keys.
+
+    Every table in the file is flattened, whatever it is called: a section is
+    grouping for whoever reads the file, and the keys are what mean anything.
+    Reading only a fixed list of section names was quietly wrong -- a block
+    under any other heading contributed nothing at all, so a file could be
+    half-ignored in silence, with no error and nothing to say why. An unknown
+    *key* is still refused, by name, in whatever section it appears.
+    """
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"{path}: {exc}") from exc
-    flat: dict[str, Any] = {k: v for k, v in data.items() if not isinstance(v, dict)}
-    for section in _SECTIONS:
-        flat.update(data.get(section, {}))
+    flat: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
     known = {f.name for f in fields(Settings)}
     unknown = sorted(set(flat) - known)
     if unknown:

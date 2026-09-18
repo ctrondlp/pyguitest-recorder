@@ -186,6 +186,14 @@ def build_parser() -> argparse.ArgumentParser:
         "waypoints thinned to the corners it turned on",
     )
     render.add_argument(
+        "--verbatim-motion",
+        dest="motion",
+        action="store_const",
+        const="verbatim",
+        help="every recorded position, with the wait that preceded it: the "
+        "recorded timing as well as the route, in a much longer script",
+    )
+    render.add_argument(
         "--teleport-motion",
         dest="motion",
         action="store_const",
@@ -381,6 +389,16 @@ def _record(
             recorder.on_check = lambda assertion: print(
                 f"Check: {describe_assertion(assertion)}", file=sys.stderr
             )
+        # Nothing else can explain a stop key that appears to do nothing: the
+        # presses are in the queue behind the backlog, so saying how far behind
+        # the recorder is says why the key has not been answered yet.
+        recorder.on_lag = lambda behind: print(
+            f"note: the recorder is {behind:.1f}s behind live input. It is "
+            "still recording, but it can only end once it has worked through "
+            "that backlog: the stop key and Ctrl-C both wait for it, and "
+            "Ctrl-C a second time gives up on whatever is still queued.",
+            file=sys.stderr,
+        )
         recorder.start()
     except CaptureUnavailable as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
