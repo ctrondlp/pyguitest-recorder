@@ -216,13 +216,25 @@ def describe_environment(
         environment.desktop = str(getattr(detected, "desktop", "") or "")
     except Exception as exc:  # noqa: BLE001 - detection is diagnostic, not required
         environment.notes.append(f"environment detection failed: {exc}")
-    environment.display = os.environ.get("DISPLAY", "")
+    # Both of these are X11 facts, and on Windows neither describes the
+    # session being recorded even when the variables are set. An X server
+    # (Xming, VcXsrv) or WSLg will happily set `DISPLAY` -- and WSLg sets
+    # `WAYLAND_DISPLAY` beside it -- on a machine whose capture backend is
+    # `win32` and whose recording contains no X client at all. Left alone,
+    # that put a foreign display into the session file and, with both
+    # variables present, an "recorded through XWayland" note into a recording
+    # made entirely of native Windows input.
+    windows = sys.platform == "win32"
+    environment.display = "" if windows else os.environ.get("DISPLAY", "")
     # Prefer what pyguitest detected; fall back to the environment only when
     # detection failed, since both variables being set does not by itself
     # prove the target application is an XWayland client.
-    environment.xwayland = "XWAYLAND" in environment.session_type.upper() or (
-        not environment.session_type
-        and bool(os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"))
+    environment.xwayland = not windows and (
+        "XWAYLAND" in environment.session_type.upper()
+        or (
+            not environment.session_type
+            and bool(os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"))
+        )
     )
     if environment.xwayland:
         environment.notes.append(
@@ -569,6 +581,39 @@ class Recorder:
 
     # -- setup ---------------------------------------------------------------
 
+    def _context_backends(self) -> tuple[str, ...]:
+        """The pyguitest backends that answer "which window, which element".
+
+        Named per platform rather than probed, because the *pair* is what has
+        to compose: the window half must answer in the same coordinate space
+        the capture backend reports, and the element half must be the one this
+        desktop actually publishes to. On Windows that is `win32` + `uia`;
+        everywhere else `x11` + `atspi`. Window first in both, so it keeps
+        every window capability when the element backend joins it.
+        """
+        window, element = (
+            ("win32", "uia") if sys.platform == "win32" else ("x11", "atspi")
+        )
+        wanted = []
+        if self.settings.window_context:
+            wanted.append(window)
+        if self.settings.element_context:
+            wanted.append(element)
+        return tuple(wanted)
+
+    def _session_locator(self, display: str) -> str:
+        """Where the session was looked for, in this platform's own terms.
+
+        `$DISPLAY` is an X11 idea and names nothing on Windows, where the
+        session is the desktop this process is attached to -- so a Windows
+        recording used to carry "no pyguitest session on $DISPLAY" into every
+        generated script and session file, sending a reader after a variable
+        their machine does not have.
+        """
+        if sys.platform == "win32":
+            return "for this desktop"
+        return f"on {display or '$DISPLAY'}"
+
     def _open_session(self, display: str, notes: list[str]) -> Any:
         """Open the pyguitest session the resolver asks its questions of.
 
@@ -591,21 +636,28 @@ class Recorder:
         capability. Composing the two is what lets one session answer both
         halves of a click; naming a backend that cannot build raises rather
         than being skipped, which is why the shorter lists are tried after.
+
+        **Windows names its own pair**, and every sentence above is about the
+        other platform. `win32` is the window half there and `uia` the element
+        half -- the same split, through the backends that exist on it. Asking
+        for `x11`/`atspi` on Windows cannot succeed: there is no X server for
+        the first and no accessibility bus for the second, so the session
+        never opened and every click in a Windows recording came out as a bare
+        screen coordinate with no window and no element. Confirmed on a real
+        Windows 11 recording before this was fixed -- thirteen events, every
+        one of them `window: null, element: null`, which is the recorder
+        losing the thing it exists to do.
         """
-        wanted = []
-        if self.settings.window_context:
-            wanted.append("x11")
-        if self.settings.element_context:
-            wanted.append("atspi")
+        wanted = list(self._context_backends())
         if not wanted:
             return None
         scoped = scoped_environment(display)
         session, failure = self._connect(wanted, scoped)
         if session is None:
             notes.append(
-                f"window and element context off: no pyguitest session on "
-                f"{display or '$DISPLAY'} ({failure}); clicks will carry bare "
-                "coordinates"
+                f"window and element context off: no pyguitest session "
+                f"{self._session_locator(display)} ({failure}); clicks will "
+                "carry bare coordinates"
             )
             return None
         if self.settings.window_context and not _lists_windows(session):

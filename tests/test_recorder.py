@@ -542,3 +542,37 @@ def test_capture_is_given_the_stop_key_the_settings_ask_for():
         1,
         0.5,
     )
+
+
+class TestWindowsEnvironmentSnapshot:
+    """X11 facts must not describe a Windows recording.
+
+    An X server (Xming, VcXsrv) or WSLg sets `DISPLAY` -- WSLg sets
+    `WAYLAND_DISPLAY` beside it -- on a machine whose capture backend is
+    `win32` and whose recording contains no X client at all. Left alone that
+    put a foreign display into the session file and an "recorded through
+    XWayland" note into a recording made entirely of native Windows input.
+    """
+
+    def _describe(self, platform, variables):
+        from pyguitest_recorder import recorder as recorder_module
+
+        with (
+            mock.patch.object(recorder_module.sys, "platform", platform),
+            mock.patch.dict(recorder_module.os.environ, variables, clear=False),
+        ):
+            return recorder_module.describe_environment(None, "win32")
+
+    def test_a_stray_display_is_not_recorded_on_windows(self):
+        env = self._describe("win32", {"DISPLAY": ":0"})
+        assert env.display == ""
+
+    def test_an_x_server_plus_wslg_does_not_claim_xwayland_on_windows(self):
+        env = self._describe("win32", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"})
+        assert env.xwayland is False
+        assert not any("XWayland" in note for note in env.notes)
+
+    def test_the_same_pair_still_means_xwayland_off_windows(self):
+        env = self._describe("linux", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"})
+        assert env.display == ":0"
+        assert env.xwayland is True

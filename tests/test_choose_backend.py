@@ -98,3 +98,55 @@ class TestAutoOnWindows:
 def test_an_unknown_backend_name_is_refused():
     with pytest.raises(CaptureUnavailable, match="unknown capture backend"):
         choose_backend(_settings(backend="nonesuch"))
+
+
+class TestContextBackends:
+    """Which pyguitest backends answer "which window, which element".
+
+    The pair has to exist on the platform being recorded. Asking for
+    `x11`/`atspi` on Windows cannot succeed -- no X server, no accessibility
+    bus -- and the session then never opened, so every click in a real
+    Windows recording came out `window: null, element: null`.
+    """
+
+    def _recorder(self, **overrides):
+        from pyguitest_recorder.recorder import Recorder
+
+        return Recorder(_settings(**overrides))
+
+    def test_windows_names_win32_and_uia(self, monkeypatch):
+        monkeypatch.setattr(recorder_module.sys, "platform", "win32")
+        assert self._recorder()._context_backends() == ("win32", "uia")
+
+    def test_every_other_platform_keeps_x11_and_atspi(self, monkeypatch):
+        monkeypatch.setattr(recorder_module.sys, "platform", "linux")
+        assert self._recorder()._context_backends() == ("x11", "atspi")
+
+    def test_the_window_backend_comes_first_on_both(self, monkeypatch):
+        # Order is load-bearing: the window backend must keep every window
+        # capability when the element backend composes onto it.
+        for platform, window in (("win32", "win32"), ("linux", "x11")):
+            monkeypatch.setattr(recorder_module.sys, "platform", platform)
+            assert self._recorder()._context_backends()[0] == window
+
+    def test_each_half_can_be_switched_off_independently(self, monkeypatch):
+        monkeypatch.setattr(recorder_module.sys, "platform", "win32")
+        assert self._recorder(element_context=False)._context_backends() == ("win32",)
+        assert self._recorder(window_context=False)._context_backends() == ("uia",)
+        assert (
+            self._recorder(
+                window_context=False, element_context=False
+            )._context_backends()
+            == ()
+        )
+
+    def test_the_failure_note_names_no_display_on_windows(self, monkeypatch):
+        # `$DISPLAY` is an X11 idea that names nothing on Windows, and this
+        # string goes into every generated script and session file.
+        monkeypatch.setattr(recorder_module.sys, "platform", "win32")
+        assert "DISPLAY" not in self._recorder()._session_locator("")
+
+    def test_the_failure_note_still_names_the_display_elsewhere(self, monkeypatch):
+        monkeypatch.setattr(recorder_module.sys, "platform", "linux")
+        assert self._recorder()._session_locator(":9") == "on :9"
+        assert "$DISPLAY" in self._recorder()._session_locator("")

@@ -18,6 +18,7 @@ from pyguitest_recorder.model import (
     Click,
     Drag,
     ElementRef,
+    Environment,
     HotKey,
     KeyStroke,
     MouseMove,
@@ -1969,3 +1970,64 @@ def test_an_unrecognised_motion_value_falls_back_to_the_default(window):
     assert "gui.move_mouse(" in source
     assert "move_mouse_naturally(" not in source
     assert validate(source) == []
+
+
+class TestKeyActionSettle:
+    """The gap after a keystroke, which normalize.py drops below its threshold.
+
+    Measured on a real Windows 11 recording of `Win+R`, `cmd`, Enter: four
+    real gaps of 0.49-0.69s, every one under `pause_threshold`, all four
+    dropped -- so the script fired the chord, the text and the Return back to
+    back and the Run dialog never had time to take focus.
+    """
+
+    def _render(self, events):
+        recording = Recording(environment=Environment(session_type="x11"))
+        for event in events:
+            recording.add(event)
+        return generate(recording)
+
+    def test_the_gap_after_a_chord_is_given_back(self):
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                TextInput(timestamp=1.59, delay=0.59, text="cmd"),
+            ]
+        )
+        assert 'gui.send_keys("#(r)")' in source
+        assert "gui.wait(0.59)" in source
+        assert source.index("send_keys") < source.index("gui.wait(0.59)")
+        assert source.index("gui.wait(0.59)") < source.index("type_text")
+
+    def test_a_run_of_fast_keys_gains_no_waits(self):
+        # Arrow navigation, or a typed accelerator: the person never paused,
+        # so neither should the script.
+        source = self._render(
+            [
+                KeyStroke(timestamp=1.0, delay=0.0, key="Down"),
+                KeyStroke(timestamp=1.05, delay=0.05, key="Down"),
+                KeyStroke(timestamp=1.10, delay=0.05, key="Return"),
+            ]
+        )
+        assert "gui.wait(" not in source
+
+    def test_a_long_think_is_capped_rather_than_slept_through(self):
+        source = self._render(
+            [
+                KeyStroke(timestamp=1.0, delay=0.0, key="Return"),
+                TextInput(timestamp=9.0, delay=8.0, text="hello"),
+            ]
+        )
+        assert "gui.wait(8" not in source
+        assert "gui.wait(1.00)" in source
+
+    def test_a_move_does_not_take_the_wait_the_click_after_it_needs(self):
+        # A MouseMove is a positioning step and carries its own settle;
+        # allowing this one as well put two waits on consecutive lines.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["ctrl", "o"]),
+                MouseMove(timestamp=1.6, delay=0.6, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.60)" not in source

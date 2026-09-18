@@ -35,6 +35,38 @@ was released.
 
 ### Fixed
 
+- **A Windows recording resolved no window and no element, so every click was
+  a bare screen coordinate.** `_open_session` named `x11` and `atspi` on every
+  platform, and neither can open on Windows -- no X server for the first, no
+  accessibility bus for the second -- so the context session never built.
+  Windows now names its own pair, `win32` and `uia`. Found in a real Windows 11
+  recording: thirteen events, every one `window: null, element: null`, which is
+  the recorder losing the thing it exists to do.
+
+- **A keystroke's effect was not given time to appear before the next line
+  replayed.** `normalize.py` records an idle of `pause_threshold` (1.0s) or
+  more as an explicit `Pause` and drops anything shorter, which is exactly
+  where it costs a replay: a chord routinely *opens* something the next line
+  types into. Measured on a real recording of `Win+R`, `cmd`, Enter -- gaps of
+  0.59s, 0.53s, 0.69s and 0.49s, all four dropped, so the script fired the
+  chord, the text and the Return back to back and the Run dialog never took
+  focus before the text arrived. The recorded gap is now restored after a
+  keystroke or chord, floored so a run of fast keys gains nothing and capped
+  so a long think does not become a long sleep. The same bug class
+  `_COORDINATE_CLICK_SETTLE` already fixed for two adjacent clicks, in the
+  place it was still open.
+
+- **Generated scripts described things Windows does not have.** The
+  no-session note read "no pyguitest session on $DISPLAY" in every Windows
+  script and session file, naming a variable that machine has none of; it now
+  says "for this desktop" there. `Environment.display` recorded a stray
+  `DISPLAY` set by an X server (Xming, VcXsrv) or WSLg on a machine whose
+  capture backend is `win32`, and with `WAYLAND_DISPLAY` set beside it -- as
+  WSLg does -- the snapshot claimed the recording came "through XWayland", in
+  a recording made entirely of native Windows input. Both are now Windows
+  facts on Windows.
+
+
 - **`motion = "verbatim"` replayed a rest for up to twice as long as it
   lasted.** A rest is stamped where it *began* and only known to have been one
   once the pointer leaves, so its hover comes out after the positions taken
