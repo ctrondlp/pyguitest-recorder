@@ -552,8 +552,20 @@ def _require_timestamp(payload: dict[str, Any], whole: dict[str, Any]) -> None:
         raise ValueError(
             f"'timestamp' is not a number: {stamp!r} ({type(stamp).__name__})"
         )
-    if not math.isfinite(stamp):
-        raise ValueError(f"'timestamp' is not a finite number: {stamp!r}")
+    # `math.isfinite` converts an int to a float first, so a JSON integer too
+    # large for one (`10**1000` is valid JSON) raised OverflowError from here --
+    # outside the ValueError this function and `--regenerate` promise. Such a
+    # value is unusable for the same reason inf is: nothing downstream can
+    # order or subtract it.
+    try:
+        finite = math.isfinite(stamp)
+    except OverflowError:
+        finite = False
+    if not finite:
+        shown = repr(stamp)
+        if len(shown) > 40:
+            shown = f"{shown[:37]}..."
+        raise ValueError(f"'timestamp' is not a finite number: {shown}")
 
 
 def event_from_dict(data: dict[str, Any]) -> Event:

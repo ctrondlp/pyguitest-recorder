@@ -543,7 +543,6 @@ class Recorder:
         application's escape presses to the script as keystrokes.
         """
         self._note_lag(raw)
-        self._note_injected(raw)
         keep, stop = self._stop_sequence(raw)
         if not stop:
             self._consume(keep)
@@ -595,6 +594,13 @@ class Recorder:
         if self._normalizer is None:
             return
         for raw in raws:
+            # Counted here, where a raw event actually enters the recording,
+            # and not when it arrives: a press that completes the stop chord
+            # is absorbed but never consumed, and the note says these keys
+            # are *in the script*. Held presses handed on by
+            # `StopKey.release()` come through here too, so they count once
+            # they are really recorded.
+            self._note_injected(raw)
             if self.settings.record_raw:
                 self.recording.raw.append(raw.to_dict())
             for event in self._normalizer.feed(raw):

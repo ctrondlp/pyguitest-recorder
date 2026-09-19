@@ -1050,6 +1050,16 @@ class Win32CaptureBackend:
             keysym = f"U+{info.scanCode:04X}"
             if pressed:
                 text = self._surrogates.character(info.scanCode)
+                if not text:
+                    # A high half waiting for its pair, or a half that will
+                    # never have one. `VK_PACKET` names no real key, and the
+                    # normalizer turns any text-less, non-modifier press into a
+                    # `KeyStroke` -- so enqueueing this produced
+                    # `gui.tap_key("U+D83D")` ahead of the `type_text` for the
+                    # very character it belonged to, a key name pyguitest
+                    # rejects at replay. The pair's low half still carries the
+                    # whole character.
+                    return
         else:
             keysym = self._vocabulary.name(vk_code, extended)
             if pressed:

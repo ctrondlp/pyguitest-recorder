@@ -27,6 +27,10 @@ def _key(kind: str, ts: float, keysym: str = "Escape") -> RawEvent:
     return RawEvent(kind=kind, timestamp=ts, keysym=keysym)
 
 
+def _key_injected(kind: str, ts: float, keysym: str) -> RawEvent:
+    return RawEvent(kind=kind, timestamp=ts, keysym=keysym, injected=True)
+
+
 class FakeBackend:
     """A capture backend whose start() fails after being asked to start."""
 
@@ -740,3 +744,46 @@ class TestInjectedInputIsReported:
         ):
             made._note_injected(raw)
         assert made._injected_keys == ["F15"]
+
+    def _recorder_absorbing(self, sequence):
+        """A recorder that has been fed `sequence` through `_absorb`, as live."""
+        from pyguitest_recorder.recorder import Recorder
+
+        made = Recorder(Settings())
+        made._normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        for raw in sequence:
+            if made._absorb(raw):
+                break
+        return made
+
+    def test_the_stop_chord_is_not_counted_as_being_in_the_recording(self):
+        # Found by review, and visible in the first live Windows recording's
+        # own note, which listed `Escape`: the note counted a key when it
+        # *arrived*, so the two presses of a completed stop chord -- absorbed,
+        # never recorded -- were reported as keystrokes "in this script".
+        made = self._recorder_absorbing(
+            [
+                _key_injected("key_press", 1.0, "F13"),
+                _key_injected("key_release", 1.05, "F13"),
+                _key_injected("key_press", 2.0, "Escape"),
+                _key_injected("key_release", 2.05, "Escape"),
+                _key_injected("key_press", 2.3, "Escape"),
+            ]
+        )
+        assert [type(event).__name__ for event in made.recording.events] == [
+            "KeyStroke"
+        ]
+        assert made._injected_keys == ["F13"]
+
+    def test_a_lone_escape_handed_on_to_the_recording_is_counted(self):
+        # The other direction: a single Escape is the application's own, is
+        # held while the recorder waits for a second, and reaches the recording
+        # when the chord is broken -- so once recorded it counts.
+        made = self._recorder_absorbing(
+            [
+                _key_injected("key_press", 1.0, "Escape"),
+                _key_injected("key_release", 1.05, "Escape"),
+                _key_injected("key_press", 9.0, "a"),
+            ]
+        )
+        assert made._injected_keys == ["Escape", "a"]

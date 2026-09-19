@@ -93,13 +93,14 @@ A **real `SysListView32`** (report view, a real header, real rows) offered
 in isolation (`False` before a click, `True` after) — unlike this window's
 tabs, menu items, and checkbox, none of which offer UI Automation any
 click/press action at all, so the generator correctly falls back to a
-coordinate for those and says so in a comment. The one place this list
-selection did *not* reproduce was inside the single most complex full run
-(everything above, back to back, at synthetic speed) — plausibly the same
-resolver-lag category the recording's own notes already flag ("the recorder
-fell 2s behind live input"), since the isolated mechanism is confirmed
-sound; not yet reproduced in isolation, so left open rather than claimed
-fixed.
+coordinate for those and says so in a comment. A list selection did not
+reproduce in the first full run, and was first put down to resolver lag; it
+was the probe window. A plain report-view list only selects when the click
+lands on the item's *label*, and the recorded click was at the centre of the
+row's UI Automation rectangle -- blank space to the right of the word -- so
+nothing was selected at record time either, and the replay faithfully
+reproduced that. Setting `LVS_EX_FULLROWSELECT`, as real list views nearly
+always do, made the same recording replay with the row selected.
 
 **A real application, not only the purpose-built window:** recording and
 replaying typed text, Ctrl+A/Ctrl+B (bold), and opening/closing the File and

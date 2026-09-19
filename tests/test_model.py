@@ -271,6 +271,32 @@ def test_a_non_finite_timestamp_raises_a_clear_error():
             )
 
 
+def test_an_integer_too_large_for_a_float_is_a_value_error_not_an_overflow():
+    # `10**1000` is valid JSON, and `math.isfinite` converts an int to a float
+    # before it looks: it raised OverflowError, outside the ValueError that
+    # `from_dict` and `--regenerate` document and catch. Both entry points are
+    # checked, and the message must stay readable rather than quote a
+    # thousand digits.
+    huge = 10**1000
+    with pytest.raises(ValueError, match="not a finite number") as raised:
+        event_from_dict(
+            {"kind": "mouse_move", "timestamp": huge, "target": {"x": 1, "y": 2}}
+        )
+    assert len(str(raised.value)) < 120
+    with pytest.raises(ValueError, match="not a finite number"):
+        Recording.from_dict(
+            {
+                "events": [
+                    {
+                        "kind": "mouse_move",
+                        "timestamp": huge,
+                        "target": {"x": 1, "y": 2},
+                    }
+                ]
+            }
+        )
+
+
 def test_recording_from_dict_rejects_a_non_object_top_level():
     with pytest.raises(ValueError, match="not a JSON object"):
         Recording.from_dict(["not", "an", "object"])  # type: ignore[arg-type]

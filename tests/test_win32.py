@@ -724,10 +724,42 @@ class TestKeyboardCallback:
             lparam, _info = keyboard_lparam(0xE7, scan_code=unit)
             made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
         presses = drain(made)
-        assert [raw.kind for raw in presses] == ["key_press", "key_press"]
-        # The high half is held back until it has a pair to become.
-        assert [raw.text for raw in presses] == ["", "\U0001f600"]
-        assert "".join(raw.text for raw in presses) == "\U0001f600"
+        # The high half is held back until it has a pair to become, and is not
+        # enqueued as a press of its own: the low half carries the character.
+        assert [raw.kind for raw in presses] == ["key_press"]
+        assert [raw.text for raw in presses] == ["\U0001f600"]
+
+    def test_a_surrogate_pair_is_one_text_input_and_no_keystroke(self, monkeypatch):
+        # Found by review, not by a live run -- which typed no emoji: the high
+        # half was enqueued with no text, and the normalizer turns any
+        # text-less, non-modifier press into a KeyStroke. The recording then
+        # carried `KeyStroke("U+D83D")` ahead of the TextInput, and the script
+        # `gui.tap_key("U+D83D")`, a key name pyguitest rejects at replay. The
+        # backend tests above never reached the normalizer, which is why a
+        # test pinned the half-press and nothing noticed.
+        import dataclasses
+
+        from pyguitest_recorder.analyzer import Normalizer
+        from pyguitest_recorder.model import KeyStroke, TextInput
+        from pyguitest_recorder.windows import NullResolver
+
+        units = "\U0001f600".encode("utf-16-le")
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for index in (0, 2):
+            unit = int.from_bytes(units[index : index + 2], "little")
+            lparam, _info = keyboard_lparam(0xE7, scan_code=unit)
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+            made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        events = []
+        for step, raw in enumerate(drain(made)):
+            events += normalizer.feed(dataclasses.replace(raw, timestamp=0.05 * step))
+        events += normalizer.flush()
+        assert [type(event) for event in events] == [TextInput]
+        assert events[0].text == "\U0001f600"
+        assert not any(isinstance(event, KeyStroke) for event in events)
 
     def test_a_high_half_with_no_pair_is_dropped_rather_than_typed(self, monkeypatch):
         # A half of a pair is not a character, and passing one on is what made
@@ -742,7 +774,8 @@ class TestKeyboardCallback:
         lparam, _info = keyboard_lparam(0x41)
         made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
         presses = drain(made)
-        assert [raw.text for raw in presses] == ["", "A"]
+        # Neither the dropped half nor anything else stands in for it.
+        assert [raw.text for raw in presses] == ["A"]
 
     def test_a_low_half_on_its_own_is_not_text(self, monkeypatch):
         fake = FakeUser32(text="")
@@ -750,7 +783,8 @@ class TestKeyboardCallback:
         made = Win32CaptureBackend()
         lparam, _info = keyboard_lparam(0xE7, scan_code=0xDE00)
         made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
-        assert [raw.text for raw in drain(made)] == [""]
+        # Not text, and not a key either: nothing is enqueued for it.
+        assert drain(made) == []
 
     def test_call_next_hook_ex_always_runs(self, monkeypatch):
         # The one rule every hook procedure on the platform follows, and the

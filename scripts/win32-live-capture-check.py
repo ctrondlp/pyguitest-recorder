@@ -421,7 +421,14 @@ def check(*, do_replay: bool) -> int:
         record_raw=True,
     )
     recorder = Recorder(settings=settings)
-    recorder.start()
+    try:
+        recorder.start()
+    except BaseException:
+        # The probe is already on the desktop, and the try/finally that would
+        # close it starts further down: left alone, a failed start leaves the
+        # window behind and the next run refuses to begin ("already exists").
+        stop_probe(process, title)
+        raise
     print(f"capturing win32 input while driving {title!r}")
     print("resolver:", type(recorder._resolver).__name__)
     for note in recorder.recording.environment.notes:

@@ -103,6 +103,9 @@ was released.
   the count. Key presses only: an injected pointer move is what every
   remote-control tool does constantly, and a note on every recording made over
   RDP would be noise.
+  The count is taken where a key enters the recording, not where it arrives:
+  the two presses of a completed stop chord are absorbed and never recorded,
+  and were being reported as keystrokes "in this script" all the same.
 
 - **The recorder recorded its own terminal on Windows.** `_ancestor_pids`
   shells out to `ps -eo pid=,ppid=` to find the window-owning process the
@@ -554,6 +557,12 @@ was released.
   built. The high half is held back until its pair arrives now, and an unpaired
   half -- no pair coming, which an ordinary key in between establishes -- is
   dropped rather than passed on, since it has no character to replay.
+  Held back means not enqueued either: the first version still queued the
+  high half as a text-less press, which the normalizer turns into a
+  `KeyStroke`, so the script opened with `gui.tap_key("U+D83D")` -- a key name
+  pyguitest rejects -- ahead of the `type_text` for the character it belonged
+  to. Found by review, since the live run typed no emoji, and pinned by a test
+  that runs a pair through the normalizer rather than stopping at the backend.
 
 - **A recording made through an X server on a Windows machine described itself
   as a native Windows desktop.** Windows can run Xming, VcXsrv or WSLg, and
@@ -602,6 +611,9 @@ was released.
   `event_from_dict` requires the field to be present, numeric and finite, and
   names which of the three failed. `to_dict` has always written it, so nothing
   this recorder saves is affected: a file that lost it is one a person edited.
+  A JSON integer too large for a float (`10**1000` is valid JSON) is the
+  fourth: `math.isfinite` converts before it looks, and raised `OverflowError`
+  from outside the same contract, so it is reported as not finite too.
 
 ## [0.3.0] — 2026-09-13
 
