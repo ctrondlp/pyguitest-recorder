@@ -11,6 +11,10 @@ import os
 import pytest
 
 from pyguitest_recorder.model import ElementRef
+from pyguitest_recorder.platforms import (
+    foreign_element_reason,
+    foreign_focus_reason,
+)
 from pyguitest_recorder.windows import DesktopResolver, NullResolver
 from pyguitest_recorder.windows import resolver as resolver_module
 
@@ -415,7 +419,11 @@ def test_an_element_with_no_window_to_corroborate_it_is_refused():
     target = made.resolve(100, 100)
     assert target.window is None
     assert target.element is None
-    assert any("not scoped to" in warning for warning in made.warnings)
+    # The refusal is what this test is about, not the sentence: the reason is
+    # worded per platform (see platforms.foreign_element_reason), so matching
+    # the Linux phrasing here failed the suite on Windows for no defect.
+    assert any("ignored accessible elements" in warning for warning in made.warnings)
+    assert any(foreign_element_reason() in warning for warning in made.warnings)
 
 
 def test_without_window_context_at_all_the_element_is_kept():
@@ -1021,7 +1029,9 @@ def test_focus_in_a_process_owning_no_window_here_is_refused():
     # otherwise be attributed to a widget in the developer's own editor.
     made = focus_resolver(FakeElement("entry", "Elsewhere", pid=4242))
     assert made.focused() is None
-    assert any("another session" in warning for warning in made.warnings)
+    # Worded per platform; `test_platforms.py` is where each wording is pinned.
+    assert any("ignored keyboard focus" in warning for warning in made.warnings)
+    assert any(foreign_focus_reason() in warning for warning in made.warnings)
 
 
 def test_focus_on_an_element_with_no_pid_is_refused():
