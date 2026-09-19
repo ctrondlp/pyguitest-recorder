@@ -371,11 +371,18 @@ def leak_resolver(element_pid, window_pid):
     return made
 
 
-def test_an_element_from_another_process_is_refused():
+def test_an_element_from_another_process_is_refused(monkeypatch):
     # The accessibility bus is session-scoped, not display-scoped, so a
     # recorder capturing a private X server is answered about applications on
     # every other one -- and both were asked about the same coordinate, so the
     # wrong answer is indistinguishable from the right one.
+    #
+    # Pinned to Linux, because that reasoning is Linux's. On Windows a pid
+    # mismatch is what a correctly resolved UWP widget looks like -- see
+    # TestTheUwpProcessSplit -- so unpinned this failed there for no defect.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = leak_resolver(element_pid=4242, window_pid=77)
     target = made.resolve(100, 100)
     assert target.element is None
@@ -383,7 +390,11 @@ def test_an_element_from_another_process_is_refused():
     assert any("pid 4242" in warning for warning in made.warnings)
 
 
-def test_the_mismatch_is_warned_about_once_not_per_event():
+def test_the_mismatch_is_warned_about_once_not_per_event(monkeypatch):
+    # Linux, for the reason the test above pins it.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = leak_resolver(element_pid=4242, window_pid=77)
     for _ in range(5):
         made.resolve(100, 100)
