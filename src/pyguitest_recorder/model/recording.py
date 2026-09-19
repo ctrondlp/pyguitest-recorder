@@ -100,11 +100,57 @@ class Recording:
     started_at: float = field(default_factory=time.time)
 
     def add(self, event: Event) -> Event:
-        """Append an event, filling in its delay from the previous one."""
-        if self.events and not event.delay:
-            event.delay = max(0.0, event.timestamp - self.events[-1].timestamp)
-        self.events.append(event)
+        """Insert an event in timestamp order, filling in its delay.
+
+        Ordered rather than appended, because "the hover began first and must
+        be emitted first" is the normalizer's own stated rule and it cannot
+        always keep it on its own. A hover is deliberately not ended by
+        keyboard input -- the pointer resting while someone types is not
+        someone hovering something -- so its duration is only known once
+        something else closes it, which can be after the typing has already
+        been emitted. `Normalizer.flush()` then hands it over last, carrying
+        the timestamp it actually began at.
+
+        Left appended, that put a hover two seconds *before* a run of typing
+        after it in the event list, `max(0.0, ...)` clamped its negative delay
+        to zero, and the generated script moved the pointer only after the
+        typing it preceded -- so the wait that gave the window time to appear
+        landed after the text that needed it. Measured on a real Windows
+        recording: `click OK` launched a console and the script typed into it
+        on the next line with nothing in between.
+
+        Almost always an append, since events arrive in order; the search
+        walks back only for the rare one that does not, and the delays of both
+        it and the event it displaces are recomputed from the neighbour each
+        actually ends up with.
+
+        Recomputed rather than filled in where empty, for the inserted event
+        too. A delay is the interval to the event in front of it, so one that
+        arrives carrying a delay of its own -- a saved event re-added, an
+        editor moving an event between neighbours -- was measured against
+        whichever predecessor it had *then*, and keeping it would put a gap in
+        front of an event nothing in the recording actually waited for.
+        """
+        index = len(self.events)
+        while index and self.events[index - 1].timestamp > event.timestamp:
+            index -= 1
+        self.events.insert(index, event)
+        self._fill_delay(index, force=True)
+        if index + 1 < len(self.events):
+            # Its predecessor changed, so whatever it was told before is no
+            # longer the gap in front of it.
+            self._fill_delay(index + 1, force=True)
         return event
+
+    def _fill_delay(self, index: int, force: bool = False) -> None:
+        """Set one event's delay from the event now in front of it."""
+        event = self.events[index]
+        if index == 0:
+            if force:
+                event.delay = 0.0
+            return
+        if force or not event.delay:
+            event.delay = max(0.0, event.timestamp - self.events[index - 1].timestamp)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the whole recording."""
@@ -149,12 +195,30 @@ class Recording:
                 events.append(event_from_dict(entry))
             except ValueError as exc:
                 raise ValueError(f"event #{index}: {exc}") from exc
-        return cls(
+        # Stable, so events sharing a timestamp keep the order they were
+        # written in. A recording saved before `add` kept this invariant can
+        # hold an event out of order -- a hover flushed last while carrying
+        # the timestamp it began at -- and `--regenerate` is exactly where
+        # someone goes to get a better script out of a recording they already
+        # have. Sorting here repairs that file rather than reproducing it, and
+        # costs nothing for a recording that was already in order.
+        events.sort(key=lambda event: event.timestamp)
+        recording = cls(
             events=events,
             environment=Environment.from_dict(data.get("environment", {})),
             raw=list(data.get("raw", [])),
             started_at=data.get("started_at", 0.0),
         )
+        # Every delay is recomputed from the neighbour the sort above just gave
+        # it. A delay is the interval to the event in front of it, so an event
+        # the sort moved was left holding a gap measured against whichever
+        # predecessor it had when the file was written -- visible in a
+        # `recorded`/`verbatim` script as a pause in front of a line nothing
+        # waited for. The first event's is zero, which is what a file that was
+        # never out of order already had.
+        for index in range(len(recording.events)):
+            recording._fill_delay(index, force=True)
+        return recording
 
     def save(self, path: str | Path) -> Path:
         """Write the recording to `path` as JSON, returning the path written.

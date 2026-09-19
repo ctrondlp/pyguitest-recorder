@@ -292,16 +292,22 @@ real accessibility bus, and focus-based targeting for typed text.
 `scripts/live-capture-check.py` runs the whole pipeline against a private Xvfb
 on every push, and it has found two bugs that no unit test could have.
 
-**Windows recording is newer and has not captured a real keystroke.** The
-suite runs on Windows in CI and the backend is tested against a fake `user32`,
-but a CI runner has no interactive desktop, so `SetWindowsHookExW` has never
-been asked to install a hook on a live session. See
-[docs/developers/status.md](docs/developers/status.md) for what that leaves
-outstanding.
+**Windows recording is newer, but has now captured a real keystroke.** A
+`SetWindowsHookExW` hook, driven against a purpose-built native window and
+against real Windows 11 Notepad, recorded and correctly replayed typed text,
+clicks, menus, tabs, a dropdown, a window drag mid-recording, and a
+maximize/restore cycle. Its `SysListView32` selection carries the one
+asterisk: the mechanism passed on its own, and the single most complex full
+run did not reproduce it — left open rather than claimed fixed.
+`scripts/win32-live-capture-check.py` is the Windows counterpart of
+`live-capture-check.py`. See
+[docs/developers/status.md](docs/developers/status.md) for what those runs
+found and fixed, and what is still outstanding.
 
-The per-part verification table, and the known gaps — no UI yet, only one
-recording of a real desktop application, and what GTK4 hit-testing costs — are
-in [docs/developers/status.md](docs/developers/status.md).
+The per-part verification table, and the known gaps — no UI yet, two
+recordings of a real desktop application (one on GhostBSD, one of Windows 11
+Notepad), and what GTK4 hit-testing costs — are in
+[docs/developers/status.md](docs/developers/status.md).
 
 ## Documentation
 

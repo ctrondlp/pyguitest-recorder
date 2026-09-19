@@ -27,6 +27,10 @@ def _key(kind: str, ts: float, keysym: str = "Escape") -> RawEvent:
     return RawEvent(kind=kind, timestamp=ts, keysym=keysym)
 
 
+def _key_injected(kind: str, ts: float, keysym: str) -> RawEvent:
+    return RawEvent(kind=kind, timestamp=ts, keysym=keysym, injected=True)
+
+
 class FakeBackend:
     """A capture backend whose start() fails after being asked to start."""
 
@@ -542,3 +546,244 @@ def test_capture_is_given_the_stop_key_the_settings_ask_for():
         1,
         0.5,
     )
+
+
+class TestWindowsEnvironmentSnapshot:
+    """X11 facts must not describe a Windows recording.
+
+    An X server (Xming, VcXsrv) or WSLg sets `DISPLAY` -- WSLg sets
+    `WAYLAND_DISPLAY` beside it -- on a machine whose capture backend is
+    `win32` and whose recording contains no X client at all. Left alone that
+    put a foreign display into the session file and an "recorded through
+    XWayland" note into a recording made entirely of native Windows input.
+    """
+
+    def _describe(self, backend, variables, platform="linux", detected=None):
+        """The environment a recording through `backend` would carry.
+
+        The platform is the *machine's*, and it is deliberately no longer what
+        decides any of this: the backend a recording is made with is, so that
+        `xrecord` on a Windows host keeps the display it recorded through.
+
+        `pyguitest.detect` is stood in for, and that is the point rather than a
+        convenience. What it answers is a fact about the host the suite is
+        running on and the pyguitest installed there: patching `sys.platform`
+        to `win32` makes a pyguitest with Windows support say `WIN32`
+        whatever `DISPLAY` holds, while a release without it goes on reading
+        the variables and says `XWAYLAND`. The same test therefore passed on
+        Linux and failed on Windows for a reason that had nothing to do with
+        what `describe_environment` does with the answer -- which is all this
+        class is about. `detected` is the answer to give; left out, it is what
+        a Linux classifier says for the variables in play.
+        """
+        from types import SimpleNamespace
+
+        import pyguitest
+
+        from pyguitest_recorder import recorder as recorder_module
+
+        def fake_detect(env=None):
+            source = recorder_module.os.environ if env is None else env
+            if detected is not None:
+                session_type = detected
+            elif source.get("DISPLAY") and source.get("WAYLAND_DISPLAY"):
+                session_type = "SessionType.XWAYLAND"
+            elif source.get("DISPLAY"):
+                session_type = "SessionType.X11"
+            else:
+                session_type = ""
+            return SimpleNamespace(session_type=session_type, compositor="", desktop="")
+
+        with (
+            mock.patch.object(recorder_module.sys, "platform", platform),
+            mock.patch.dict(recorder_module.os.environ, variables, clear=False),
+            mock.patch.object(pyguitest, "detect", fake_detect),
+        ):
+            return recorder_module.describe_environment(None, backend)
+
+    def test_a_stray_display_is_not_recorded_on_windows(self):
+        env = self._describe("win32", {"DISPLAY": ":0"})
+        assert env.display == ""
+
+    def test_an_x_server_plus_wslg_does_not_claim_xwayland_on_windows(self):
+        env = self._describe("win32", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"})
+        assert env.xwayland is False
+        assert not any("XWayland" in note for note in env.notes)
+
+    def test_an_xrecord_recording_on_windows_keeps_its_display(self):
+        # The other side of the same question: that is the recording the X
+        # server is *for*, so clearing the display out of its header would
+        # delete the one fact explaining where its coordinates came from.
+        env = self._describe(
+            "xrecord",
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
+            platform="win32",
+        )
+        assert env.display == ":0"
+        # The machine being Windows does not switch the XWayland question off
+        # for this backend; what the desktop *is* answers it, and here the
+        # detector says XWayland.
+        assert env.xwayland is True
+
+    def test_a_windows_desktop_is_not_xwayland_even_when_recorded_through_xrecord(
+        self,
+    ):
+        # The case the test above cannot be: a native Windows host, where the
+        # detector answers WIN32 whatever the variables say. An X server there
+        # (VcXsrv, Xming) is not XWayland, so the display is kept -- it still
+        # explains where the coordinates came from -- and the note that would
+        # tell someone Wayland clients were missing from the recording is not
+        # written, because no Wayland client was ever in reach.
+        env = self._describe(
+            "xrecord",
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
+            platform="win32",
+            detected="SessionType.WIN32",
+        )
+        assert env.display == ":0"
+        assert env.xwayland is False
+        assert not any("XWayland" in note for note in env.notes)
+
+    def test_the_same_pair_still_means_xwayland_off_windows(self):
+        env = self._describe(
+            "xrecord", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}
+        )
+        assert env.display == ":0"
+        assert env.xwayland is True
+
+
+class TestPlatformSemanticsFollowTheBackend:
+    """The context a recording opens is the recording's platform's, not the host's.
+
+    Windows runs X servers (Xming, VcXsrv, WSLg), and `backend = "xrecord"`
+    there records X clients -- so the context has to be asked for in X11's
+    terms even though the process is a native Windows one. Asking for
+    `win32` + `uia` would describe a desktop none of whose windows are in the
+    recording, and `$DISPLAY` would be named at nobody.
+    """
+
+    def _answer(self, backend, platform, question, *args):
+        """What `question` answers for a recorder with these settings.
+
+        The platform is patched around the *call*, not only the construction: a
+        recorder that has not started has no backend to ask, so it falls back to
+        the settings and then to the host -- which is the one path where
+        `sys.platform` still decides anything (see `Recorder._on_windows`).
+        """
+        from pyguitest_recorder import recorder as recorder_module
+
+        with mock.patch.object(recorder_module.sys, "platform", platform):
+            made = recorder_module.Recorder(settings=Settings(backend=backend))
+            return question(made, *args)
+
+    def test_auto_asks_the_host(self):
+        pair = Recorder._context_backends
+        assert self._answer("auto", "linux", pair) == ("x11", "atspi")
+        assert self._answer("auto", "win32", pair) == ("win32", "uia")
+
+    def test_xrecord_on_windows_asks_for_x11s_pair(self):
+        pair = Recorder._context_backends
+        assert self._answer("xrecord", "win32", pair) == ("x11", "atspi")
+
+    def test_the_session_locator_follows_the_backend_too(self):
+        # "for this desktop" is a sentence about a Windows session: an xrecord
+        # recording on Windows was made on a display and says so.
+        locator = Recorder._session_locator
+        assert self._answer("xrecord", "win32", locator, ":0") == "on :0"
+        assert self._answer("win32", "win32", locator, ":0") == "for this desktop"
+
+    def test_the_resolver_is_built_for_the_recording(self):
+        # No started backend to ask, so the settings answer -- and xrecord is
+        # X11's whatever machine it runs on, which is what stops a Windows
+        # host's pid corroboration being applied to an X11 recording.
+        made = Recorder(settings=Settings(backend="xrecord"))._open_resolver_for(None)
+        assert made.windows is False
+
+
+class TestInjectedInputIsReported:
+    """Input another process synthesised is marked, not silently included.
+
+    `RawEvent.injected` comes from `LLKHF_INJECTED`, which XRecord has no
+    equivalent of. The backend reads it and, until now, it went no further
+    than the raw log -- which is off by default -- so a keystroke nobody
+    pressed reached the script looking exactly like one that was. A real
+    case: a keep-awake script sending `{F15}` once a minute.
+    """
+
+    def _note_for(self, keysyms):
+        from pyguitest_recorder.recorder import _injected_note
+
+        return _injected_note(keysyms)
+
+    def test_the_note_names_the_key_and_the_count(self):
+        note = self._note_for(["F15", "F15", "F15"])
+        assert "3 keystroke" in note
+        assert "F15" in note
+        assert "injected" in note
+
+    def test_repeated_keys_are_named_once(self):
+        assert self._note_for(["F15", "F15"]).count("F15") == 1
+
+    def test_many_distinct_keys_are_truncated(self):
+        note = self._note_for(["F13", "F14", "F15", "F16", "F17", "F18", "F19"])
+        assert "..." in note
+
+    def test_only_injected_key_presses_are_counted(self):
+        # An injected pointer move is what a screen-sharing or remote-control
+        # tool does constantly; a note firing on every recording made over RDP
+        # would be noise rather than a finding.
+        from pyguitest_recorder.backends.base import RawEvent
+        from pyguitest_recorder.config import Settings
+        from pyguitest_recorder.recorder import Recorder
+
+        made = Recorder(Settings())
+        for raw in (
+            RawEvent(kind="key_press", timestamp=1.0, keysym="F15", injected=True),
+            RawEvent(kind="key_press", timestamp=2.0, keysym="a", injected=False),
+            RawEvent(kind="motion", timestamp=3.0, x=1, y=1, injected=True),
+        ):
+            made._note_injected(raw)
+        assert made._injected_keys == ["F15"]
+
+    def _recorder_absorbing(self, sequence):
+        """A recorder that has been fed `sequence` through `_absorb`, as live."""
+        from pyguitest_recorder.recorder import Recorder
+
+        made = Recorder(Settings())
+        made._normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        for raw in sequence:
+            if made._absorb(raw):
+                break
+        return made
+
+    def test_the_stop_chord_is_not_counted_as_being_in_the_recording(self):
+        # Found by review, and visible in the first live Windows recording's
+        # own note, which listed `Escape`: the note counted a key when it
+        # *arrived*, so the two presses of a completed stop chord -- absorbed,
+        # never recorded -- were reported as keystrokes "in this script".
+        made = self._recorder_absorbing(
+            [
+                _key_injected("key_press", 1.0, "F13"),
+                _key_injected("key_release", 1.05, "F13"),
+                _key_injected("key_press", 2.0, "Escape"),
+                _key_injected("key_release", 2.05, "Escape"),
+                _key_injected("key_press", 2.3, "Escape"),
+            ]
+        )
+        assert [type(event).__name__ for event in made.recording.events] == [
+            "KeyStroke"
+        ]
+        assert made._injected_keys == ["F13"]
+
+    def test_a_lone_escape_handed_on_to_the_recording_is_counted(self):
+        # The other direction: a single Escape is the application's own, is
+        # held while the recorder waits for a second, and reaches the recording
+        # when the chord is broken -- so once recorded it counts.
+        made = self._recorder_absorbing(
+            [
+                _key_injected("key_press", 1.0, "Escape"),
+                _key_injected("key_release", 1.05, "Escape"),
+                _key_injected("key_press", 9.0, "a"),
+            ]
+        )
+        assert made._injected_keys == ["Escape", "a"]

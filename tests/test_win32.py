@@ -163,13 +163,23 @@ class FakeKernel32:
         return 4321
 
 
-def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None):
-    """Patch `sys.platform`, `_user32` and `_kernel32` for one test."""
+def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True):
+    """Patch `sys.platform`, `_user32` and `_kernel32` for one test.
+
+    `stub_desktop` also answers the interactive-window-station question, so a
+    test about hooks is not also a test of the machine it runs on: the real
+    `_off_desktop_reason` asks pyguitest, and on a Windows box reached over
+    SSH that correctly answers "off the desktop" and would fail every probe
+    test here for the one reason that is not a defect. The class that is
+    *about* that check passes False and exercises the real thing.
+    """
     monkeypatch.setattr(win32_module.sys, "platform", "win32")
     monkeypatch.setattr(win32_module, "_user32", lambda: fake_user32 or FakeUser32())
     monkeypatch.setattr(
         win32_module, "_kernel32", lambda: fake_kernel32 or FakeKernel32()
     )
+    if stub_desktop:
+        monkeypatch.setattr(win32_module, "_off_desktop_reason", lambda: None)
 
 
 def mouse_info(x=100, y=200, mouse_data=0, flags=0):
@@ -660,6 +670,122 @@ class TestKeyboardCallback:
         (raw,) = drain(made)
         assert raw.keysym == "KP_Enter"
 
+    def test_a_vk_packet_keydown_carries_the_injected_character_as_text(
+        self, monkeypatch
+    ):
+        # Found live: a real win32 capture run recording `type_text("Ada")`
+        # produced a raw `key_press "0xe7"` with no text at all, and the
+        # generated script replayed `gui.tap_key("0xe7")` three times instead
+        # of typing anything. VK_PACKET (0xE7) is what SendInput's
+        # KEYEVENTF_UNICODE arrives as -- IME composition, an on-screen
+        # keyboard, and remote-input tools all go through it too, not only a
+        # synthetic probe -- and `ToUnicodeEx` cannot translate it: it maps a
+        # virtual key through the keyboard layout, and no layout defines
+        # VK_PACKET. The character was never missing, just unread: it sits in
+        # `scanCode` verbatim. `text=""` on the fake proves this does not
+        # route through `ToUnicodeEx` at all for this vk.
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_press"
+        assert raw.text == "A"
+        assert fake.tounicode_flags == []
+
+    def test_a_vk_packet_keyup_carries_no_text(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_release"
+        assert raw.text == ""
+
+    def test_a_character_outside_the_bmp_arrives_as_two_packets_and_as_one_text(
+        self, monkeypatch
+    ):
+        # Anything above U+FFFF is two UTF-16 code units, and SendInput sends
+        # each as a VK_PACKET keystroke of its own. `chr()` on a half is a
+        # lone surrogate -- not the character, and not something Python can
+        # write: `"\uD83D" + "\uDE00"` is two unpaired halves rather than one
+        # code point, so the generated script carried an ill-formed
+        # `gui.type_text(...)` and `--regenerate` died with UnicodeEncodeError
+        # writing the file it had just built.
+        units = "\U0001f600".encode("utf-16-le")
+        high = int.from_bytes(units[:2], "little")
+        low = int.from_bytes(units[2:], "little")
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for unit in (high, low):
+            lparam, _info = keyboard_lparam(0xE7, scan_code=unit)
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        presses = drain(made)
+        # The high half is held back until it has a pair to become, and is not
+        # enqueued as a press of its own: the low half carries the character.
+        assert [raw.kind for raw in presses] == ["key_press"]
+        assert [raw.text for raw in presses] == ["\U0001f600"]
+
+    def test_a_surrogate_pair_is_one_text_input_and_no_keystroke(self, monkeypatch):
+        # Found by review, not by a live run -- which typed no emoji: the high
+        # half was enqueued with no text, and the normalizer turns any
+        # text-less, non-modifier press into a KeyStroke. The recording then
+        # carried `KeyStroke("U+D83D")` ahead of the TextInput, and the script
+        # `gui.tap_key("U+D83D")`, a key name pyguitest rejects at replay. The
+        # backend tests above never reached the normalizer, which is why a
+        # test pinned the half-press and nothing noticed.
+        import dataclasses
+
+        from pyguitest_recorder.analyzer import Normalizer
+        from pyguitest_recorder.model import KeyStroke, TextInput
+        from pyguitest_recorder.windows import NullResolver
+
+        units = "\U0001f600".encode("utf-16-le")
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for index in (0, 2):
+            unit = int.from_bytes(units[index : index + 2], "little")
+            lparam, _info = keyboard_lparam(0xE7, scan_code=unit)
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+            made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        events = []
+        for step, raw in enumerate(drain(made)):
+            events += normalizer.feed(dataclasses.replace(raw, timestamp=0.05 * step))
+        events += normalizer.flush()
+        assert [type(event) for event in events] == [TextInput]
+        assert events[0].text == "\U0001f600"
+        assert not any(isinstance(event, KeyStroke) for event in events)
+
+    def test_a_high_half_with_no_pair_is_dropped_rather_than_typed(self, monkeypatch):
+        # A half of a pair is not a character, and passing one on is what made
+        # the script unwritable. The ordinary key that follows says the pair
+        # was never coming -- an IME or an emoji picker sends both halves
+        # together, in one SendInput call.
+        fake = FakeUser32(text="A")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=0xD83D)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        presses = drain(made)
+        # Neither the dropped half nor anything else stands in for it.
+        assert [raw.text for raw in presses] == ["A"]
+
+    def test_a_low_half_on_its_own_is_not_text(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=0xDE00)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        # Not text, and not a key either: nothing is enqueued for it.
+        assert drain(made) == []
+
     def test_call_next_hook_ex_always_runs(self, monkeypatch):
         # The one rule every hook procedure on the platform follows, and the
         # one this callback must not skip even on an ordinary keystroke: the
@@ -887,3 +1013,88 @@ class TestDrain:
         finally:
             made.stop()
         assert [e.kind for e in drained] == ["button_press"]
+
+
+class TestTheInteractiveDesktopCheck:
+    """Installing a hook is not evidence that it can observe anything.
+
+    A hook is scoped to the window station and desktop of the thread that
+    installs it, so a process off the interactive desktop installs one
+    against a desktop nobody is using. Measured over SSH on Windows 11: the
+    probe installed cleanly and `--doctor` printed "ready to record" for a
+    process that could not capture a thing.
+    """
+
+    def _reason(self, monkeypatch, interactive):
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake, stub_desktop=False)
+
+        class _Env:
+            is_interactive_desktop = interactive
+
+        class _Pyguitest:
+            @staticmethod
+            def detect():
+                return _Env()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Pyguitest)
+        return unavailable_reason()
+
+    def test_an_installed_hook_off_the_desktop_is_still_a_refusal(self, monkeypatch):
+        reason = self._reason(monkeypatch, interactive=False)
+        assert reason is not None
+        assert "interactive window station" in reason
+        assert not available()
+
+    def test_the_interactive_desktop_can_record(self, monkeypatch):
+        assert self._reason(monkeypatch, interactive=True) is None
+
+    def test_a_probe_that_cannot_tell_does_not_refuse(self, monkeypatch):
+        # detect() reports True where it cannot tell, and a recorder refusing
+        # on "cannot tell" would be worse than one that tries.
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
+
+        class _Broken:
+            @staticmethod
+            def detect():
+                raise RuntimeError("probe exploded")
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Broken)
+        assert unavailable_reason() is None
+
+    def test_a_pyguitest_without_the_field_does_not_refuse(self, monkeypatch):
+        # The field arrived with pyguitest's own Windows support and is in no
+        # release yet, so an installed pyguitest can be missing it while being
+        # otherwise perfectly usable -- and so can the type a checker reads off
+        # the floor this package declares, which is how this surfaced: as a
+        # lint failure rather than as a recording that refused. A field that is
+        # not there is "cannot tell", the same answer as a probe that raises.
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
+
+        class _OlderPyguitest:
+            @staticmethod
+            def detect():
+                return object()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _OlderPyguitest)
+        assert unavailable_reason() is None
+
+    def test_start_asks_the_question_too_and_not_only_the_selector(self, monkeypatch):
+        # `unavailable_reason` answers at *selection* time, and a backend can
+        # be selected on a real desktop and started somewhere else: RDP
+        # dropping to a disconnected session is enough, and nothing about
+        # `Win32CaptureBackend` requires that anything selected it at all. A
+        # hook that installs off the interactive desktop succeeds and then
+        # reports not one keystroke, so capture that starts and cannot capture
+        # is the one failure with no symptom to read afterwards.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake, stub_desktop=False)
+        monkeypatch.setattr(
+            win32_module,
+            "_off_desktop_reason",
+            lambda: "this process is not attached to the interactive window station",
+        )
+        made = Win32CaptureBackend()
+        with pytest.raises(CaptureUnavailable, match="interactive window station"):
+            made.start()
+        assert fake.hooked == []  # nothing was installed to see nothing with

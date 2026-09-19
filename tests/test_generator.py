@@ -18,6 +18,7 @@ from pyguitest_recorder.model import (
     Click,
     Drag,
     ElementRef,
+    Environment,
     HotKey,
     KeyStroke,
     MouseMove,
@@ -1969,3 +1970,153 @@ def test_an_unrecognised_motion_value_falls_back_to_the_default(window):
     assert "gui.move_mouse(" in source
     assert "move_mouse_naturally(" not in source
     assert validate(source) == []
+
+
+class TestKeyActionSettle:
+    """The gap after a keystroke, which normalize.py drops below its threshold.
+
+    Measured on a real Windows 11 recording of `Win+R`, `cmd`, Enter: four
+    real gaps of 0.49-0.69s, every one under `pause_threshold`, all four
+    dropped -- so the script fired the chord, the text and the Return back to
+    back and the Run dialog never had time to take focus.
+    """
+
+    def _render(self, events):
+        recording = Recording(environment=Environment(session_type="x11"))
+        for event in events:
+            recording.add(event)
+        return generate(recording)
+
+    def test_the_gap_after_a_chord_is_given_back(self):
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                TextInput(timestamp=1.59, delay=0.59, text="cmd"),
+            ]
+        )
+        assert 'gui.send_keys("#(r)")' in source
+        assert "gui.wait(0.59)" in source
+        assert source.index("send_keys") < source.index("gui.wait(0.59)")
+        assert source.index("gui.wait(0.59)") < source.index("type_text")
+
+    def test_a_run_of_fast_keys_gains_no_waits(self):
+        # Arrow navigation, or a typed accelerator: the person never paused,
+        # so neither should the script.
+        source = self._render(
+            [
+                KeyStroke(timestamp=1.0, delay=0.0, key="Down"),
+                KeyStroke(timestamp=1.05, delay=0.05, key="Down"),
+                KeyStroke(timestamp=1.10, delay=0.05, key="Return"),
+            ]
+        )
+        assert "gui.wait(" not in source
+
+    def test_a_long_think_is_capped_rather_than_slept_through(self):
+        source = self._render(
+            [
+                KeyStroke(timestamp=1.0, delay=0.0, key="Return"),
+                TextInput(timestamp=9.0, delay=8.0, text="hello"),
+            ]
+        )
+        assert "gui.wait(8" not in source
+        assert "gui.wait(1.00)" in source
+
+    def test_a_move_does_not_take_the_wait_the_click_after_it_needs(self):
+        # A MouseMove is a positioning step and carries its own settle;
+        # allowing this one as well put two waits on consecutive lines.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["ctrl", "o"]),
+                MouseMove(timestamp=1.6, delay=0.6, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.60)" not in source
+
+    def test_a_move_in_between_does_not_lose_the_wait_the_click_needs(self):
+        # The wait is owed to the *chord*, and each event's delay is the
+        # interval to the one before it: a click 0.2s after a move that was
+        # itself 0.7s after the chord read as 0.2s, under the floor, on an
+        # interval the recording had spent 0.9s on. The move is a positioning
+        # step, so it neither takes the wait nor cancels it.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                MouseMove(timestamp=1.7, delay=0.7, target=Target(x=5, y=6)),
+                Click(timestamp=1.9, delay=0.2, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.90)" in source
+        assert source.index("send_keys") < source.index("gui.wait(0.90)")
+
+    def test_the_click_that_addresses_the_new_window_takes_the_wait_once(self):
+        # The first click after the chord is the line that needed the pause;
+        # the one after it is addressing a window that is already up.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["ctrl", "o"]),
+                Click(timestamp=1.6, delay=0.6, target=Target(x=5, y=6)),
+                Click(timestamp=2.2, delay=0.6, target=Target(x=5, y=6)),
+            ]
+        )
+        assert source.count("gui.wait(0.60)") == 1
+
+    def test_a_recorded_pause_already_stands_for_the_gap(self):
+        # A gap long enough to be recorded as a `Pause` is already in the
+        # script, so the settle would sleep through the same interval twice.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                Pause(timestamp=1.6, delay=0.6, seconds=0.6),
+                Click(timestamp=1.7, delay=0.1, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.60)" in source
+        assert "gui.wait(0.70)" not in source
+
+
+class TestNoForeignPlatformVocabulary:
+    """A generated script must not name mechanisms the platform lacks.
+
+    Read by someone at the machine the recording was made on: "offered AT-SPI
+    no click action" in a Windows script sends them after an accessibility bus
+    their machine has never had.
+    """
+
+    def _script(self, session_type):
+        window = WindowRef(title="Run", app_id="run", pid=7, geometry=(0, 0, 400, 200))
+        element = ElementRef(role="push button", name="OK", actions=())
+        recording = Recording(environment=Environment(session_type=session_type))
+        recording.add(
+            Click(
+                timestamp=1.0,
+                target=Target(x=20, y=30, window=window, element=element),
+            )
+        )
+        return generate(recording)
+
+    def test_a_windows_script_names_ui_automation_not_atspi(self):
+        source = self._script("SessionType.WIN32")
+        assert "AT-SPI" not in source
+        assert "UI Automation" in source
+
+    def test_a_linux_script_still_names_atspi(self):
+        source = self._script("SessionType.X11")
+        assert "AT-SPI" in source
+        assert "UI Automation" not in source
+
+    def test_a_windows_script_mentions_no_x11_concept_anywhere(self):
+        # The whole vocabulary, not just the one comment: $DISPLAY, the X
+        # display and the accessibility bus have all reached generated output.
+        source = self._script("SessionType.WIN32")
+        for absent in ("$DISPLAY", "X display", "accessibility bus", "XWayland"):
+            assert absent not in source, f"{absent!r} leaked into a Windows script"
+
+    def test_regenerating_a_windows_recording_anywhere_still_says_windows(
+        self, monkeypatch
+    ):
+        # The recording's platform decides, not the machine regenerating it --
+        # `--regenerate` on Linux for a Windows recording is ordinary.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        assert "UI Automation" in self._script("SessionType.WIN32")

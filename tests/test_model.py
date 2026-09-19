@@ -14,6 +14,7 @@ from pyguitest_recorder.model import (
     ElementRef,
     Environment,
     HotKey,
+    MouseMove,
     Origin,
     Recording,
     Target,
@@ -223,14 +224,77 @@ def test_a_malformed_target_raises_a_clear_error_naming_the_event_kind():
     # -- `--regenerate` is meant to support exactly this kind of editing, so
     # the failure has to name what went wrong.
     with pytest.raises(ValueError, match="malformed 'click' event"):
-        event_from_dict({"kind": "click", "target": {"y": 2}})
+        event_from_dict({"kind": "click", "timestamp": 1.0, "target": {"y": 2}})
 
 
 def test_a_required_field_missing_entirely_raises_a_clear_error():
     # MouseMove.target has no default, so an event with none at all used to
     # surface as a bare TypeError from the dataclass constructor.
     with pytest.raises(ValueError, match="malformed 'mouse_move' event"):
-        event_from_dict({"kind": "mouse_move"})
+        event_from_dict({"kind": "mouse_move", "timestamp": 1.0})
+
+
+def test_an_event_with_no_timestamp_raises_a_clear_error():
+    # `Event.timestamp` defaults to 0.0 for one built in memory, which read a
+    # missing one as "the recording began here" -- over the field this model
+    # orders events by, in a file `--regenerate` invites people to edit.
+    with pytest.raises(ValueError, match="no 'timestamp'"):
+        event_from_dict({"kind": "mouse_move", "target": {"x": 1, "y": 2}})
+
+
+def test_a_non_numeric_timestamp_raises_a_clear_error():
+    # It used to reach Recording.from_dict's sort and raise TypeError from
+    # comparing a float to a str -- outside the ValueError contract that
+    # method documents for a malformed file.
+    with pytest.raises(ValueError, match="'timestamp' is not a number"):
+        event_from_dict(
+            {"kind": "mouse_move", "timestamp": "3.0", "target": {"x": 1, "y": 2}}
+        )
+
+
+def test_a_boolean_timestamp_is_not_a_number():
+    # `isinstance(True, int)` is True in Python, and a bool in this field is
+    # somebody's hand-edited file meaning something no reader can guess.
+    with pytest.raises(ValueError, match="'timestamp' is not a number"):
+        event_from_dict(
+            {"kind": "mouse_move", "timestamp": True, "target": {"x": 1, "y": 2}}
+        )
+
+
+def test_a_non_finite_timestamp_raises_a_clear_error():
+    # NaN compares false to everything, itself included, so a file with one
+    # sorts into an order nothing can explain.
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="not a finite number"):
+            event_from_dict(
+                {"kind": "mouse_move", "timestamp": value, "target": {"x": 1, "y": 2}}
+            )
+
+
+def test_an_integer_too_large_for_a_float_is_a_value_error_not_an_overflow():
+    # `10**1000` is valid JSON, and `math.isfinite` converts an int to a float
+    # before it looks: it raised OverflowError, outside the ValueError that
+    # `from_dict` and `--regenerate` document and catch. Both entry points are
+    # checked, and the message must stay readable rather than quote a
+    # thousand digits.
+    huge = 10**1000
+    with pytest.raises(ValueError, match="not a finite number") as raised:
+        event_from_dict(
+            {"kind": "mouse_move", "timestamp": huge, "target": {"x": 1, "y": 2}}
+        )
+    assert len(str(raised.value)) < 120
+    with pytest.raises(ValueError, match="not a finite number"):
+        Recording.from_dict(
+            {
+                "events": [
+                    {
+                        "kind": "mouse_move",
+                        "timestamp": huge,
+                        "target": {"x": 1, "y": 2},
+                    }
+                ]
+            }
+        )
 
 
 def test_recording_from_dict_rejects_a_non_object_top_level():
@@ -248,8 +312,8 @@ def test_recording_from_dict_names_which_event_index_is_malformed():
         Recording.from_dict(
             {
                 "events": [
-                    {"kind": "click", "target": {"x": 1, "y": 2}},
-                    {"kind": "click", "target": {"y": 2}},
+                    {"kind": "click", "timestamp": 1.0, "target": {"x": 1, "y": 2}},
+                    {"kind": "click", "timestamp": 2.0, "target": {"y": 2}},
                 ]
             }
         )
@@ -335,3 +399,80 @@ def test_a_boolean_expectation_survives_the_json_form():
         Assertion(check="checked", target=Target(x=0, y=0), expected=False).to_dict()
     )
     assert rebuilt.expected is False
+
+
+def test_an_out_of_order_event_is_inserted_where_its_timestamp_belongs():
+    # A hover is deliberately not ended by keyboard input, so it can be
+    # handed over last while carrying the time it began at. Appended, that
+    # put the move after typing it preceded -- and the script then typed into
+    # a window before the line that waited for it.
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=3.0, text="exit"))
+    recording.add(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    assert [e.timestamp for e in recording.events] == [1.0, 2.0, 3.0]
+
+
+def test_the_displaced_event_gets_the_delay_of_its_new_neighbour():
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=3.0, text="exit"))
+    recording.add(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    move, typed = recording.events[1], recording.events[2]
+    assert move.delay == pytest.approx(1.0)
+    # Recomputed: it used to follow the click at 1.0, and now follows the move.
+    assert typed.delay == pytest.approx(1.0)
+
+
+def test_events_already_in_order_are_appended_unchanged():
+    recording = Recording(environment=Environment(session_type="x11"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=2.5, text="hi"))
+    assert [e.timestamp for e in recording.events] == [1.0, 2.5]
+    assert recording.events[1].delay == pytest.approx(1.5)
+
+
+def test_loading_repairs_a_recording_saved_out_of_order():
+    # `--regenerate` is where someone goes for a better script out of a
+    # recording they already have, so it repairs the order rather than
+    # reproducing it.
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.events.append(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.events.append(TextInput(timestamp=3.0, text="exit"))
+    recording.events.append(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    loaded = Recording.from_dict(recording.to_dict())
+    assert [e.timestamp for e in loaded.events] == [1.0, 2.0, 3.0]
+
+
+def test_an_inserted_event_is_given_the_delay_of_its_new_predecessor():
+    # A delay is the interval to the event in front of it, so one that arrives
+    # carrying a delay of its own -- a saved event re-added, an editor moving
+    # an event along -- was measured against whatever preceded it *then*.
+    # Keeping it puts a gap in front of an event nothing waited for.
+    recording = Recording()
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=3.0, text="exit"))
+    stalled = MouseMove(timestamp=2.0, target=Target(x=5, y=5))
+    stalled.delay = 9.0
+    recording.add(stalled)
+    assert [e.timestamp for e in recording.events] == [1.0, 2.0, 3.0]
+    assert recording.events[1].delay == pytest.approx(1.0)
+    assert recording.events[2].delay == pytest.approx(1.0)
+
+
+def test_loading_recalculates_each_delay_from_the_neighbour_it_ended_up_with():
+    # The same rule on the way in from a file: the sort can move an event, and
+    # a delay is the interval to whatever ended up in front of it. Left as
+    # written, a `recorded`/`verbatim` script made from this file pauses for
+    # the predecessor the event no longer has.
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.events.append(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    typed = TextInput(timestamp=3.0, text="exit")
+    typed.delay = 2.0
+    moved = MouseMove(timestamp=2.0, target=Target(x=5, y=5))
+    moved.delay = 1.0
+    recording.events.append(typed)
+    recording.events.append(moved)
+    loaded = Recording.from_dict(recording.to_dict())
+    assert [e.timestamp for e in loaded.events] == [1.0, 2.0, 3.0]
+    assert [e.delay for e in loaded.events] == pytest.approx([0.0, 1.0, 1.0])

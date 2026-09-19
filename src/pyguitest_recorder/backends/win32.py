@@ -155,6 +155,34 @@ LLMHF_INJECTED = 0x01
 keyboard structure's, because they are two different structures documented
 on two different pages, not two views of the same flags word."""
 
+VK_PACKET = 0xE7
+"""The virtual key `SendInput`'s `KEYEVENTF_UNICODE` events arrive as.
+
+Documented on `KEYBDINPUT`: "Windows 2000/XP: ... this flag also causes
+Windows to synthesize the keystrokes necessary to produce a character with
+the specified virtual key code ... [with `KEYEVENTF_UNICODE`] ... the system
+synthesizes a `VK_PACKET` keystroke". A low-level hook sees exactly that --
+`vkCode == VK_PACKET` and `scanCode` holding the UTF-16 code unit that was
+injected, not a real key. `ToUnicodeEx` cannot recover it: it maps a virtual
+key through the active keyboard *layout*, and `VK_PACKET` names no key any
+layout defines, so it answers 0 for this vk on every keyboard -- see
+`_text_for`'s own docstring for the same shape of gap with dead keys. The
+character is not lost, though: unlike a dead key, this one is not ambiguous
+at all, it is sitting in `scanCode` verbatim, and reading it directly there
+is what `_record_key` does rather than asking a keyboard layout for an
+answer no layout has.
+
+A unit, not always a character: anything outside the Basic Multilingual
+Plane arrives as two of these, and `_SurrogatePairs` is where the halves are
+put back together into the one character they encode.
+
+Real, not a corner case reached only by injected test input. Every route
+that is not a plain physical keystroke goes through `KEYEVENTF_UNICODE` --
+IMEs composing CJK text, an on-screen keyboard, emoji pickers, clipboard-as-
+keystrokes tools, and other remote-input software -- so a recording made
+while any of those is how the person typed depends on this, not only a
+synthetic probe."""
+
 _VK_SHIFT, _VK_CONTROL, _VK_MENU = 0x10, 0x11, 0x12
 _VK_LSHIFT, _VK_RSHIFT = 0xA0, 0xA1
 _VK_LCONTROL, _VK_RCONTROL = 0xA2, 0xA3
@@ -454,7 +482,56 @@ def unavailable_reason() -> str | None:
             "logged on', or an SSH session with no desktop of its own)"
         )
     lib.UnhookWindowsHookEx(hook)
-    return None
+    return _off_desktop_reason()
+
+
+def _off_desktop_reason() -> str | None:
+    """Why a hook that installed will still see nothing, or None.
+
+    **Installing a hook is not evidence that it can observe anything.** A hook
+    is scoped to the window station and desktop of the thread that installs
+    it, and a process off the interactive desktop has a station of its own --
+    so `SetWindowsHookExW` succeeds there and then reports not one keystroke
+    from the session a person is actually using.
+
+    Measured over SSH on a real Windows 11 box: the probe above installed
+    cleanly, `unavailable_reason()` answered None, and `--doctor` printed
+    "ready to record" for a process that could not have captured anything.
+    The message it would have printed on failure even names SSH as the usual
+    cause -- the branch simply never fired.
+
+    Asked of pyguitest, whose `is_interactive_desktop` is the same question
+    already probed for `detect()` and confirmed correct on that machine, so
+    this neither duplicates the Win32 call nor invents a second answer to it.
+    An unanswerable probe is not a refusal: `detect()` reports True where it
+    cannot tell, and a recorder that refused on "cannot tell" would be worse
+    than one that tries.
+
+    **The field is newer than the floor this package declares.** It arrived
+    with pyguitest's own Windows support, and no release carries it yet, so an
+    installed pyguitest that is otherwise perfectly usable has no such
+    attribute -- and neither does the type a checker sees when it reads the
+    same floor, which is what made this a lint failure rather than a runtime
+    one. `getattr` with a default of True is the shape the rest of the tree
+    uses for a pyguitest question an older version cannot answer (see
+    `describe_environment`): the missing field means "cannot tell", which the
+    paragraph above already resolves as try-anyway.
+    """
+    try:
+        import pyguitest
+
+        detected = pyguitest.detect()
+    except Exception:  # noqa: BLE001 - cannot tell is not a refusal
+        return None
+    if getattr(detected, "is_interactive_desktop", True):
+        return None
+    return (
+        "this process is not attached to the interactive window station, so a "
+        "hook installs against a desktop nobody is using and would record "
+        "nothing. A service, a scheduled task not set to 'Run only when user "
+        "is logged on', and an SSH session all land here -- record from the "
+        "logged-in session instead"
+    )
 
 
 # -- the keysym vocabulary ----------------------------------------------------
@@ -719,6 +796,64 @@ def _text_for(lib: Any, vk_code: int, scan_code: int, state: _KeyboardState) -> 
     return text
 
 
+# -- unicode code units ------------------------------------------------------
+
+_HIGH_SURROGATES = range(0xD800, 0xDC00)
+_LOW_SURROGATES = range(0xDC00, 0xE000)
+
+
+class _SurrogatePairs:
+    r"""Rebuilds one character out of the UTF-16 code units `VK_PACKET` carries.
+
+    Anything outside the Basic Multilingual Plane -- an emoji, the rarer CJK
+    ideographs, every character above `U+FFFF` -- is two UTF-16 code units on
+    the wire, and `SendInput`'s `KEYEVENTF_UNICODE` sends each of them as a
+    `VK_PACKET` keystroke of its own: a high half in `0xD800-0xDBFF`, then a
+    low half in `0xDC00-0xDFFF`.
+
+    `chr()` on one of those halves produces a *lone surrogate*, and joining the
+    two halves does not decode them either -- a Python string is code points,
+    not UTF-16 units, so `"\\uD83D" + "\\uDE00"` is two unpaired halves rather
+    than the one character they encode. That is what this used to put in
+    `RawEvent.text`, and it travels a long way: `normalize.py` concatenates the
+    text of consecutive keystrokes into one `TextInput`, the generator writes
+    it as a literal in `gui.type_text(...)`, and the first thing that has to
+    encode that string -- writing the script, or pyguitest's own injection --
+    raises `UnicodeEncodeError`. A crash in the tool, over a character it had
+    read perfectly.
+
+    So the high half is held back until its pair arrives, and only the pair
+    becomes text. An unpaired half is dropped rather than passed on: it has no
+    character to replay, and the alternative is the crashing script above. The
+    halves of a pair are always adjacent -- one `SendInput` call describes one
+    character, and the key releases in between change nothing here -- and a
+    half still pending when some other key is pressed was never going to be
+    half of anything.
+    """
+
+    def __init__(self) -> None:
+        self._high: int | None = None
+
+    def character(self, unit: int) -> str:
+        """The text one `VK_PACKET` code unit contributes, pairing where it can."""
+        if self._high is not None:
+            high, self._high = self._high, None
+            if unit in _LOW_SURROGATES:
+                return chr(0x10000 + ((high - 0xD800) << 10) + (unit - 0xDC00))
+        if unit in _HIGH_SURROGATES:
+            self._high = unit
+            return ""
+        if unit in _LOW_SURROGATES:
+            # A low half whose high half never came, or whose predecessor was
+            # not it: alone it is not a character either.
+            return ""
+        return chr(unit)
+
+    def forget(self) -> None:
+        """Drop a pending high half: the next keystroke was not its pair."""
+        self._high = None
+
+
 # -- the backend ---------------------------------------------------------
 
 
@@ -761,6 +896,7 @@ class Win32CaptureBackend:
         self._queue: queue.Queue[Any] = queue.Queue()
         self._vocabulary = _KeyVocabulary()
         self._state = _KeyboardState()
+        self._surrogates = _SurrogatePairs()
 
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
@@ -771,12 +907,26 @@ class Win32CaptureBackend:
         so hook and pump have to share one thread from the start, the same
         constraint pyguitest's own `SetWinEventHook`-based window-events pump
         is built around.
+
+        The interactive desktop is checked first, and not left to
+        `unavailable_reason`: that one runs at *selection* time
+        (`choose_backend`), which is the wrong moment for this question twice
+        over. A backend can be selected on a real desktop and started on a
+        session that has since gone away -- RDP dropping to a disconnected
+        session is enough -- and nothing about this class requires that it was
+        selected at all. A hook that installs off the interactive desktop
+        succeeds and then sees nothing: capture that starts, reports no error,
+        and records no input is the one failure with no symptom to read
+        afterwards.
         """
         if sys.platform != "win32":
             raise CaptureUnavailable(unavailable_reason() or "not on Windows")
         lib = _user32()
         if lib is None:
             raise CaptureUnavailable("user32.dll did not load")
+        reason = _off_desktop_reason()
+        if reason is not None:
+            raise CaptureUnavailable(reason)
         self._keyboard_proc = _HOOKPROC(self._on_keyboard_event)
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
@@ -890,13 +1040,36 @@ class Win32CaptureBackend:
         extended = bool(info.flags & LLKHF_EXTENDED)
         injected = bool(info.flags & LLKHF_INJECTED)
         pressed = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-        keysym = self._vocabulary.name(vk_code, extended)
         text = ""
-        if pressed:
-            text = _text_for(lib, vk_code, info.scanCode, self._state)
-            self._state.press(vk_code)
+        if vk_code == VK_PACKET:
+            # Not a key `_KeyboardState` or `_KeyVocabulary` has any business
+            # naming or tracking as held -- see VK_PACKET's own docstring.
+            # `scanCode` already *is* the character, in UTF-16 code units, and
+            # `_SurrogatePairs` is what turns the two halves of one outside the
+            # BMP back into it.
+            keysym = f"U+{info.scanCode:04X}"
+            if pressed:
+                text = self._surrogates.character(info.scanCode)
+                if not text:
+                    # A high half waiting for its pair, or a half that will
+                    # never have one. `VK_PACKET` names no real key, and the
+                    # normalizer turns any text-less, non-modifier press into a
+                    # `KeyStroke` -- so enqueueing this produced
+                    # `gui.tap_key("U+D83D")` ahead of the `type_text` for the
+                    # very character it belonged to, a key name pyguitest
+                    # rejects at replay. The pair's low half still carries the
+                    # whole character.
+                    return
         else:
-            self._state.release(vk_code)
+            keysym = self._vocabulary.name(vk_code, extended)
+            if pressed:
+                # A high half still waiting for its pair was never going to be
+                # paired by this key.
+                self._surrogates.forget()
+                text = _text_for(lib, vk_code, info.scanCode, self._state)
+                self._state.press(vk_code)
+            else:
+                self._state.release(vk_code)
         self._queue.put(
             RawEvent(
                 kind="key_press" if pressed else "key_release",
