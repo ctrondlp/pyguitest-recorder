@@ -163,9 +163,7 @@ class FakeKernel32:
         return 4321
 
 
-def patch_windows(
-    monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True
-):
+def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True):
     """Patch `sys.platform`, `_user32` and `_kernel32` for one test.
 
     `stub_desktop` also answers the interactive-window-station question, so a
