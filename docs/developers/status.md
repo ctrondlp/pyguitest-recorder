@@ -18,7 +18,7 @@ claiming everything works.
 | Window/title-drift resolution | tested; drift fix found by a live recording |
 | XRecord decoding, keysyms, teardown | tested against synthetic X events |
 | XRecord capture of a real application | run live, here and on CI runners |
-| win32 capture (low-level hooks, keysyms, `ToUnicodeEx`) | tested against a fake `user32`; suite passes on Windows 11, but no hook has yet been installed on a real desktop |
+| win32 capture (low-level hooks, keysyms, `ToUnicodeEx`) | run live on Windows 11 -- see below |
 | AT-SPI element resolution | run live against a real accessibility bus |
 | Focus-based targeting for typed text | run live; names a GTK4 field |
 | Drag, window switching, save/regenerate | run live |
@@ -50,27 +50,87 @@ same wall described in
 [architecture.md](architecture.md#why-wayland-has-no-capture-backend),
 met from the other side.
 
-## Known gaps
+## Run live on Windows 11 (build 26200), interactive desktop
 
-- **The win32 capture backend has never captured a real keystroke.** The
-  suite passes on Windows 11 (build 26200), so every module imports and every
-  structure lays out as declared there — but that run was over SSH, which has
-  no interactive desktop, and `SetWindowsHookExW` refuses outright without
-  one. So no hook has been installed on a live session, and nothing below the
-  fakes has been exercised: every structure, flag and hook call is still only
-  transcribed from Microsoft's documentation and tested against a fake
-  `user32` (a real background thread, real `ctypes` structures cast from raw
-  addresses, no live Win32 API).
+2026-09-19, the console session itself (not SSH) — the exact gap the row
+above used to name. `scripts/win32-live-capture-check.py` is the Windows
+counterpart of `live-capture-check.py`, closing it the same way: a real
+`SetWindowsHookExW` hook, a real window (`scripts/win32_probe_window.py`, a
+hand-rolled `EDIT`/`BUTTON`/`STATIC`/`SysTabControl32`/`COMBOBOX`/
+`SysListView32`/menu-bar window — not an OS application, for the reason in
+its own module docstring), and the whole pipeline run over what came back.
 
-  Two things a first real desktop run has to confirm specifically. That
-  `ToUnicodeEx` with `_TOUNICODE_NO_KEYBOARD_STATE_CHANGE` really does leave
-  the layout's dead-key state alone — without that flag the recorder eats a
-  pending dead key, so a person typing `'` then `e` gets `'e` in their editor
-  instead of `é`, and the flag is honoured only on Windows 10 1607 and newer.
-  And the limit XRecord does not have: a low-level hook that misses Windows'
-  own `LowLevelHooksTimeout` is silently unhooked, with no error reaching this
-  process, so a Windows recording can in principle have an undetectable gap.
-  See `pyguitest_recorder/backends/win32.py`'s module docstring.
+**A real bug, found on the first live run and fixed before this line was
+written.** Typing `"Ada"` produced three raw `key_press` events named
+`0xe7` with no text at all, and the generated script replayed
+`gui.tap_key("0xe7")` three times instead of typing anything. `0xE7` is
+`VK_PACKET` — the virtual key `SendInput`'s `KEYEVENTF_UNICODE` arrives as,
+which is not only how a synthetic probe types but how IMEs, on-screen
+keyboards, and other remote-input tools produce text too — and
+`ToUnicodeEx` cannot translate it: it maps a virtual key through the active
+keyboard *layout*, and no layout defines `VK_PACKET`. The character was
+never missing, only unread: `KBDLLHOOKSTRUCT.scanCode` carries it verbatim
+for this one virtual key. Fixed in `Win32CaptureBackend._record_key` — see
+the CHANGELOG.
+
+**Confirmed working, full pipeline, one purpose-built window:** typed text
+landing correctly (`gui.type_text`, read back through `uia`'s own
+`Element.text` rather than a raw `GetWindowText` — see pyguitest's own
+`docs/validation.md` for why that distinction mattered), a plain button
+click, a real menu bar (`Actions` → `Do Thing`), a `SysTabControl32` tab
+switch, a `COMBOBOX` selection, a checkbox toggle, a right click dismissed
+with Escape, a scroll, a double click, and — the two deliberately adversarial
+cases — a window **drag** mid-recording and a **maximize/restore** cycle,
+neither preceded by a `WindowActivate` event. Both correctly produced "the
+window moved, so its origin is read again" in the generated script
+(`generator/python.py`'s `_ensure_geometry`, previously fixed for exactly
+this shape of bug per its own docstring, now confirmed live on Windows too)
+— three re-reads for three real geometry changes, all landing at the right
+place on replay against a fresh window.
+
+A **real `SysListView32`** (report view, a real header, real rows) offered
+`Element.click()`/`.selected` a working `SelectionItem` action — confirmed
+in isolation (`False` before a click, `True` after) — unlike this window's
+tabs, menu items, and checkbox, none of which offer UI Automation any
+click/press action at all, so the generator correctly falls back to a
+coordinate for those and says so in a comment. The one place this list
+selection did *not* reproduce was inside the single most complex full run
+(everything above, back to back, at synthetic speed) — plausibly the same
+resolver-lag category the recording's own notes already flag ("the recorder
+fell 2s behind live input"), since the isolated mechanism is confirmed
+sound; not yet reproduced in isolation, so left open rather than claimed
+fixed.
+
+**A real application, not only the purpose-built window:** recording and
+replaying typed text, Ctrl+A/Ctrl+B (bold), and opening/closing the File and
+Edit menus against Windows 11's own Notepad. The generated script correctly
+recorded and replayed the click and keystrokes; what made the round-trip
+*look* like a replay failure was Notepad itself, not this package —
+**Windows 11 Notepad restores its previous draft session even after the
+process is killed outright** (`taskkill /F`, no graceful shutdown, no save
+prompt possible), so "kill the process" does not mean "next launch starts
+blank" the way it does for a hand-rolled window or most classic Win32 apps.
+A second run's typing landed in the *same* restored, previously-typed
+document rather than a fresh one, reading back doubled. Confirmed by
+listing the window's own elements before touching anything: a freshly
+"killed and relaunched" Notepad came back with the exact draft tabs open
+before the kill, unmodified. Not a recorder bug and not chased further as
+one; recorded here because it is a real trap for testing Notepad
+specifically; the earlier, purpose-built-window checks are unaffected and
+are what this project leans on for anything needing a clean slate.
+
+**Two more things this run settled, briefly:** `services.msc`,
+`certmgr.msc`, and `regedit.exe` all auto-elevate via UAC on at least this
+machine (confirmed by a non-elevated process being refused even
+`TerminateProcess` on them) — out of reach for a non-elevated recorder
+session by UIPI before capture even enters into it, which is why the
+"real application" checks above use Notepad and a hand-rolled window rather
+than one of those. And the module's own two documented open questions —
+whether a real `LowLevelHooksTimeout` miss is truly undetectable, and
+whether `_TOUNICODE_NO_KEYBOARD_STATE_CHANGE` holds up on a genuinely
+international keyboard layout with real dead keys — were not reachable from
+this US-layout run and remain open.
+
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
 - **Only one recording has been made of a real desktop application** — a file

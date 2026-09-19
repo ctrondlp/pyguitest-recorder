@@ -670,6 +670,40 @@ class TestKeyboardCallback:
         (raw,) = drain(made)
         assert raw.keysym == "KP_Enter"
 
+    def test_a_vk_packet_keydown_carries_the_injected_character_as_text(
+        self, monkeypatch
+    ):
+        # Found live: a real win32 capture run recording `type_text("Ada")`
+        # produced a raw `key_press "0xe7"` with no text at all, and the
+        # generated script replayed `gui.tap_key("0xe7")` three times instead
+        # of typing anything. VK_PACKET (0xE7) is what SendInput's
+        # KEYEVENTF_UNICODE arrives as -- IME composition, an on-screen
+        # keyboard, and remote-input tools all go through it too, not only a
+        # synthetic probe -- and `ToUnicodeEx` cannot translate it: it maps a
+        # virtual key through the keyboard layout, and no layout defines
+        # VK_PACKET. The character was never missing, just unread: it sits in
+        # `scanCode` verbatim. `text=""` on the fake proves this does not
+        # route through `ToUnicodeEx` at all for this vk.
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_press"
+        assert raw.text == "A"
+        assert fake.tounicode_flags == []
+
+    def test_a_vk_packet_keyup_carries_no_text(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_release"
+        assert raw.text == ""
+
     def test_call_next_hook_ex_always_runs(self, monkeypatch):
         # The one rule every hook procedure on the platform follows, and the
         # one this callback must not skip even on an ordinary keystroke: the

@@ -155,6 +155,30 @@ LLMHF_INJECTED = 0x01
 keyboard structure's, because they are two different structures documented
 on two different pages, not two views of the same flags word."""
 
+VK_PACKET = 0xE7
+"""The virtual key `SendInput`'s `KEYEVENTF_UNICODE` events arrive as.
+
+Documented on `KEYBDINPUT`: "Windows 2000/XP: ... this flag also causes
+Windows to synthesize the keystrokes necessary to produce a character with
+the specified virtual key code ... [with `KEYEVENTF_UNICODE`] ... the system
+synthesizes a `VK_PACKET` keystroke". A low-level hook sees exactly that --
+`vkCode == VK_PACKET` and `scanCode` holding the UTF-16 code unit that was
+injected, not a real key. `ToUnicodeEx` cannot recover it: it maps a virtual
+key through the active keyboard *layout*, and `VK_PACKET` names no key any
+layout defines, so it answers 0 for this vk on every keyboard -- see
+`_text_for`'s own docstring for the same shape of gap with dead keys. The
+character is not lost, though: unlike a dead key, this one is not ambiguous
+at all, it is sitting in `scanCode` verbatim, and reading it directly there
+is what `_record_key` does rather than asking a keyboard layout for an
+answer no layout has.
+
+Real, not a corner case reached only by injected test input. Every route
+that is not a plain physical keystroke goes through `KEYEVENTF_UNICODE` --
+IMEs composing CJK text, an on-screen keyboard, emoji pickers, clipboard-as-
+keystrokes tools, and other remote-input software -- so a recording made
+while any of those is how the person typed depends on this, not only a
+synthetic probe."""
+
 _VK_SHIFT, _VK_CONTROL, _VK_MENU = 0x10, 0x11, 0x12
 _VK_LSHIFT, _VK_RSHIFT = 0xA0, 0xA1
 _VK_LCONTROL, _VK_RCONTROL = 0xA2, 0xA3
@@ -928,13 +952,24 @@ class Win32CaptureBackend:
         extended = bool(info.flags & LLKHF_EXTENDED)
         injected = bool(info.flags & LLKHF_INJECTED)
         pressed = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-        keysym = self._vocabulary.name(vk_code, extended)
         text = ""
-        if pressed:
-            text = _text_for(lib, vk_code, info.scanCode, self._state)
-            self._state.press(vk_code)
+        if vk_code == VK_PACKET:
+            # Not a key `_KeyboardState` or `_KeyVocabulary` has any business
+            # naming or tracking as held -- see VK_PACKET's own docstring.
+            # `scanCode` already *is* the character; a lone or unpaired
+            # surrogate half (a code point outside the BMP splits across two
+            # of these) still concatenates correctly into `_typed.text`,
+            # matching how `_unicode_events` sent it as UTF-16 code units.
+            keysym = f"U+{info.scanCode:04X}"
+            if pressed:
+                text = chr(info.scanCode)
         else:
-            self._state.release(vk_code)
+            keysym = self._vocabulary.name(vk_code, extended)
+            if pressed:
+                text = _text_for(lib, vk_code, info.scanCode, self._state)
+                self._state.press(vk_code)
+            else:
+                self._state.release(vk_code)
         self._queue.put(
             RawEvent(
                 kind="key_press" if pressed else "key_release",

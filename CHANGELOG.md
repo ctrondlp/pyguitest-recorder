@@ -35,6 +35,22 @@ was released.
 
 ### Fixed
 
+- **A win32 recording of typed text produced `gui.tap_key("0xe7")` instead of
+  `gui.type_text(...)`, because the recorder never read the character
+  `SendInput`'s `KEYEVENTF_UNICODE` actually sent.** Found live, the first
+  time the win32 capture backend ever recorded a real keystroke on an
+  interactive desktop rather than a fake `user32`: typing `"Ada"` produced
+  three raw `key_press` events named `0xe7` with no text at all, and the
+  generated script replayed three meaningless key taps instead of typing
+  anything. `0xE7` is `VK_PACKET`, the virtual key `KEYEVENTF_UNICODE`
+  arrives as -- not only from a synthetic probe, but from IMEs composing
+  CJK text, on-screen keyboards, and other remote-input tools -- and
+  `ToUnicodeEx` cannot translate it: it maps a virtual key through the
+  active keyboard layout, and no layout defines `VK_PACKET`. The character
+  was never missing, only unread: `KBDLLHOOKSTRUCT.scanCode` carries it
+  verbatim for this one virtual key. `Win32CaptureBackend._record_key` now
+  reads it directly there instead of asking `ToUnicodeEx` a question no
+  layout can answer.
 - **A hover that kept running through typing was replayed after it, so the
   wait that let a window appear landed after the text that needed it.** A
   hover is deliberately not ended by keyboard input -- the pointer resting
