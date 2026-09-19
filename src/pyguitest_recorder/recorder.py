@@ -61,6 +61,27 @@ minutes, which is precisely the recording that produces them.
 """
 
 
+def _injected_note(keysyms: list[str]) -> str:
+    """Say which keystrokes came from another process, and how many.
+
+    Named rather than counted alone: a reader who sees `F15` here recognises
+    their own keep-awake script instantly, where "3 injected keystrokes" would
+    send them looking through the script for something they did.
+    """
+    seen: list[str] = []
+    for keysym in keysyms:
+        if keysym not in seen:
+            seen.append(keysym)
+    named = ", ".join(seen[:5]) + (", ..." if len(seen) > 5 else "")
+    return (
+        f"{len(keysyms)} keystroke(s) in this recording were injected by "
+        f"another process rather than typed ({named}); they are in the script "
+        "because this recorder does not drop what it saw, but nothing pressed "
+        "them -- a keep-awake or macro tool is the usual source, and stopping "
+        "it while recording is the fix"
+    )
+
+
 def _lag_note(lag: float, stopped_at: float | None) -> str:
     """What to say about a recording that fell behind the input it consumed.
 
@@ -216,13 +237,25 @@ def describe_environment(
         environment.desktop = str(getattr(detected, "desktop", "") or "")
     except Exception as exc:  # noqa: BLE001 - detection is diagnostic, not required
         environment.notes.append(f"environment detection failed: {exc}")
-    environment.display = os.environ.get("DISPLAY", "")
+    # Both of these are X11 facts, and on Windows neither describes the
+    # session being recorded even when the variables are set. An X server
+    # (Xming, VcXsrv) or WSLg will happily set `DISPLAY` -- and WSLg sets
+    # `WAYLAND_DISPLAY` beside it -- on a machine whose capture backend is
+    # `win32` and whose recording contains no X client at all. Left alone,
+    # that put a foreign display into the session file and, with both
+    # variables present, an "recorded through XWayland" note into a recording
+    # made entirely of native Windows input.
+    windows = sys.platform == "win32"
+    environment.display = "" if windows else os.environ.get("DISPLAY", "")
     # Prefer what pyguitest detected; fall back to the environment only when
     # detection failed, since both variables being set does not by itself
     # prove the target application is an XWayland client.
-    environment.xwayland = "XWAYLAND" in environment.session_type.upper() or (
-        not environment.session_type
-        and bool(os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"))
+    environment.xwayland = not windows and (
+        "XWAYLAND" in environment.session_type.upper()
+        or (
+            not environment.session_type
+            and bool(os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"))
+        )
     )
     if environment.xwayland:
         environment.notes.append(
@@ -309,6 +342,9 @@ class Recorder:
     """
 
     _worst_lag: float = field(default=0.0, init=False)
+    _injected_keys: list[str] = field(default_factory=list, init=False)
+    """Keysyms another process synthesised during this run. See
+    `_note_injected`."""
     """The furthest behind live input consumption ever fell during this run."""
 
     _lag_reported_at: float = field(default=0.0, init=False)
@@ -390,6 +426,8 @@ class Recorder:
             self.recording.environment.notes.append(
                 _lag_note(self._worst_lag, self._stop_pressed_at())
             )
+        if self._injected_keys:
+            self.recording.environment.notes.append(_injected_note(self._injected_keys))
         self._collect_warnings()
         return self.recording
 
@@ -460,10 +498,33 @@ class Recorder:
         application's escape presses to the script as keystrokes.
         """
         self._note_lag(raw)
+        self._note_injected(raw)
         keep, stop = self._stop_sequence(raw)
         if not stop:
             self._consume(keep)
         return stop
+
+    def _note_injected(self, raw: Any) -> None:
+        """Count input that another process synthesised rather than a person.
+
+        `RawEvent.injected` comes from `LLKHF_INJECTED`/`LLMHF_INJECTED`, which
+        XRecord has no equivalent of -- Windows is telling this recorder
+        something X11 structurally cannot. The backend already reads it, and
+        until now it went no further than the raw log, which is off by default:
+        so a keystroke no one pressed reached the generated script looking
+        exactly like one that was.
+
+        Not dropped, which is this package's rule about everything it saw --
+        marked. A real case: a keep-awake script sending `{F15}` once a minute
+        put a `gui.tap_key("F15")` in the middle of a recording of the Run
+        dialog, and nothing in the script or its notes said where it came from.
+        Counting keystrokes only, deliberately: an injected *pointer* move is
+        what a screen-sharing or remote-control tool does constantly, and a
+        note firing on every recording made over RDP would be noise rather
+        than a finding.
+        """
+        if getattr(raw, "injected", False) and getattr(raw, "kind", "") == "key_press":
+            self._injected_keys.append(getattr(raw, "keysym", "") or "?")
 
     def _note_lag(self, raw: Any) -> None:
         """Notice when consumption has fallen behind the input it is consuming.
@@ -569,6 +630,39 @@ class Recorder:
 
     # -- setup ---------------------------------------------------------------
 
+    def _context_backends(self) -> tuple[str, ...]:
+        """The pyguitest backends that answer "which window, which element".
+
+        Named per platform rather than probed, because the *pair* is what has
+        to compose: the window half must answer in the same coordinate space
+        the capture backend reports, and the element half must be the one this
+        desktop actually publishes to. On Windows that is `win32` + `uia`;
+        everywhere else `x11` + `atspi`. Window first in both, so it keeps
+        every window capability when the element backend joins it.
+        """
+        window, element = (
+            ("win32", "uia") if sys.platform == "win32" else ("x11", "atspi")
+        )
+        wanted = []
+        if self.settings.window_context:
+            wanted.append(window)
+        if self.settings.element_context:
+            wanted.append(element)
+        return tuple(wanted)
+
+    def _session_locator(self, display: str) -> str:
+        """Where the session was looked for, in this platform's own terms.
+
+        `$DISPLAY` is an X11 idea and names nothing on Windows, where the
+        session is the desktop this process is attached to -- so a Windows
+        recording used to carry "no pyguitest session on $DISPLAY" into every
+        generated script and session file, sending a reader after a variable
+        their machine does not have.
+        """
+        if sys.platform == "win32":
+            return "for this desktop"
+        return f"on {display or '$DISPLAY'}"
+
     def _open_session(self, display: str, notes: list[str]) -> Any:
         """Open the pyguitest session the resolver asks its questions of.
 
@@ -591,21 +685,28 @@ class Recorder:
         capability. Composing the two is what lets one session answer both
         halves of a click; naming a backend that cannot build raises rather
         than being skipped, which is why the shorter lists are tried after.
+
+        **Windows names its own pair**, and every sentence above is about the
+        other platform. `win32` is the window half there and `uia` the element
+        half -- the same split, through the backends that exist on it. Asking
+        for `x11`/`atspi` on Windows cannot succeed: there is no X server for
+        the first and no accessibility bus for the second, so the session
+        never opened and every click in a Windows recording came out as a bare
+        screen coordinate with no window and no element. Confirmed on a real
+        Windows 11 recording before this was fixed -- thirteen events, every
+        one of them `window: null, element: null`, which is the recorder
+        losing the thing it exists to do.
         """
-        wanted = []
-        if self.settings.window_context:
-            wanted.append("x11")
-        if self.settings.element_context:
-            wanted.append("atspi")
+        wanted = list(self._context_backends())
         if not wanted:
             return None
         scoped = scoped_environment(display)
         session, failure = self._connect(wanted, scoped)
         if session is None:
             notes.append(
-                f"window and element context off: no pyguitest session on "
-                f"{display or '$DISPLAY'} ({failure}); clicks will carry bare "
-                "coordinates"
+                f"window and element context off: no pyguitest session "
+                f"{self._session_locator(display)} ({failure}); clicks will "
+                "carry bare coordinates"
             )
             return None
         if self.settings.window_context and not _lists_windows(session):

@@ -11,6 +11,10 @@ import os
 import pytest
 
 from pyguitest_recorder.model import ElementRef
+from pyguitest_recorder.platforms import (
+    foreign_element_reason,
+    foreign_focus_reason,
+)
 from pyguitest_recorder.windows import DesktopResolver, NullResolver
 from pyguitest_recorder.windows import resolver as resolver_module
 
@@ -367,11 +371,18 @@ def leak_resolver(element_pid, window_pid):
     return made
 
 
-def test_an_element_from_another_process_is_refused():
+def test_an_element_from_another_process_is_refused(monkeypatch):
     # The accessibility bus is session-scoped, not display-scoped, so a
     # recorder capturing a private X server is answered about applications on
     # every other one -- and both were asked about the same coordinate, so the
     # wrong answer is indistinguishable from the right one.
+    #
+    # Pinned to Linux, because that reasoning is Linux's. On Windows a pid
+    # mismatch is what a correctly resolved UWP widget looks like -- see
+    # TestTheUwpProcessSplit -- so unpinned this failed there for no defect.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = leak_resolver(element_pid=4242, window_pid=77)
     target = made.resolve(100, 100)
     assert target.element is None
@@ -379,7 +390,11 @@ def test_an_element_from_another_process_is_refused():
     assert any("pid 4242" in warning for warning in made.warnings)
 
 
-def test_the_mismatch_is_warned_about_once_not_per_event():
+def test_the_mismatch_is_warned_about_once_not_per_event(monkeypatch):
+    # Linux, for the reason the test above pins it.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = leak_resolver(element_pid=4242, window_pid=77)
     for _ in range(5):
         made.resolve(100, 100)
@@ -415,7 +430,11 @@ def test_an_element_with_no_window_to_corroborate_it_is_refused():
     target = made.resolve(100, 100)
     assert target.window is None
     assert target.element is None
-    assert any("not scoped to" in warning for warning in made.warnings)
+    # The refusal is what this test is about, not the sentence: the reason is
+    # worded per platform (see platforms.foreign_element_reason), so matching
+    # the Linux phrasing here failed the suite on Windows for no defect.
+    assert any("ignored accessible elements" in warning for warning in made.warnings)
+    assert any(foreign_element_reason() in warning for warning in made.warnings)
 
 
 def test_without_window_context_at_all_the_element_is_kept():
@@ -1021,7 +1040,9 @@ def test_focus_in_a_process_owning_no_window_here_is_refused():
     # otherwise be attributed to a widget in the developer's own editor.
     made = focus_resolver(FakeElement("entry", "Elsewhere", pid=4242))
     assert made.focused() is None
-    assert any("another session" in warning for warning in made.warnings)
+    # Worded per platform; `test_platforms.py` is where each wording is pinned.
+    assert any("ignored keyboard focus" in warning for warning in made.warnings)
+    assert any(foreign_focus_reason() in warning for warning in made.warnings)
 
 
 def test_focus_on_an_element_with_no_pid_is_refused():
@@ -1175,3 +1196,126 @@ def test_an_app_id_seen_later_is_adopted():
     made.resolve(1, 2)
     session.window = Handled(1, title="App", app_id="org.example.App")
     assert made.resolve(1, 2).window.app_id == "org.example.App"
+
+
+class TestPlatformWordingInNotes:
+    """The notes a recording carries must describe the platform it was made on.
+
+    These strings end up in the generated script's own footer, where a Windows
+    reader told about "the recorded display" and "one X display" is being sent
+    after machinery their desktop does not have.
+    """
+
+    def test_windows_notes_name_no_display(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        phrase = resolver_module._scope_phrase()
+        assert "display" not in phrase
+        assert phrase == "in this recording"
+
+    def test_other_platforms_keep_the_recorded_display(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        assert resolver_module._scope_phrase() == "on the recorded display"
+
+
+class TestTheUwpProcessSplit:
+    """A Store app's window and its widgets are owned by different processes.
+
+    Windows hosts every UWP toplevel in an `ApplicationFrameWindow` belonging
+    to `ApplicationFrameHost.exe`, while the widgets inside belong to the
+    application -- which pyguitest documents on `WINDOW_PID`. Treating that
+    mismatch as evidence of another session, which is what it means on Linux,
+    rejected every widget in the app.
+
+    Measured on a real Calculator recording: window pid 8824 (the host),
+    buttons pid 16672, and the only element that survived was `Close
+    Calculator` on the frame's own title bar, which the host does own.
+    """
+
+    def test_a_uwp_widget_is_kept_on_windows(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        target = leak_resolver(element_pid=16672, window_pid=8824).resolve(100, 100)
+        assert target.element is not None
+        assert target.element.name == "Save"
+
+    def test_the_same_mismatch_is_still_refused_off_windows(self, monkeypatch):
+        # On Linux it means exactly what it always meant: the accessibility
+        # bus answering about another login session.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        made = leak_resolver(element_pid=16672, window_pid=8824)
+        assert made.resolve(100, 100).element is None
+        assert any("pid 16672" in warning for warning in made.warnings)
+
+    def test_windows_still_rejects_an_element_that_cannot_fit(self, monkeypatch):
+        # The pid stops being evidence there; geometry takes over, and an
+        # element bigger than the window it is supposedly inside is still
+        # describing a different screen.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        session = FakeSession(window=FakeWindow(title="Target", pid=8824))
+        made = DesktopResolver(session=session, elements=False)
+        made._resolves_elements = True
+        made._element = lambda x, y: ElementRef(
+            role="push button", name="Save", pid=16672, extents=(0, 0, 9999, 9999)
+        )
+        assert made.resolve(100, 100).element is None
+
+
+class TestProcessAncestry:
+    """Finding the terminal the recorder is being driven from.
+
+    `ps` does not exist on Windows, so the Unix reader raised
+    FileNotFoundError, was swallowed, and left the ancestry empty -- silently
+    turning off the terminal exclusion it exists for. A real Windows recording
+    then waited for a window titled after the recording command itself, a
+    title that only exists while recording and can never match on replay.
+    """
+
+    def test_the_chain_is_walked_nearest_first(self):
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        chain = _walk_parents({me: 100, 100: 200, 200: 300, 300: 0}, limit=8)
+        assert chain == [100, 200, 300]
+
+    def test_the_limit_is_honoured(self):
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        parents = {me: 1000}
+        parents.update({n: n + 1 for n in range(1000, 1020)})
+        assert len(_walk_parents(parents, limit=3)) == 3
+
+    def test_a_cycle_cannot_hang_the_walk(self):
+        # A process table read while processes are exiting can hand back a
+        # cycle, and a reused pid can point back down its own chain.
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        chain = _walk_parents({me: 100, 100: 200, 200: 100}, limit=8)
+        assert chain == [100, 200]
+
+    def test_windows_does_not_shell_out_to_ps(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("ps was called on Windows")
+
+        monkeypatch.setattr(resolver_module.subprocess, "run", _explode)
+        monkeypatch.setattr(
+            resolver_module, "_parent_pids_windows", lambda: {os.getpid(): 4242}
+        )
+        assert resolver_module._ancestor_pids() == [4242]

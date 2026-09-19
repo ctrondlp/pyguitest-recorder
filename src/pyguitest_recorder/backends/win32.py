@@ -155,6 +155,30 @@ LLMHF_INJECTED = 0x01
 keyboard structure's, because they are two different structures documented
 on two different pages, not two views of the same flags word."""
 
+VK_PACKET = 0xE7
+"""The virtual key `SendInput`'s `KEYEVENTF_UNICODE` events arrive as.
+
+Documented on `KEYBDINPUT`: "Windows 2000/XP: ... this flag also causes
+Windows to synthesize the keystrokes necessary to produce a character with
+the specified virtual key code ... [with `KEYEVENTF_UNICODE`] ... the system
+synthesizes a `VK_PACKET` keystroke". A low-level hook sees exactly that --
+`vkCode == VK_PACKET` and `scanCode` holding the UTF-16 code unit that was
+injected, not a real key. `ToUnicodeEx` cannot recover it: it maps a virtual
+key through the active keyboard *layout*, and `VK_PACKET` names no key any
+layout defines, so it answers 0 for this vk on every keyboard -- see
+`_text_for`'s own docstring for the same shape of gap with dead keys. The
+character is not lost, though: unlike a dead key, this one is not ambiguous
+at all, it is sitting in `scanCode` verbatim, and reading it directly there
+is what `_record_key` does rather than asking a keyboard layout for an
+answer no layout has.
+
+Real, not a corner case reached only by injected test input. Every route
+that is not a plain physical keystroke goes through `KEYEVENTF_UNICODE` --
+IMEs composing CJK text, an on-screen keyboard, emoji pickers, clipboard-as-
+keystrokes tools, and other remote-input software -- so a recording made
+while any of those is how the person typed depends on this, not only a
+synthetic probe."""
+
 _VK_SHIFT, _VK_CONTROL, _VK_MENU = 0x10, 0x11, 0x12
 _VK_LSHIFT, _VK_RSHIFT = 0xA0, 0xA1
 _VK_LCONTROL, _VK_RCONTROL = 0xA2, 0xA3
@@ -454,7 +478,56 @@ def unavailable_reason() -> str | None:
             "logged on', or an SSH session with no desktop of its own)"
         )
     lib.UnhookWindowsHookEx(hook)
-    return None
+    return _off_desktop_reason()
+
+
+def _off_desktop_reason() -> str | None:
+    """Why a hook that installed will still see nothing, or None.
+
+    **Installing a hook is not evidence that it can observe anything.** A hook
+    is scoped to the window station and desktop of the thread that installs
+    it, and a process off the interactive desktop has a station of its own --
+    so `SetWindowsHookExW` succeeds there and then reports not one keystroke
+    from the session a person is actually using.
+
+    Measured over SSH on a real Windows 11 box: the probe above installed
+    cleanly, `unavailable_reason()` answered None, and `--doctor` printed
+    "ready to record" for a process that could not have captured anything.
+    The message it would have printed on failure even names SSH as the usual
+    cause -- the branch simply never fired.
+
+    Asked of pyguitest, whose `is_interactive_desktop` is the same question
+    already probed for `detect()` and confirmed correct on that machine, so
+    this neither duplicates the Win32 call nor invents a second answer to it.
+    An unanswerable probe is not a refusal: `detect()` reports True where it
+    cannot tell, and a recorder that refused on "cannot tell" would be worse
+    than one that tries.
+
+    **The field is newer than the floor this package declares.** It arrived
+    with pyguitest's own Windows support, and no release carries it yet, so an
+    installed pyguitest that is otherwise perfectly usable has no such
+    attribute -- and neither does the type a checker sees when it reads the
+    same floor, which is what made this a lint failure rather than a runtime
+    one. `getattr` with a default of True is the shape the rest of the tree
+    uses for a pyguitest question an older version cannot answer (see
+    `describe_environment`): the missing field means "cannot tell", which the
+    paragraph above already resolves as try-anyway.
+    """
+    try:
+        import pyguitest
+
+        detected = pyguitest.detect()
+    except Exception:  # noqa: BLE001 - cannot tell is not a refusal
+        return None
+    if getattr(detected, "is_interactive_desktop", True):
+        return None
+    return (
+        "this process is not attached to the interactive window station, so a "
+        "hook installs against a desktop nobody is using and would record "
+        "nothing. A service, a scheduled task not set to 'Run only when user "
+        "is logged on', and an SSH session all land here -- record from the "
+        "logged-in session instead"
+    )
 
 
 # -- the keysym vocabulary ----------------------------------------------------
@@ -890,13 +963,24 @@ class Win32CaptureBackend:
         extended = bool(info.flags & LLKHF_EXTENDED)
         injected = bool(info.flags & LLKHF_INJECTED)
         pressed = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-        keysym = self._vocabulary.name(vk_code, extended)
         text = ""
-        if pressed:
-            text = _text_for(lib, vk_code, info.scanCode, self._state)
-            self._state.press(vk_code)
+        if vk_code == VK_PACKET:
+            # Not a key `_KeyboardState` or `_KeyVocabulary` has any business
+            # naming or tracking as held -- see VK_PACKET's own docstring.
+            # `scanCode` already *is* the character; a lone or unpaired
+            # surrogate half (a code point outside the BMP splits across two
+            # of these) still concatenates correctly into `_typed.text`,
+            # matching how `_unicode_events` sent it as UTF-16 code units.
+            keysym = f"U+{info.scanCode:04X}"
+            if pressed:
+                text = chr(info.scanCode)
         else:
-            self._state.release(vk_code)
+            keysym = self._vocabulary.name(vk_code, extended)
+            if pressed:
+                text = _text_for(lib, vk_code, info.scanCode, self._state)
+                self._state.press(vk_code)
+            else:
+                self._state.release(vk_code)
         self._queue.put(
             RawEvent(
                 kind="key_press" if pressed else "key_release",

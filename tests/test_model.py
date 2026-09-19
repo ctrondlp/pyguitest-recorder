@@ -14,6 +14,7 @@ from pyguitest_recorder.model import (
     ElementRef,
     Environment,
     HotKey,
+    MouseMove,
     Origin,
     Recording,
     Target,
@@ -335,3 +336,46 @@ def test_a_boolean_expectation_survives_the_json_form():
         Assertion(check="checked", target=Target(x=0, y=0), expected=False).to_dict()
     )
     assert rebuilt.expected is False
+
+
+def test_an_out_of_order_event_is_inserted_where_its_timestamp_belongs():
+    # A hover is deliberately not ended by keyboard input, so it can be
+    # handed over last while carrying the time it began at. Appended, that
+    # put the move after typing it preceded -- and the script then typed into
+    # a window before the line that waited for it.
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=3.0, text="exit"))
+    recording.add(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    assert [e.timestamp for e in recording.events] == [1.0, 2.0, 3.0]
+
+
+def test_the_displaced_event_gets_the_delay_of_its_new_neighbour():
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=3.0, text="exit"))
+    recording.add(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    move, typed = recording.events[1], recording.events[2]
+    assert move.delay == pytest.approx(1.0)
+    # Recomputed: it used to follow the click at 1.0, and now follows the move.
+    assert typed.delay == pytest.approx(1.0)
+
+
+def test_events_already_in_order_are_appended_unchanged():
+    recording = Recording(environment=Environment(session_type="x11"))
+    recording.add(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.add(TextInput(timestamp=2.5, text="hi"))
+    assert [e.timestamp for e in recording.events] == [1.0, 2.5]
+    assert recording.events[1].delay == pytest.approx(1.5)
+
+
+def test_loading_repairs_a_recording_saved_out_of_order():
+    # `--regenerate` is where someone goes for a better script out of a
+    # recording they already have, so it repairs the order rather than
+    # reproducing it.
+    recording = Recording(environment=Environment(session_type="win32"))
+    recording.events.append(Click(timestamp=1.0, target=Target(x=1, y=1)))
+    recording.events.append(TextInput(timestamp=3.0, text="exit"))
+    recording.events.append(MouseMove(timestamp=2.0, target=Target(x=5, y=5)))
+    loaded = Recording.from_dict(recording.to_dict())
+    assert [e.timestamp for e in loaded.events] == [1.0, 2.0, 3.0]

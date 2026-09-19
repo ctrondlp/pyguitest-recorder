@@ -163,13 +163,23 @@ class FakeKernel32:
         return 4321
 
 
-def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None):
-    """Patch `sys.platform`, `_user32` and `_kernel32` for one test."""
+def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True):
+    """Patch `sys.platform`, `_user32` and `_kernel32` for one test.
+
+    `stub_desktop` also answers the interactive-window-station question, so a
+    test about hooks is not also a test of the machine it runs on: the real
+    `_off_desktop_reason` asks pyguitest, and on a Windows box reached over
+    SSH that correctly answers "off the desktop" and would fail every probe
+    test here for the one reason that is not a defect. The class that is
+    *about* that check passes False and exercises the real thing.
+    """
     monkeypatch.setattr(win32_module.sys, "platform", "win32")
     monkeypatch.setattr(win32_module, "_user32", lambda: fake_user32 or FakeUser32())
     monkeypatch.setattr(
         win32_module, "_kernel32", lambda: fake_kernel32 or FakeKernel32()
     )
+    if stub_desktop:
+        monkeypatch.setattr(win32_module, "_off_desktop_reason", lambda: None)
 
 
 def mouse_info(x=100, y=200, mouse_data=0, flags=0):
@@ -660,6 +670,40 @@ class TestKeyboardCallback:
         (raw,) = drain(made)
         assert raw.keysym == "KP_Enter"
 
+    def test_a_vk_packet_keydown_carries_the_injected_character_as_text(
+        self, monkeypatch
+    ):
+        # Found live: a real win32 capture run recording `type_text("Ada")`
+        # produced a raw `key_press "0xe7"` with no text at all, and the
+        # generated script replayed `gui.tap_key("0xe7")` three times instead
+        # of typing anything. VK_PACKET (0xE7) is what SendInput's
+        # KEYEVENTF_UNICODE arrives as -- IME composition, an on-screen
+        # keyboard, and remote-input tools all go through it too, not only a
+        # synthetic probe -- and `ToUnicodeEx` cannot translate it: it maps a
+        # virtual key through the keyboard layout, and no layout defines
+        # VK_PACKET. The character was never missing, just unread: it sits in
+        # `scanCode` verbatim. `text=""` on the fake proves this does not
+        # route through `ToUnicodeEx` at all for this vk.
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_press"
+        assert raw.text == "A"
+        assert fake.tounicode_flags == []
+
+    def test_a_vk_packet_keyup_carries_no_text(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=ord("A"))
+        made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        (raw,) = drain(made)
+        assert raw.kind == "key_release"
+        assert raw.text == ""
+
     def test_call_next_hook_ex_always_runs(self, monkeypatch):
         # The one rule every hook procedure on the platform follows, and the
         # one this callback must not skip even on an ordinary keystroke: the
@@ -887,3 +931,68 @@ class TestDrain:
         finally:
             made.stop()
         assert [e.kind for e in drained] == ["button_press"]
+
+
+class TestTheInteractiveDesktopCheck:
+    """Installing a hook is not evidence that it can observe anything.
+
+    A hook is scoped to the window station and desktop of the thread that
+    installs it, so a process off the interactive desktop installs one
+    against a desktop nobody is using. Measured over SSH on Windows 11: the
+    probe installed cleanly and `--doctor` printed "ready to record" for a
+    process that could not capture a thing.
+    """
+
+    def _reason(self, monkeypatch, interactive):
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake, stub_desktop=False)
+
+        class _Env:
+            is_interactive_desktop = interactive
+
+        class _Pyguitest:
+            @staticmethod
+            def detect():
+                return _Env()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Pyguitest)
+        return unavailable_reason()
+
+    def test_an_installed_hook_off_the_desktop_is_still_a_refusal(self, monkeypatch):
+        reason = self._reason(monkeypatch, interactive=False)
+        assert reason is not None
+        assert "interactive window station" in reason
+        assert not available()
+
+    def test_the_interactive_desktop_can_record(self, monkeypatch):
+        assert self._reason(monkeypatch, interactive=True) is None
+
+    def test_a_probe_that_cannot_tell_does_not_refuse(self, monkeypatch):
+        # detect() reports True where it cannot tell, and a recorder refusing
+        # on "cannot tell" would be worse than one that tries.
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
+
+        class _Broken:
+            @staticmethod
+            def detect():
+                raise RuntimeError("probe exploded")
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Broken)
+        assert unavailable_reason() is None
+
+    def test_a_pyguitest_without_the_field_does_not_refuse(self, monkeypatch):
+        # The field arrived with pyguitest's own Windows support and is in no
+        # release yet, so an installed pyguitest can be missing it while being
+        # otherwise perfectly usable -- and so can the type a checker reads off
+        # the floor this package declares, which is how this surfaced: as a
+        # lint failure rather than as a recording that refused. A field that is
+        # not there is "cannot tell", the same answer as a probe that raises.
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
+
+        class _OlderPyguitest:
+            @staticmethod
+            def detect():
+                return object()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _OlderPyguitest)
+        assert unavailable_reason() is None
