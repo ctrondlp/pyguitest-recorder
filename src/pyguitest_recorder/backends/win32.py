@@ -172,6 +172,10 @@ at all, it is sitting in `scanCode` verbatim, and reading it directly there
 is what `_record_key` does rather than asking a keyboard layout for an
 answer no layout has.
 
+A unit, not always a character: anything outside the Basic Multilingual
+Plane arrives as two of these, and `_SurrogatePairs` is where the halves are
+put back together into the one character they encode.
+
 Real, not a corner case reached only by injected test input. Every route
 that is not a plain physical keystroke goes through `KEYEVENTF_UNICODE` --
 IMEs composing CJK text, an on-screen keyboard, emoji pickers, clipboard-as-
@@ -792,6 +796,64 @@ def _text_for(lib: Any, vk_code: int, scan_code: int, state: _KeyboardState) -> 
     return text
 
 
+# -- unicode code units ------------------------------------------------------
+
+_HIGH_SURROGATES = range(0xD800, 0xDC00)
+_LOW_SURROGATES = range(0xDC00, 0xE000)
+
+
+class _SurrogatePairs:
+    r"""Rebuilds one character out of the UTF-16 code units `VK_PACKET` carries.
+
+    Anything outside the Basic Multilingual Plane -- an emoji, the rarer CJK
+    ideographs, every character above `U+FFFF` -- is two UTF-16 code units on
+    the wire, and `SendInput`'s `KEYEVENTF_UNICODE` sends each of them as a
+    `VK_PACKET` keystroke of its own: a high half in `0xD800-0xDBFF`, then a
+    low half in `0xDC00-0xDFFF`.
+
+    `chr()` on one of those halves produces a *lone surrogate*, and joining the
+    two halves does not decode them either -- a Python string is code points,
+    not UTF-16 units, so `"\\uD83D" + "\\uDE00"` is two unpaired halves rather
+    than the one character they encode. That is what this used to put in
+    `RawEvent.text`, and it travels a long way: `normalize.py` concatenates the
+    text of consecutive keystrokes into one `TextInput`, the generator writes
+    it as a literal in `gui.type_text(...)`, and the first thing that has to
+    encode that string -- writing the script, or pyguitest's own injection --
+    raises `UnicodeEncodeError`. A crash in the tool, over a character it had
+    read perfectly.
+
+    So the high half is held back until its pair arrives, and only the pair
+    becomes text. An unpaired half is dropped rather than passed on: it has no
+    character to replay, and the alternative is the crashing script above. The
+    halves of a pair are always adjacent -- one `SendInput` call describes one
+    character, and the key releases in between change nothing here -- and a
+    half still pending when some other key is pressed was never going to be
+    half of anything.
+    """
+
+    def __init__(self) -> None:
+        self._high: int | None = None
+
+    def character(self, unit: int) -> str:
+        """The text one `VK_PACKET` code unit contributes, pairing where it can."""
+        if self._high is not None:
+            high, self._high = self._high, None
+            if unit in _LOW_SURROGATES:
+                return chr(0x10000 + ((high - 0xD800) << 10) + (unit - 0xDC00))
+        if unit in _HIGH_SURROGATES:
+            self._high = unit
+            return ""
+        if unit in _LOW_SURROGATES:
+            # A low half whose high half never came, or whose predecessor was
+            # not it: alone it is not a character either.
+            return ""
+        return chr(unit)
+
+    def forget(self) -> None:
+        """Drop a pending high half: the next keystroke was not its pair."""
+        self._high = None
+
+
 # -- the backend ---------------------------------------------------------
 
 
@@ -834,6 +896,7 @@ class Win32CaptureBackend:
         self._queue: queue.Queue[Any] = queue.Queue()
         self._vocabulary = _KeyVocabulary()
         self._state = _KeyboardState()
+        self._surrogates = _SurrogatePairs()
 
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
@@ -844,12 +907,26 @@ class Win32CaptureBackend:
         so hook and pump have to share one thread from the start, the same
         constraint pyguitest's own `SetWinEventHook`-based window-events pump
         is built around.
+
+        The interactive desktop is checked first, and not left to
+        `unavailable_reason`: that one runs at *selection* time
+        (`choose_backend`), which is the wrong moment for this question twice
+        over. A backend can be selected on a real desktop and started on a
+        session that has since gone away -- RDP dropping to a disconnected
+        session is enough -- and nothing about this class requires that it was
+        selected at all. A hook that installs off the interactive desktop
+        succeeds and then sees nothing: capture that starts, reports no error,
+        and records no input is the one failure with no symptom to read
+        afterwards.
         """
         if sys.platform != "win32":
             raise CaptureUnavailable(unavailable_reason() or "not on Windows")
         lib = _user32()
         if lib is None:
             raise CaptureUnavailable("user32.dll did not load")
+        reason = _off_desktop_reason()
+        if reason is not None:
+            raise CaptureUnavailable(reason)
         self._keyboard_proc = _HOOKPROC(self._on_keyboard_event)
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
@@ -967,16 +1044,18 @@ class Win32CaptureBackend:
         if vk_code == VK_PACKET:
             # Not a key `_KeyboardState` or `_KeyVocabulary` has any business
             # naming or tracking as held -- see VK_PACKET's own docstring.
-            # `scanCode` already *is* the character; a lone or unpaired
-            # surrogate half (a code point outside the BMP splits across two
-            # of these) still concatenates correctly into `_typed.text`,
-            # matching how `_unicode_events` sent it as UTF-16 code units.
+            # `scanCode` already *is* the character, in UTF-16 code units, and
+            # `_SurrogatePairs` is what turns the two halves of one outside the
+            # BMP back into it.
             keysym = f"U+{info.scanCode:04X}"
             if pressed:
-                text = chr(info.scanCode)
+                text = self._surrogates.character(info.scanCode)
         else:
             keysym = self._vocabulary.name(vk_code, extended)
             if pressed:
+                # A high half still waiting for its pair was never going to be
+                # paired by this key.
+                self._surrogates.forget()
                 text = _text_for(lib, vk_code, info.scanCode, self._state)
                 self._state.press(vk_code)
             else:

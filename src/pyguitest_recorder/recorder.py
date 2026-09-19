@@ -38,6 +38,7 @@ __all__ = [
     "describe_environment",
     "probe_context",
     "scoped_environment",
+    "selected_backend_name",
 ]
 
 
@@ -155,6 +156,46 @@ def probe_context(settings: Settings) -> ContextReport:
     return report
 
 
+def selected_backend_name(settings: Settings) -> str:
+    """Which capture backend these settings select, before it is built.
+
+    Split out of `choose_backend` because a second question depends on this
+    answer and must not depend on the *host* instead: whether what is being
+    recorded is a native Windows desktop. Windows can run an X server -- Xming,
+    VcXsrv, WSLg -- and `backend = "xrecord"` there records X clients, a
+    recording whose windows, elements and pid corroboration are all X11's even
+    though the process making it is a native Windows one. See `choose_backend`
+    for the selection rules themselves.
+
+    Empty for a name this recorder does not know. `choose_backend` is where
+    that is refused, with a sentence; the callers here fall back to the host
+    platform rather than inventing a second refusal for it.
+    """
+    if settings.backend == "win32" or (
+        settings.backend == "auto" and sys.platform == "win32"
+    ):
+        return "win32"
+    if settings.backend in ("auto", "xrecord"):
+        return "xrecord"
+    return ""
+
+
+def _windows_desktop(backend_name: str) -> bool:
+    """Whether a recording through `backend_name` is about a Windows desktop.
+
+    The backend decides, not the host process. `xrecord` records X clients, so
+    the desktop it is a recording of is an X11 one whatever machine it runs on;
+    `win32` records the native desktop and nothing else. Any other name -- no
+    backend yet, or one this recorder does not know -- falls back to the host,
+    which is the answer every one of these questions used to be.
+    """
+    if backend_name == "win32":
+        return True
+    if backend_name == "xrecord":
+        return False
+    return sys.platform == "win32"
+
+
 def choose_backend(settings: Settings) -> CaptureBackend:
     """Pick a capture backend, or explain why none can serve this session.
 
@@ -169,12 +210,10 @@ def choose_backend(settings: Settings) -> CaptureBackend:
     refusing outright on the wrong platform rather than silently degrading
     to whichever backend the platform actually offers.
     """
-    if settings.backend not in ("auto", "xrecord", "win32"):
+    name = selected_backend_name(settings)
+    if not name:
         raise CaptureUnavailable(f"unknown capture backend {settings.backend!r}")
-    wants_win32 = settings.backend == "win32" or (
-        settings.backend == "auto" and sys.platform == "win32"
-    )
-    if wants_win32:
+    if name == "win32":
         return _choose_win32(settings)
     return _choose_xrecord(settings)
 
@@ -237,15 +276,21 @@ def describe_environment(
         environment.desktop = str(getattr(detected, "desktop", "") or "")
     except Exception as exc:  # noqa: BLE001 - detection is diagnostic, not required
         environment.notes.append(f"environment detection failed: {exc}")
-    # Both of these are X11 facts, and on Windows neither describes the
-    # session being recorded even when the variables are set. An X server
-    # (Xming, VcXsrv) or WSLg will happily set `DISPLAY` -- and WSLg sets
-    # `WAYLAND_DISPLAY` beside it -- on a machine whose capture backend is
-    # `win32` and whose recording contains no X client at all. Left alone,
-    # that put a foreign display into the session file and, with both
-    # variables present, an "recorded through XWayland" note into a recording
-    # made entirely of native Windows input.
-    windows = sys.platform == "win32"
+    # Both of these are X11 facts, and on a Windows recording neither describes
+    # the session even when the variables are set. An X server (Xming, VcXsrv)
+    # or WSLg will happily set `DISPLAY` -- and WSLg sets `WAYLAND_DISPLAY`
+    # beside it -- on a machine whose capture backend is `win32` and whose
+    # recording contains no X client at all. Left alone, that put a foreign
+    # display into the session file and, with both variables present, an
+    # "recorded through XWayland" note into a recording made entirely of
+    # native Windows input.
+    #
+    # Asked of the backend rather than of `sys.platform`, because on that
+    # machine the two are not the same question: `backend = "xrecord"` there
+    # records X clients through that same X server, and clearing the display
+    # out of *that* recording's header would delete the one fact explaining
+    # where its coordinates came from.
+    windows = _windows_desktop(backend_name)
     environment.display = "" if windows else os.environ.get("DISPLAY", "")
     # Prefer what pyguitest detected; fall back to the environment only when
     # detection failed, since both variables being set does not by itself
@@ -630,6 +675,21 @@ class Recorder:
 
     # -- setup ---------------------------------------------------------------
 
+    def _on_windows(self) -> bool:
+        """Whether what is being recorded is a native Windows desktop.
+
+        From the backend, not from the host -- see `_windows_desktop` -- and
+        asked by everything that has to describe or interpret the recording in
+        one platform's terms. Before there is a backend, which is
+        `probe_context`'s case (it opens the context a recording *would* use
+        without starting capture), the settings answer instead, through the
+        same selection rules `choose_backend` applies.
+        """
+        name = getattr(self._backend, "name", "") or selected_backend_name(
+            self.settings
+        )
+        return _windows_desktop(name)
+
     def _context_backends(self) -> tuple[str, ...]:
         """The pyguitest backends that answer "which window, which element".
 
@@ -639,10 +699,16 @@ class Recorder:
         desktop actually publishes to. On Windows that is `win32` + `uia`;
         everywhere else `x11` + `atspi`. Window first in both, so it keeps
         every window capability when the element backend joins it.
+
+        Which of the two is asked of the capture backend rather than of the
+        host -- see `_on_windows`. On a Windows machine running Xming, VcXsrv
+        or WSLg with `backend = "xrecord"`, the host answers Windows while the
+        recording is of an X server: `win32` for the window half would ask
+        pyguitest about a native desktop none of whose windows are in the
+        recording, and `uia` for the element half would ask a bus the X11
+        clients in it never publish to.
         """
-        window, element = (
-            ("win32", "uia") if sys.platform == "win32" else ("x11", "atspi")
-        )
+        window, element = ("win32", "uia") if self._on_windows() else ("x11", "atspi")
         wanted = []
         if self.settings.window_context:
             wanted.append(window)
@@ -653,13 +719,16 @@ class Recorder:
     def _session_locator(self, display: str) -> str:
         """Where the session was looked for, in this platform's own terms.
 
-        `$DISPLAY` is an X11 idea and names nothing on Windows, where the
-        session is the desktop this process is attached to -- so a Windows
-        recording used to carry "no pyguitest session on $DISPLAY" into every
-        generated script and session file, sending a reader after a variable
-        their machine does not have.
+        `$DISPLAY` is an X11 idea and names nothing on a native Windows
+        desktop, where the session is the desktop this process is attached to
+        -- so a Windows recording used to carry "no pyguitest session on
+        $DISPLAY" into every generated script and session file, sending a
+        reader after a variable their machine does not have. The other way
+        round, an `xrecord` recording made *on* Windows (Xming, VcXsrv, WSLg)
+        is of an X display and says so, which is the whole reason this asks
+        the backend rather than the host.
         """
-        if sys.platform == "win32":
+        if self._on_windows():
             return "for this desktop"
         return f"on {display or '$DISPLAY'}"
 
@@ -754,8 +823,18 @@ class Recorder:
         return self._open_resolver_for(self._session)
 
     def _open_resolver_for(self, session: Any) -> DesktopResolver:
-        """Build the resolver for one session, so a probe can build the same one."""
-        return DesktopResolver(session=session, elements=self.settings.element_context)
+        """Build the resolver for one session, so a probe can build the same one.
+
+        The recording's own platform goes with it: the resolver corroborates a
+        pid mismatch differently on Windows than on X11 (`is_windows`, which
+        reads the host), and an `xrecord` recording made on a Windows machine
+        is X11's to interpret. See `_on_windows`.
+        """
+        return DesktopResolver(
+            session=session,
+            elements=self.settings.element_context,
+            windows=self._on_windows(),
+        )
 
     def _normalizer_options(self) -> NormalizerOptions:
         """Translate settings into the analyzer's thresholds."""

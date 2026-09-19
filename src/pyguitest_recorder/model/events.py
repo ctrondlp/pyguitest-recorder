@@ -21,6 +21,7 @@ absolute one.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, fields
 from enum import Enum
 from typing import Any, ClassVar
@@ -528,6 +529,33 @@ _CONTEXT_FIELDS = {
 }
 
 
+def _require_timestamp(payload: dict[str, Any], whole: dict[str, Any]) -> None:
+    """Refuse a persisted event whose timestamp is missing or unusable.
+
+    `Event.timestamp` defaults to 0.0 for one built in memory, which quietly
+    read a *missing* timestamp as "the recording began here" -- over the field
+    `Recording.add` orders by and `Recording.from_dict` sorts a loaded file
+    with. A hand-edited string reached that sort and raised `TypeError` from
+    comparing a float to a str, outside the `ValueError` contract `from_dict`
+    documents and `main()` catches, and a `NaN` sorted into an order nothing
+    can explain, since it compares false to everything including itself. Both
+    are failures of exactly the kind `--regenerate` invites, so both are named
+    here rather than left to whatever breaks three frames further down.
+
+    `whole` is the entry as it was written, for a message that quotes the file
+    rather than the copy this has had `kind` popped out of it.
+    """
+    if "timestamp" not in payload:
+        raise ValueError(f"event entry has no 'timestamp': {whole!r}")
+    stamp = payload["timestamp"]
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        raise ValueError(
+            f"'timestamp' is not a number: {stamp!r} ({type(stamp).__name__})"
+        )
+    if not math.isfinite(stamp):
+        raise ValueError(f"'timestamp' is not a finite number: {stamp!r}")
+
+
 def event_from_dict(data: dict[str, Any]) -> Event:
     """Rebuild an event from its serialized form, by its `kind` tag.
 
@@ -535,6 +563,13 @@ def event_from_dict(data: dict[str, Any]) -> Event:
     one can be hand-trimmed and re-rendered -- so a malformed entry here must
     fail with a message that names what is wrong, not a bare `KeyError`/
     `TypeError` from three calls of indirection down in `_rebuild`.
+
+    `timestamp` is checked before anything is constructed, and it is the one
+    field required to *be there*: it is what `Recording.add` orders the event
+    list by and what `Recording.from_dict` sorts a loaded file with, so a
+    missing, non-numeric or non-finite one is not a value this model can hold
+    an opinion about. `to_dict` always writes it, so nothing this recorder
+    produced is affected; a file that lost it is one a person has edited.
     """
     if not isinstance(data, dict):
         raise ValueError(f"event entry is not an object: {data!r}")
@@ -548,6 +583,9 @@ def event_from_dict(data: dict[str, Any]) -> Event:
             f"unknown event kind {kind!r}; this recorder understands "
             f"{sorted(EVENT_TYPES)}"
         )
+    # Persisted, so it has to be checkable -- see `_require_timestamp` for what
+    # a missing, non-numeric or non-finite one used to do to a loaded file.
+    _require_timestamp(payload, data)
     try:
         payload["origin"] = Origin(payload.get("origin", Origin.OBSERVED.value))
         for name, context in _CONTEXT_FIELDS.items():

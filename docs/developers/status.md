@@ -133,12 +133,14 @@ this US-layout run and remain open.
 
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
-- **Only one recording has been made of a real desktop application** — a file
-  manager, a text editor and a terminal on GhostBSD. It found three bugs in
-  one pass, all now fixed (see the CHANGELOG), the worst of which made any
-  recording of an editor fail at replay. The routine live check still uses two
-  GTK windows on a private server, so this remains the thinnest-covered part
-  of the tool.
+- **Two recordings have been made of a real desktop application** — a file
+  manager, a text editor and a terminal on GhostBSD, and Windows 11's own
+  Notepad (both above). The first found three bugs in one pass, all now fixed
+  (see the CHANGELOG), the worst of which made any recording of an editor fail
+  at replay; the second is what turned up Notepad restoring its previous draft
+  session, which is a trap for testing that application rather than a defect
+  here. The routine live check still uses two GTK windows on a private server,
+  so this remains the thinnest-covered part of the tool.
 - ~~The CI `live` job has never run on a GitHub runner.~~ **Closed:** it now
   runs green on `ubuntu-latest` on every push, so the Ubuntu package names and
   daemon paths are observed rather than reasoned.

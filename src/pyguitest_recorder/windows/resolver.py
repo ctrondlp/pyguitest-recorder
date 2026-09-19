@@ -87,13 +87,66 @@ recording pays to notice it.
 """
 
 
-def _scope_phrase() -> str:
+def _scope_phrase(windows: bool | None = None) -> str:
     """How to describe the set of windows this recording covers.
 
-    "the recorded display" is an X11 idea; on Windows the recording covers the
-    desktop this process is attached to and there is no display to name.
+    "the recorded display" is an X11 idea; on a native Windows recording there
+    is no display to name and the windows are the desktop's own.
+
+    `windows` is the recording's platform where the caller knows it from the
+    capture backend rather than from the host -- see `DesktopResolver.windows`.
+    None asks about this machine, which is the right answer for a caller with
+    no backend to ask.
     """
-    return "in this recording" if is_windows() else "on the recorded display"
+    on_windows = is_windows() if windows is None else windows
+    return "in this recording" if on_windows else "on the recorded display"
+
+
+_FRAME_WINDOW_CLASS = "applicationframewindow"
+"""The window class `ApplicationFrameHost.exe` hosts every UWP toplevel in.
+
+Lower case because window classes are compared case-insensitively, and this is
+the form `_in_a_frame_host` compares against.
+"""
+
+
+def _in_a_frame_host(window: WindowRef) -> bool:
+    """Whether this window is one of Windows' UWP frame hosts.
+
+    `Window.app_id` carries the window *class* name on Windows rather than the
+    desktop-file id it is on X11 (pyguitest's own win32 backend documents the
+    difference), and every Store app's toplevel -- Calculator, the Store build
+    of Notepad, anything installed from it -- is an `ApplicationFrameWindow`
+    owned by `ApplicationFrameHost.exe`. That split is the one pid mismatch on
+    this platform with a documented cause, and the class name is what lets a
+    recording tell it from a stranger's element.
+    """
+    return window.app_id.strip().casefold() == _FRAME_WINDOW_CLASS
+
+
+def _contains(
+    geometry: tuple[int, int, int, int], extents: tuple[int, int, int, int]
+) -> bool:
+    """Whether an element's rectangle sits inside the window's, within slack.
+
+    An element inside a window cannot be bigger than the window. When it is --
+    extents of 1920x1080 reported for a widget in a 310x263 window, seen while
+    recording a private X server next to a real desktop -- the two answers are
+    describing different screens, and only one of them is the one being
+    recorded.
+
+    Shared by `DesktopResolver._fits` and `_fits_answer`, which are the two
+    things a caller can want from the same check: "keep it unless it is
+    impossible" and "keep it only if this corroborates it".
+    """
+    wx, wy, width, height = geometry
+    ex, ey, ewidth, eheight = extents
+    return (
+        ex >= wx - EXTENTS_SLACK
+        and ey >= wy - EXTENTS_SLACK
+        and ex + ewidth <= wx + width + EXTENTS_SLACK
+        and ey + eheight <= wy + height + EXTENTS_SLACK
+    )
 
 
 @dataclass(frozen=True)
@@ -208,6 +261,15 @@ class DesktopResolver:
     session: Any = None
     elements: bool = True
     ignore_pids: set[int] = field(default_factory=set)
+    windows: bool | None = None
+    """Whether this recording is of a native Windows desktop. None asks the host.
+
+    The recording's platform and not the machine's: Windows can run an X server
+    (Xming, VcXsrv, WSLg), where `backend = "xrecord"` records X clients whose
+    windows, elements and pids are all X11's to interpret. `Recorder` passes
+    the answer its capture backend gives -- see `recorder._windows_desktop` --
+    and None keeps every other caller on the host answer this used to read.
+    """
 
     _identity: dict[Any, _Identity] = field(default_factory=dict, init=False)
     _resolves_elements: bool = field(default=False, init=False)
@@ -224,6 +286,21 @@ class DesktopResolver:
         self.ignore_pids.update(self._own_terminal_pids())
         self._scaled = self._any_screen_scaled()
         self._resolves_elements = self.elements and self._can_resolve_elements()
+
+    def _on_windows(self) -> bool:
+        """Whether this recording is of a native Windows desktop."""
+        return is_windows() if self.windows is None else self.windows
+
+    def _session_type(self) -> str:
+        """This recording's platform in the vocabulary `platforms` reads.
+
+        `platforms.is_windows(session_type)` takes the text
+        `Environment.session_type` stores -- the `str()` of a pyguitest
+        `SessionType` -- and looks for the member name inside it. Built from
+        the backend here instead, because the recording whose header this
+        wording ends up in has not been written yet at this point.
+        """
+        return "WIN32" if self._on_windows() else "X11"
 
     def _own_terminal_pids(self) -> set[int]:
         """The window-owning process the recorder is being driven from, if any.
@@ -563,7 +640,8 @@ class DesktopResolver:
             return self._describe(self._best_owner(owned, element))
         self._warn(
             f"ignored keyboard focus in pid {element.pid}, which owns no window "
-            f"{_scope_phrase()}; {foreign_focus_reason()}"
+            f"{_scope_phrase(self._on_windows())}; "
+            f"{foreign_focus_reason(self._session_type())}"
         )
         return None
 
@@ -668,8 +746,9 @@ class DesktopResolver:
             if self.session is None:
                 return True
             self._warn(
-                f"ignored accessible elements that no window {_scope_phrase()} "
-                f"accounts for; {foreign_element_reason()}"
+                f"ignored accessible elements that no window "
+                f"{_scope_phrase(self._on_windows())} accounts for; "
+                f"{foreign_element_reason(self._session_type())}"
             )
             return False
         if window.pid is not None and element.pid is not None:
@@ -698,18 +777,59 @@ class DesktopResolver:
         which is what made the cause unmistakable.
 
         So on Windows the pid is not evidence either way, and the question
-        falls through to `_fits`, which asks whether the element's rectangle
-        could be inside the window at all. That is the same corroboration this
-        method already defers to wherever a pid is missing, and it is a real
-        one: it is what rejects an element from another desktop.
+        falls through to `_windows_mismatch`, which asks the two things that
+        can still be answered there: whether this window is one of the frame
+        host's -- its class name is `ApplicationFrameWindow`, and
+        `Window.app_id` carries the window class on that platform -- and,
+        where it is not, whether the element's own rectangle corroborates
+        that it belongs.
+
+        Verified rather than assumed is the whole point of that split. A
+        mismatch with nothing behind it used to be kept as soon as the
+        geometry stopped talking: `_fits` answers True whenever it cannot
+        tell -- any scaled screen, or a rectangle the backend never reported
+        -- and on a 150% display that is every element from every other
+        process on the machine.
         """
         if element.pid == window.pid:
             return True
-        if is_windows():
-            return self._fits(element, window)
+        if self._on_windows():
+            return self._windows_mismatch(element, window)
         self._warn(
             f"ignored an accessible element from pid {element.pid} under a "
-            f"window owned by pid {window.pid}; {foreign_element_reason()}"
+            f"window owned by pid {window.pid}; "
+            f"{foreign_element_reason(self._session_type())}"
+        )
+        return False
+
+    def _windows_mismatch(self, element: ElementRef, window: WindowRef) -> bool:
+        """Whether an unequal pid on Windows means "same application", or not.
+
+        Two answers mean that. The window is one of the frame host's, which
+        explains the mismatch outright -- a Store app's widgets are published
+        by the application while its toplevel belongs to
+        `ApplicationFrameHost.exe` -- so the element is kept on the same terms
+        `_fits` has always applied, geometry included. Or the element's own
+        rectangle corroborates that it sits inside the window, which is the
+        evidence this already accepts wherever a pid is missing on either
+        side, and is what rejects an element from another desktop.
+
+        A mismatch with neither answer is refused, and the recording says why.
+        No amount of "probably fine" survives contact with a desktop that is
+        not the one being recorded: the accessibility bus is scoped to the
+        login session, not to the display, so an element that is not inside
+        this window can only have come from somewhere else.
+        """
+        if _in_a_frame_host(window):
+            return self._fits(element, window)
+        if self._fits_answer(element, window) is True:
+            return True
+        self._warn(
+            f"ignored an accessible element from pid {element.pid} under a "
+            f"window owned by pid {window.pid}: only an "
+            "ApplicationFrameWindow explains a pid mismatch on this platform, "
+            "and this element's own geometry does not corroborate it either; "
+            f"{foreign_element_reason(self._session_type())}"
         )
         return False
 
@@ -720,33 +840,43 @@ class DesktopResolver:
         a bare X server with no window manager publishes no `_NET_WM_PID`, and
         not every accessibility bridge answers `get_process_id`.
 
-        An element inside a window cannot be bigger than the window. When it is
-        -- extents of 1920x1080 reported for a widget in a 310x263 window, seen
-        while recording a private X server next to a real desktop -- the two
-        answers are describing different screens, and only one of them is the
-        one being recorded.
-
-        Skipped entirely where any screen is scaled, because AT-SPI extents and
-        window geometry are then not reliably in the same units and a false
-        rejection costs every named element on the desktop.
+        Skipped entirely where the geometry cannot be compared, because AT-SPI
+        extents and window geometry are then not reliably in the same units and
+        a false rejection costs every named element on the desktop. That one
+        answer is what `_fits_answer` and this method share and use the
+        opposite way round: see it for what the other caller does with it.
         """
-        if self._scaled or window.geometry is None or element.extents is None:
+        geometry = window.geometry
+        extents = element.extents
+        if self._scaled or geometry is None or extents is None:
             return True
-        wx, wy, width, height = window.geometry
-        ex, ey, ewidth, eheight = element.extents
-        if (
-            ex >= wx - EXTENTS_SLACK
-            and ey >= wy - EXTENTS_SLACK
-            and ex + ewidth <= wx + width + EXTENTS_SLACK
-            and ey + eheight <= wy + height + EXTENTS_SLACK
-        ):
+        if _contains(geometry, extents):
             return True
+        _wx, _wy, width, height = geometry
+        _ex, _ey, ewidth, eheight = extents
         self._warn(
             f"ignored accessible elements whose {ewidth}x{eheight} extents do "
             f"not fit the {width}x{height} window under the same point; they "
             "describe a different screen from the one being recorded"
         )
         return False
+
+    def _fits_answer(self, element: ElementRef, window: WindowRef) -> bool | None:
+        """Whether the element's rectangle is inside the window's, or None.
+
+        None is "the geometry cannot say": any screen scaled, or a rectangle
+        missing on either side. It is not collapsed into a bool here because
+        the two callers want it differently -- `_fits` keeps the element, since
+        refusing on "cannot tell" would cost every named element on a scaled
+        desktop, while `_windows_mismatch` refuses it, because a *differing*
+        pid is a claim that needs corroboration rather than the benefit of the
+        doubt.
+        """
+        geometry = window.geometry
+        extents = element.extents
+        if self._scaled or geometry is None or extents is None:
+            return None
+        return _contains(geometry, extents)
 
     def _warn(self, message: str) -> None:
         """Record a degradation once, however many events hit it."""

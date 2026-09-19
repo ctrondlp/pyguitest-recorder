@@ -554,14 +554,20 @@ class TestWindowsEnvironmentSnapshot:
     XWayland" note into a recording made entirely of native Windows input.
     """
 
-    def _describe(self, platform, variables):
+    def _describe(self, backend, variables, platform="linux"):
+        """The environment a recording through `backend` would carry.
+
+        The platform is the *machine's*, and it is deliberately no longer what
+        decides any of this: the backend a recording is made with is, so that
+        `xrecord` on a Windows host keeps the display it recorded through.
+        """
         from pyguitest_recorder import recorder as recorder_module
 
         with (
             mock.patch.object(recorder_module.sys, "platform", platform),
             mock.patch.dict(recorder_module.os.environ, variables, clear=False),
         ):
-            return recorder_module.describe_environment(None, "win32")
+            return recorder_module.describe_environment(None, backend)
 
     def test_a_stray_display_is_not_recorded_on_windows(self):
         env = self._describe("win32", {"DISPLAY": ":0"})
@@ -572,10 +578,72 @@ class TestWindowsEnvironmentSnapshot:
         assert env.xwayland is False
         assert not any("XWayland" in note for note in env.notes)
 
-    def test_the_same_pair_still_means_xwayland_off_windows(self):
-        env = self._describe("linux", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"})
+    def test_an_xrecord_recording_on_windows_keeps_its_display(self):
+        # The other side of the same question: that is the recording the X
+        # server is *for*, so clearing the display out of its header would
+        # delete the one fact explaining where its coordinates came from.
+        env = self._describe(
+            "xrecord",
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
+            platform="win32",
+        )
         assert env.display == ":0"
         assert env.xwayland is True
+
+    def test_the_same_pair_still_means_xwayland_off_windows(self):
+        env = self._describe(
+            "xrecord", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}
+        )
+        assert env.display == ":0"
+        assert env.xwayland is True
+
+
+class TestPlatformSemanticsFollowTheBackend:
+    """The context a recording opens is the recording's platform's, not the host's.
+
+    Windows runs X servers (Xming, VcXsrv, WSLg), and `backend = "xrecord"`
+    there records X clients -- so the context has to be asked for in X11's
+    terms even though the process is a native Windows one. Asking for
+    `win32` + `uia` would describe a desktop none of whose windows are in the
+    recording, and `$DISPLAY` would be named at nobody.
+    """
+
+    def _answer(self, backend, platform, question, *args):
+        """What `question` answers for a recorder with these settings.
+
+        The platform is patched around the *call*, not only the construction: a
+        recorder that has not started has no backend to ask, so it falls back to
+        the settings and then to the host -- which is the one path where
+        `sys.platform` still decides anything (see `Recorder._on_windows`).
+        """
+        from pyguitest_recorder import recorder as recorder_module
+
+        with mock.patch.object(recorder_module.sys, "platform", platform):
+            made = recorder_module.Recorder(settings=Settings(backend=backend))
+            return question(made, *args)
+
+    def test_auto_asks_the_host(self):
+        pair = Recorder._context_backends
+        assert self._answer("auto", "linux", pair) == ("x11", "atspi")
+        assert self._answer("auto", "win32", pair) == ("win32", "uia")
+
+    def test_xrecord_on_windows_asks_for_x11s_pair(self):
+        pair = Recorder._context_backends
+        assert self._answer("xrecord", "win32", pair) == ("x11", "atspi")
+
+    def test_the_session_locator_follows_the_backend_too(self):
+        # "for this desktop" is a sentence about a Windows session: an xrecord
+        # recording on Windows was made on a display and says so.
+        locator = Recorder._session_locator
+        assert self._answer("xrecord", "win32", locator, ":0") == "on :0"
+        assert self._answer("win32", "win32", locator, ":0") == "for this desktop"
+
+    def test_the_resolver_is_built_for_the_recording(self):
+        # No started backend to ask, so the settings answer -- and xrecord is
+        # X11's whatever machine it runs on, which is what stops a Windows
+        # host's pid corroboration being applied to an X11 recording.
+        made = Recorder(settings=Settings(backend="xrecord"))._open_resolver_for(None)
+        assert made.windows is False
 
 
 class TestInjectedInputIsReported:

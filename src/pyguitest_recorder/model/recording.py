@@ -123,12 +123,19 @@ class Recording:
         walks back only for the rare one that does not, and the delays of both
         it and the event it displaces are recomputed from the neighbour each
         actually ends up with.
+
+        Recomputed rather than filled in where empty, for the inserted event
+        too. A delay is the interval to the event in front of it, so one that
+        arrives carrying a delay of its own -- a saved event re-added, an
+        editor moving an event between neighbours -- was measured against
+        whichever predecessor it had *then*, and keeping it would put a gap in
+        front of an event nothing in the recording actually waited for.
         """
         index = len(self.events)
         while index and self.events[index - 1].timestamp > event.timestamp:
             index -= 1
         self.events.insert(index, event)
-        self._fill_delay(index)
+        self._fill_delay(index, force=True)
         if index + 1 < len(self.events):
             # Its predecessor changed, so whatever it was told before is no
             # longer the gap in front of it.
@@ -196,12 +203,22 @@ class Recording:
         # have. Sorting here repairs that file rather than reproducing it, and
         # costs nothing for a recording that was already in order.
         events.sort(key=lambda event: event.timestamp)
-        return cls(
+        recording = cls(
             events=events,
             environment=Environment.from_dict(data.get("environment", {})),
             raw=list(data.get("raw", [])),
             started_at=data.get("started_at", 0.0),
         )
+        # Every delay is recomputed from the neighbour the sort above just gave
+        # it. A delay is the interval to the event in front of it, so an event
+        # the sort moved was left holding a gap measured against whichever
+        # predecessor it had when the file was written -- visible in a
+        # `recorded`/`verbatim` script as a pause in front of a line nothing
+        # waited for. The first event's is zero, which is what a file that was
+        # never out of order already had.
+        for index in range(len(recording.events)):
+            recording._fill_delay(index, force=True)
+        return recording
 
     def save(self, path: str | Path) -> Path:
         """Write the recording to `path` as JSON, returning the path written.

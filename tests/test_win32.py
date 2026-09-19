@@ -704,6 +704,54 @@ class TestKeyboardCallback:
         assert raw.kind == "key_release"
         assert raw.text == ""
 
+    def test_a_character_outside_the_bmp_arrives_as_two_packets_and_as_one_text(
+        self, monkeypatch
+    ):
+        # Anything above U+FFFF is two UTF-16 code units, and SendInput sends
+        # each as a VK_PACKET keystroke of its own. `chr()` on a half is a
+        # lone surrogate -- not the character, and not something Python can
+        # write: `"\uD83D" + "\uDE00"` is two unpaired halves rather than one
+        # code point, so the generated script carried an ill-formed
+        # `gui.type_text(...)` and `--regenerate` died with UnicodeEncodeError
+        # writing the file it had just built.
+        units = "\U0001f600".encode("utf-16-le")
+        high = int.from_bytes(units[:2], "little")
+        low = int.from_bytes(units[2:], "little")
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for unit in (high, low):
+            lparam, _info = keyboard_lparam(0xE7, scan_code=unit)
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        presses = drain(made)
+        assert [raw.kind for raw in presses] == ["key_press", "key_press"]
+        # The high half is held back until it has a pair to become.
+        assert [raw.text for raw in presses] == ["", "\U0001f600"]
+        assert "".join(raw.text for raw in presses) == "\U0001f600"
+
+    def test_a_high_half_with_no_pair_is_dropped_rather_than_typed(self, monkeypatch):
+        # A half of a pair is not a character, and passing one on is what made
+        # the script unwritable. The ordinary key that follows says the pair
+        # was never coming -- an IME or an emoji picker sends both halves
+        # together, in one SendInput call.
+        fake = FakeUser32(text="A")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=0xD83D)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        presses = drain(made)
+        assert [raw.text for raw in presses] == ["", "A"]
+
+    def test_a_low_half_on_its_own_is_not_text(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0xE7, scan_code=0xDE00)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        assert [raw.text for raw in drain(made)] == [""]
+
     def test_call_next_hook_ex_always_runs(self, monkeypatch):
         # The one rule every hook procedure on the platform follows, and the
         # one this callback must not skip even on an ordinary keystroke: the
@@ -996,3 +1044,23 @@ class TestTheInteractiveDesktopCheck:
 
         monkeypatch.setitem(__import__("sys").modules, "pyguitest", _OlderPyguitest)
         assert unavailable_reason() is None
+
+    def test_start_asks_the_question_too_and_not_only_the_selector(self, monkeypatch):
+        # `unavailable_reason` answers at *selection* time, and a backend can
+        # be selected on a real desktop and started somewhere else: RDP
+        # dropping to a disconnected session is enough, and nothing about
+        # `Win32CaptureBackend` requires that anything selected it at all. A
+        # hook that installs off the interactive desktop succeeds and then
+        # reports not one keystroke, so capture that starts and cannot capture
+        # is the one failure with no symptom to read afterwards.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake, stub_desktop=False)
+        monkeypatch.setattr(
+            win32_module,
+            "_off_desktop_reason",
+            lambda: "this process is not attached to the interactive window station",
+        )
+        made = Win32CaptureBackend()
+        with pytest.raises(CaptureUnavailable, match="interactive window station"):
+            made.start()
+        assert fake.hooked == []  # nothing was installed to see nothing with

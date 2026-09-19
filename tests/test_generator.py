@@ -2032,6 +2032,47 @@ class TestKeyActionSettle:
         )
         assert "gui.wait(0.60)" not in source
 
+    def test_a_move_in_between_does_not_lose_the_wait_the_click_needs(self):
+        # The wait is owed to the *chord*, and each event's delay is the
+        # interval to the one before it: a click 0.2s after a move that was
+        # itself 0.7s after the chord read as 0.2s, under the floor, on an
+        # interval the recording had spent 0.9s on. The move is a positioning
+        # step, so it neither takes the wait nor cancels it.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                MouseMove(timestamp=1.7, delay=0.7, target=Target(x=5, y=6)),
+                Click(timestamp=1.9, delay=0.2, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.90)" in source
+        assert source.index("send_keys") < source.index("gui.wait(0.90)")
+
+    def test_the_click_that_addresses_the_new_window_takes_the_wait_once(self):
+        # The first click after the chord is the line that needed the pause;
+        # the one after it is addressing a window that is already up.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["ctrl", "o"]),
+                Click(timestamp=1.6, delay=0.6, target=Target(x=5, y=6)),
+                Click(timestamp=2.2, delay=0.6, target=Target(x=5, y=6)),
+            ]
+        )
+        assert source.count("gui.wait(0.60)") == 1
+
+    def test_a_recorded_pause_already_stands_for_the_gap(self):
+        # A gap long enough to be recorded as a `Pause` is already in the
+        # script, so the settle would sleep through the same interval twice.
+        source = self._render(
+            [
+                HotKey(timestamp=1.0, delay=0.0, keys=["meta", "r"]),
+                Pause(timestamp=1.6, delay=0.6, seconds=0.6),
+                Click(timestamp=1.7, delay=0.1, target=Target(x=5, y=6)),
+            ]
+        )
+        assert "gui.wait(0.60)" in source
+        assert "gui.wait(0.70)" not in source
+
 
 class TestNoForeignPlatformVocabulary:
     """A generated script must not name mechanisms the platform lacks.

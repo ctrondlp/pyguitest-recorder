@@ -360,10 +360,17 @@ def test_whitespace_only_title_changes_do_not_count_as_drift():
 # -- session leakage ---------------------------------------------------------
 
 
-def leak_resolver(element_pid, window_pid):
-    """A resolver whose window and element deliberately may not agree."""
-    session = FakeSession(window=FakeWindow(title="Target", pid=window_pid))
-    made = DesktopResolver(session=session, elements=False)
+def leak_resolver(element_pid, window_pid, window_app_id="org.example.App", **kwargs):
+    """A resolver whose window and element deliberately may not agree.
+
+    `window_app_id` is the window's class name as Windows reports it, which is
+    what `_in_a_frame_host` reads -- "ApplicationFrameWindow" for a Store app
+    and anything else for an ordinary one.
+    """
+    session = FakeSession(
+        window=FakeWindow(title="Target", app_id=window_app_id, pid=window_pid)
+    )
+    made = DesktopResolver(session=session, elements=False, **kwargs)
     made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
         role="push button", name="Save", pid=element_pid
@@ -1222,6 +1229,16 @@ class TestPlatformWordingInNotes:
         monkeypatch.setattr(platforms.sys, "platform", "linux")
         assert resolver_module._scope_phrase() == "on the recorded display"
 
+    def test_the_recording_can_overrule_the_host(self, monkeypatch):
+        # Backend = "xrecord" on a Windows machine records X clients, so the
+        # recording is of a display even though the process is a Windows one
+        # -- see DesktopResolver.windows.
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        assert resolver_module._scope_phrase(False) == "on the recorded display"
+
 
 class TestTheUwpProcessSplit:
     """A Store app's window and its widgets are owned by different processes.
@@ -1234,16 +1251,95 @@ class TestTheUwpProcessSplit:
 
     Measured on a real Calculator recording: window pid 8824 (the host),
     buttons pid 16672, and the only element that survived was `Close
-    Calculator` on the frame's own title bar, which the host does own.
+    Calculator` on the frame's own title bar, which the host does own. The
+    frame *class* is what a recording can check that against, since
+    `Window.app_id` carries the window class on this platform.
+
+    The other half of the same rule is that a mismatch with nothing behind it
+    is refused: `_fits` answers True wherever it cannot tell, and on a scaled
+    screen -- the ordinary case on Windows -- that is every element from every
+    other process on the machine.
     """
 
     def test_a_uwp_widget_is_kept_on_windows(self, monkeypatch):
         import pyguitest_recorder.platforms as platforms
 
         monkeypatch.setattr(platforms.sys, "platform", "win32")
-        target = leak_resolver(element_pid=16672, window_pid=8824).resolve(100, 100)
+        target = leak_resolver(
+            element_pid=16672, window_pid=8824, window_app_id="ApplicationFrameWindow"
+        ).resolve(100, 100)
         assert target.element is not None
         assert target.element.name == "Save"
+
+    def test_the_frame_class_is_matched_without_regard_to_case(self, monkeypatch):
+        # Window classes are compared case-insensitively, and this string is
+        # whatever the backend quoted out of `GetClassNameW`.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        target = leak_resolver(
+            element_pid=16672, window_pid=8824, window_app_id="applicationframewindow"
+        ).resolve(100, 100)
+        assert target.element is not None
+
+    def test_an_unexplained_mismatch_is_refused_on_windows(self, monkeypatch):
+        # No frame host, and no rectangle on either side for the geometry to
+        # corroborate it with: this used to be kept as soon as the geometry
+        # stopped talking.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        made = leak_resolver(element_pid=16672, window_pid=8824)
+        assert made.resolve(100, 100).element is None
+        assert any("ApplicationFrameWindow" in w for w in made.warnings)
+
+    def test_a_scaled_screen_no_longer_excuses_an_unexplained_mismatch(
+        self, monkeypatch
+    ):
+        # 125%/150% displays are the ordinary case on Windows, and there the
+        # units are not agreed well enough to compare at all -- which is
+        # exactly why "cannot tell" stopped being enough for a pid that
+        # disagrees.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        made = leak_resolver(element_pid=16672, window_pid=8824)
+        made._scaled = True
+        made._element = lambda x, y: ElementRef(
+            role="push button", name="Save", pid=16672, extents=(95, 95, 10, 10)
+        )
+        assert made.resolve(100, 100).element is None
+
+    def test_geometry_that_corroborates_keeps_the_mismatch(self, monkeypatch):
+        # The other side of the same rule: an element whose own rectangle is
+        # inside the window has corroborated itself, which is the evidence
+        # this already accepted wherever a pid was missing outright.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        made = leak_resolver(element_pid=16672, window_pid=8824)
+        made._element = lambda x, y: ElementRef(
+            role="push button", name="Save", pid=16672, extents=(95, 95, 10, 10)
+        )
+        assert made.resolve(100, 100).element is not None
+
+    def test_an_x11_recording_on_a_windows_host_still_refuses_the_mismatch(
+        self, monkeypatch
+    ):
+        # `backend = "xrecord"` on a Windows machine records X clients through
+        # Xming/VcXsrv/WSLg: the host answers Windows, the recording is X11's,
+        # and `Recorder` hands the resolver that answer. A frame class means
+        # nothing to a desktop with no `ApplicationFrameHost` on it.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        made = leak_resolver(
+            element_pid=16672,
+            window_pid=8824,
+            window_app_id="ApplicationFrameWindow",
+            windows=False,
+        )
+        assert made.resolve(100, 100).element is None
 
     def test_the_same_mismatch_is_still_refused_off_windows(self, monkeypatch):
         # On Linux it means exactly what it always meant: the accessibility

@@ -87,9 +87,11 @@ was released.
   and refused them. Measured on a real Calculator recording: window pid 8824,
   buttons pid 16672, and the only element that survived was `Close Calculator`
   on the frame's own title bar, which the host does own. On Windows the pid is
-  no longer evidence either way and the question falls through to the same
-  geometry corroboration already used wherever a pid is missing; off Windows
-  nothing changes.
+  no longer evidence either way: the element is kept where its window is one of
+  the host's `ApplicationFrameWindow`s -- the recorded *class* name is how a
+  recording can tell -- or where the element's own rectangle corroborates that
+  it sits inside that window. A mismatch with neither is refused, and the
+  recording says which of the two was missing; off Windows nothing changes.
 
 - **Keystrokes injected by another process were reported as typed.**
   `RawEvent.injected` is read from `LLKHF_INJECTED` -- something XRecord
@@ -523,6 +525,83 @@ was released.
   stale `record_motion` notes above. Two guards came out of it: the example is
   asserted to *be* the defaults, and every setting is asserted to be named in
   it.
+
+- **The wait a chord had earned was thrown away by the pointer move after it,
+  and measured from the wrong event when it was not.** `_settle_after_key_action`
+  restores the gap a keystroke is followed by where `normalize.py` dropped it
+  (below `pause_threshold`), and it is owed to the *chord* -- a `Win+R` opens a
+  window the next line addresses. It was tracked as "a keystroke is pending",
+  set after every event, so a move in between cleared it and the click that
+  actually needed the pause got none. The flag was also answered by each
+  event's own `delay`, which is the interval to the event *before* it: a click
+  0.2s after a move that was itself 0.7s after the chord read as 0.2s -- under
+  the floor -- on an interval the recording had spent 0.9s on. The timestamp of
+  the keystroke is kept now, the wait is derived from it, and a move neither
+  takes it nor cancels it, since a move is the step towards the line that does.
+  An input event or a recorded `Pause`/`WaitForIdle` consumes it, because
+  either the line that addressed the new window has already run or the seconds
+  are already in the script.
+
+- **A character outside the Basic Multilingual Plane recorded as two unpaired
+  surrogates, and the script could not be written.** `SendInput` sends one
+  `VK_PACKET` keystroke per UTF-16 code unit, so an emoji arrives as a high
+  half and a low half. `chr()` on each half is a lone surrogate -- not the
+  character -- and joining the two does not decode them either, because a
+  Python string is code points and not UTF-16 units. `normalize.py` carried the
+  halves into one `TextInput`, the generator wrote them into
+  `gui.type_text(...)`, and the first thing that had to encode that string
+  raised `UnicodeEncodeError`: `--regenerate` died writing the file it had just
+  built. The high half is held back until its pair arrives now, and an unpaired
+  half -- no pair coming, which an ordinary key in between establishes -- is
+  dropped rather than passed on, since it has no character to replay.
+
+- **A recording made through an X server on a Windows machine described itself
+  as a native Windows desktop.** Windows can run Xming, VcXsrv or WSLg, and
+  `backend = "xrecord"` there records X clients -- but every question about
+  which platform a recording was of was answered from `sys.platform`, so the
+  context was asked for as `win32` + `uia` (a native desktop none of whose
+  windows are in the recording), `$DISPLAY` was cleared out of the header of
+  the one recording that display explains, the session was described as "for
+  this desktop", and the resolver relaxed its pid corroboration for an X11
+  recording. The selected capture backend decides now, through one helper both
+  the selection and every one of those questions go through, so `auto` still
+  answers for the host and a named backend answers for itself. `probe_context`
+  asks the same way, before there is a backend to ask.
+
+- **A hook that installed off the interactive desktop was started anyway.**
+  `unavailable_reason` asks whether this process is on the interactive window
+  station (see its own entry above), but it is asked during *selection* --
+  `Recorder.start` opens the session and only then starts the backend, and
+  nothing about `Win32CaptureBackend` requires that anything selected it at
+  all. A backend built on a real desktop and started after the session went
+  away -- RDP dropping to a disconnected session is enough -- installed its
+  hooks successfully and recorded nothing, with no error and no note. `start()`
+  now refuses with the same sentence. Same shape as the selector's own fix, in
+  the place where the answer can still change under a running process.
+
+- **A recording's saved delays were trusted after the events were reordered,
+  and an inserted event kept a delay measured against a predecessor it no
+  longer had.** A delay is the interval to the event in front of it, so any
+  event the timestamp sort moves is left holding a gap that belongs to another
+  neighbour -- visible in a `recorded`/`verbatim` script as a pause in front of
+  a line nothing waited for. `Recording.add` recomputed only the delays that
+  were empty ("or not event.delay"), so an event arriving with its own delay
+  kept it, and `Recording.from_dict` sorted without recalculating anything.
+  Both recompute now, the inserted event included, and the first event's delay
+  is zero in every case. Found by reading the two paths against each other:
+  `add`'s docstring claims both the moved event and the one it displaces are
+  recomputed from the neighbour each ends up with, and only one of them was.
+
+- **A hand-edited timestamp could crash `--regenerate` outside the error it
+  promises.** `Event.timestamp` defaults to `0.0`, so a missing one read as
+  "the recording began here" over the field the model orders events by, a
+  `"3.0"` string reached the load-time sort and raised `TypeError` from
+  comparing a float to a str -- not the `ValueError` `Recording.from_dict`
+  documents and `main()` catches -- and a `NaN` sorted into an order nothing
+  can explain, since it compares false to everything including itself.
+  `event_from_dict` requires the field to be present, numeric and finite, and
+  names which of the three failed. `to_dict` has always written it, so nothing
+  this recorder saves is affected: a file that lost it is one a person edited.
 
 ## [0.3.0] — 2026-09-13
 

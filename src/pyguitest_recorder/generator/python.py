@@ -185,6 +185,17 @@ tuple and carries the wait instead. Deliberately not `Pause` or any of the
 explicit waits, which are already the gap they stand for.
 """
 
+_KEY_ACTION_CONSUMING_WAITS = (Pause, WaitForIdle)
+"""Events that already sleep for the interval a keystroke left behind.
+
+`Pause` *is* a recorded idle, and `WaitForIdle` waits on the application, so
+either way the seconds are in the script and the settle below would be a
+second helping of the same gap. Deliberately not the waits for a window or an
+element: those return as soon as the thing is there, which for a window that
+is already open is immediately, so they do not stand for the gap -- the same
+reason `_SEPARATES_CLICKS` leaves them out.
+"""
+
 _SEPARATES_CLICKS = (
     Pause,
     WaitForIdle,
@@ -429,13 +440,20 @@ class _State:
     The recording's rather than this machine's: regenerating a Windows
     recording on Linux is ordinary, and a comment in the output naming AT-SPI
     would be describing the wrong desktop. See `platforms.element_api`."""
-    key_action_pending: bool = False
-    """Whether the last event rendered was a keystroke or a chord.
+    key_action_at: float | None = None
+    """When the last keystroke or chord was rendered, or None if none was.
 
     A chord is the one action most likely to have put something new on screen
     that the next line then addresses, and the gap that let it appear is the
     one `normalize.py` drops when it falls under `pause_threshold`. See
-    `_KEY_ACTION_SETTLE_FLOOR`."""
+    `_KEY_ACTION_SETTLE_FLOOR`.
+
+    A timestamp rather than the flag this used to be, because the wait is owed
+    to the *keystroke* while every event's `delay` is the interval to the one
+    before it: a click 0.2s after a move that was itself 0.7s after the chord
+    read as 0.2s, under the floor, on an interval the recording had spent 0.9s
+    on. `_settle_after_key_action` subtracts the two timestamps instead.
+    """
     replayed_until: float | None = None
     """The recording time the script has replayed up to, under `verbatim`.
 
@@ -946,14 +964,18 @@ class PythonGenerator:
         if isinstance(event, _SEPARATES_CLICKS):
             state.bare_click_pending = False
         handler(event, state)
-        state.key_action_pending = isinstance(event, (KeyStroke, HotKey))
+        if isinstance(event, (KeyStroke, HotKey)):
+            # When, rather than whether: the wait one of these is owed is
+            # measured from it, and everything in between carries delays
+            # measured from each other. See `_State.key_action_at`.
+            state.key_action_at = event.timestamp
 
     def _settle_after_key_action(self, event: Event, state: _State) -> None:
         """Give back the gap a keystroke was followed by, where one was dropped.
 
         `normalize.py` only records an idle of `pause_threshold` or more as a
-        `Pause`; a shorter one leaves nothing behind but the event's own
-        `delay`, and the script then issues both back to back. After a chord
+        `Pause`; a shorter one leaves nothing behind but the timestamps, and
+        the script then issues both back to back. After a chord
         that opened a window, that is the difference between a replay that
         works and one that types into nothing -- see
         `_KEY_ACTION_SETTLE_FLOOR` for the recording this was measured on.
@@ -968,10 +990,30 @@ class PythonGenerator:
         two waits on consecutive lines -- the pause belongs in front of
         whatever actually addresses the new window, which is the click or the
         keystroke after the move, not the move itself.
+
+        The interval is that event's timestamp minus the keystroke's, not the
+        `delay` the event carries. A move in between neither takes the wait nor
+        cancels it -- it is a step towards the line that does -- and the delay
+        it carries is the interval to *it*, which is how a chord 0.9s before a
+        click, with a move in between, came out as the 0.2s after the move and
+        fell under the floor. An input event ends the question whether or not a
+        wait was emitted for it: that click is the line that addressed the new
+        window, and the one after it does not need the same pause again.
+
+        A recorded `Pause` or `WaitForIdle` in between settles it the other
+        way: the seconds are already in the script, so emitting this one as
+        well would sleep through the same interval twice.
         """
-        if not state.key_action_pending or not isinstance(event, _AWAITS_A_KEY_ACTION):
+        at = state.key_action_at
+        if at is None or isinstance(event, MouseMove):
             return
-        gap = event.delay
+        if isinstance(event, _KEY_ACTION_CONSUMING_WAITS):
+            state.key_action_at = None
+            return
+        if not isinstance(event, _AWAITS_A_KEY_ACTION):
+            return
+        state.key_action_at = None
+        gap = event.timestamp - at
         if gap < _KEY_ACTION_SETTLE_FLOOR:
             return
         state.capabilities.add("TIMING")

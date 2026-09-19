@@ -7,11 +7,15 @@ reader after an accessibility bus their machine has never had, and "no window
 on the recorded display" names an X display where there is none.
 
 Two callers, asking from opposite ends. The resolver runs *while recording*,
-so the platform it wants is the one under it and `sys.platform` answers.  The
-generator runs over a `Recording` that may have been made anywhere -- a
-Windows session regenerated on Linux with `--regenerate` is an ordinary thing
-to do -- so it has to ask about the recording's own environment instead, which
-is why `session_type` is a parameter rather than something read here.
+so `sys.platform` is right there -- but it is not the answer, because Windows
+can run an X server (Xming, VcXsrv, WSLg) and `backend = "xrecord"` there
+records X clients. What a recording is *of* is decided by the capture backend
+that made it, so the resolver is handed that answer rather than reading the
+host for itself (see `DesktopResolver.windows`). The generator runs over a
+`Recording` that may have been made anywhere -- a Windows session regenerated
+on Linux with `--regenerate` is an ordinary thing to do -- so it has to ask
+about the recording's own environment instead, which is why `session_type` is
+a parameter rather than something read here.
 """
 
 from __future__ import annotations
@@ -33,7 +37,10 @@ def is_windows(session_type: str | None = None) -> bool:
     stores it -- the `str()` of a `pyguitest.SessionType`, so
     `"SessionType.WIN32"`. Matched case-insensitively on the member name
     rather than parsed, since the exact spelling is pyguitest's to change and
-    nothing here needs more than the answer. None asks about this machine.
+    nothing here needs more than the answer. None asks about this machine,
+    which is right for a caller with no recording and no backend to ask: it is
+    what the resolver falls back to when it was built without one (see
+    `DesktopResolver.windows`).
     """
     if session_type is None:
         return sys.platform == "win32"
