@@ -163,13 +163,25 @@ class FakeKernel32:
         return 4321
 
 
-def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None):
-    """Patch `sys.platform`, `_user32` and `_kernel32` for one test."""
+def patch_windows(
+    monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True
+):
+    """Patch `sys.platform`, `_user32` and `_kernel32` for one test.
+
+    `stub_desktop` also answers the interactive-window-station question, so a
+    test about hooks is not also a test of the machine it runs on: the real
+    `_off_desktop_reason` asks pyguitest, and on a Windows box reached over
+    SSH that correctly answers "off the desktop" and would fail every probe
+    test here for the one reason that is not a defect. The class that is
+    *about* that check passes False and exercises the real thing.
+    """
     monkeypatch.setattr(win32_module.sys, "platform", "win32")
     monkeypatch.setattr(win32_module, "_user32", lambda: fake_user32 or FakeUser32())
     monkeypatch.setattr(
         win32_module, "_kernel32", lambda: fake_kernel32 or FakeKernel32()
     )
+    if stub_desktop:
+        monkeypatch.setattr(win32_module, "_off_desktop_reason", lambda: None)
 
 
 def mouse_info(x=100, y=200, mouse_data=0, flags=0):
@@ -901,7 +913,7 @@ class TestTheInteractiveDesktopCheck:
 
     def _reason(self, monkeypatch, interactive):
         fake = FakeUser32()
-        patch_windows(monkeypatch, fake_user32=fake)
+        patch_windows(monkeypatch, fake_user32=fake, stub_desktop=False)
 
         class _Env:
             is_interactive_desktop = interactive
@@ -926,7 +938,7 @@ class TestTheInteractiveDesktopCheck:
     def test_a_probe_that_cannot_tell_does_not_refuse(self, monkeypatch):
         # detect() reports True where it cannot tell, and a recorder refusing
         # on "cannot tell" would be worse than one that tries.
-        patch_windows(monkeypatch, fake_user32=FakeUser32())
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
 
         class _Broken:
             @staticmethod
