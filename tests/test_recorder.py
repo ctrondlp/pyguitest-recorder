@@ -554,18 +554,46 @@ class TestWindowsEnvironmentSnapshot:
     XWayland" note into a recording made entirely of native Windows input.
     """
 
-    def _describe(self, backend, variables, platform="linux"):
+    def _describe(self, backend, variables, platform="linux", detected=None):
         """The environment a recording through `backend` would carry.
 
         The platform is the *machine's*, and it is deliberately no longer what
         decides any of this: the backend a recording is made with is, so that
         `xrecord` on a Windows host keeps the display it recorded through.
+
+        `pyguitest.detect` is stood in for, and that is the point rather than a
+        convenience. What it answers is a fact about the host the suite is
+        running on and the pyguitest installed there: patching `sys.platform`
+        to `win32` makes a pyguitest with Windows support say `WIN32`
+        whatever `DISPLAY` holds, while a release without it goes on reading
+        the variables and says `XWAYLAND`. The same test therefore passed on
+        Linux and failed on Windows for a reason that had nothing to do with
+        what `describe_environment` does with the answer -- which is all this
+        class is about. `detected` is the answer to give; left out, it is what
+        a Linux classifier says for the variables in play.
         """
+        from types import SimpleNamespace
+
+        import pyguitest
+
         from pyguitest_recorder import recorder as recorder_module
+
+        def fake_detect(env=None):
+            source = recorder_module.os.environ if env is None else env
+            if detected is not None:
+                session_type = detected
+            elif source.get("DISPLAY") and source.get("WAYLAND_DISPLAY"):
+                session_type = "SessionType.XWAYLAND"
+            elif source.get("DISPLAY"):
+                session_type = "SessionType.X11"
+            else:
+                session_type = ""
+            return SimpleNamespace(session_type=session_type, compositor="", desktop="")
 
         with (
             mock.patch.object(recorder_module.sys, "platform", platform),
             mock.patch.dict(recorder_module.os.environ, variables, clear=False),
+            mock.patch.object(pyguitest, "detect", fake_detect),
         ):
             return recorder_module.describe_environment(None, backend)
 
@@ -588,7 +616,29 @@ class TestWindowsEnvironmentSnapshot:
             platform="win32",
         )
         assert env.display == ":0"
+        # The machine being Windows does not switch the XWayland question off
+        # for this backend; what the desktop *is* answers it, and here the
+        # detector says XWayland.
         assert env.xwayland is True
+
+    def test_a_windows_desktop_is_not_xwayland_even_when_recorded_through_xrecord(
+        self,
+    ):
+        # The case the test above cannot be: a native Windows host, where the
+        # detector answers WIN32 whatever the variables say. An X server there
+        # (VcXsrv, Xming) is not XWayland, so the display is kept -- it still
+        # explains where the coordinates came from -- and the note that would
+        # tell someone Wayland clients were missing from the recording is not
+        # written, because no Wayland client was ever in reach.
+        env = self._describe(
+            "xrecord",
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
+            platform="win32",
+            detected="SessionType.WIN32",
+        )
+        assert env.display == ":0"
+        assert env.xwayland is False
+        assert not any("XWayland" in note for note in env.notes)
 
     def test_the_same_pair_still_means_xwayland_off_windows(self):
         env = self._describe(
