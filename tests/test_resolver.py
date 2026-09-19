@@ -1210,3 +1210,51 @@ class TestPlatformWordingInNotes:
 
         monkeypatch.setattr(platforms.sys, "platform", "linux")
         assert resolver_module._scope_phrase() == "on the recorded display"
+
+
+class TestTheUwpProcessSplit:
+    """A Store app's window and its widgets are owned by different processes.
+
+    Windows hosts every UWP toplevel in an `ApplicationFrameWindow` belonging
+    to `ApplicationFrameHost.exe`, while the widgets inside belong to the
+    application -- which pyguitest documents on `WINDOW_PID`. Treating that
+    mismatch as evidence of another session, which is what it means on Linux,
+    rejected every widget in the app.
+
+    Measured on a real Calculator recording: window pid 8824 (the host),
+    buttons pid 16672, and the only element that survived was `Close
+    Calculator` on the frame's own title bar, which the host does own.
+    """
+
+    def test_a_uwp_widget_is_kept_on_windows(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        target = leak_resolver(element_pid=16672, window_pid=8824).resolve(100, 100)
+        assert target.element is not None
+        assert target.element.name == "Save"
+
+    def test_the_same_mismatch_is_still_refused_off_windows(self, monkeypatch):
+        # On Linux it means exactly what it always meant: the accessibility
+        # bus answering about another login session.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        made = leak_resolver(element_pid=16672, window_pid=8824)
+        assert made.resolve(100, 100).element is None
+        assert any("pid 16672" in warning for warning in made.warnings)
+
+    def test_windows_still_rejects_an_element_that_cannot_fit(self, monkeypatch):
+        # The pid stops being evidence there; geometry takes over, and an
+        # element bigger than the window it is supposedly inside is still
+        # describing a different screen.
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+        session = FakeSession(window=FakeWindow(title="Target", pid=8824))
+        made = DesktopResolver(session=session, elements=False)
+        made._resolves_elements = True
+        made._element = lambda x, y: ElementRef(
+            role="push button", name="Save", pid=16672, extents=(0, 0, 9999, 9999)
+        )
+        assert made.resolve(100, 100).element is None

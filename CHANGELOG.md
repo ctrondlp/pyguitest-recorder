@@ -62,6 +62,30 @@ was released.
   about the *recording's* platform rather than the machine rendering it, so
   regenerating a Windows recording on Linux still says UI Automation.
 
+- **Every widget inside a Store app was thrown away.** Windows hosts a UWP
+  toplevel in an `ApplicationFrameWindow` owned by `ApplicationFrameHost.exe`
+  while the widgets inside belong to the application, so the element's process
+  and its window's differ by design -- which pyguitest already documents on
+  `WINDOW_PID`. The resolver treated that as evidence the accessibility bus
+  had answered about another login session, which is what it means on Linux,
+  and refused them. Measured on a real Calculator recording: window pid 8824,
+  buttons pid 16672, and the only element that survived was `Close Calculator`
+  on the frame's own title bar, which the host does own. On Windows the pid is
+  no longer evidence either way and the question falls through to the same
+  geometry corroboration already used wherever a pid is missing; off Windows
+  nothing changes.
+
+- **Keystrokes injected by another process were reported as typed.**
+  `RawEvent.injected` is read from `LLKHF_INJECTED` -- something XRecord
+  cannot see at all -- and then went no further than the raw log, which is off
+  by default. A keep-awake script sending `{F15}` once a minute therefore put
+  a `gui.tap_key("F15")` in the middle of a recording with nothing saying
+  where it came from. They are still recorded, since this recorder does not
+  drop what it saw, but the recording now carries a note naming the keys and
+  the count. Key presses only: an injected pointer move is what every
+  remote-control tool does constantly, and a note on every recording made over
+  RDP would be noise.
+
 - **A Windows recording resolved no window and no element, so every click was
   a bare screen coordinate.** `_open_session` named `x11` and `atspi` on every
   platform, and neither can open on Windows -- no X server for the first, no

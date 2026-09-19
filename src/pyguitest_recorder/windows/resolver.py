@@ -677,13 +677,39 @@ class DesktopResolver:
         return self._fits(element, window)
 
     def _same_process(self, element: ElementRef, window: WindowRef) -> bool:
-        """Whether the element's process is the window's."""
+        """Whether the element's process is the window's.
+
+        A real corroboration on Linux, where an element and the window under
+        the same point genuinely share a process, so a mismatch means the
+        accessibility bus has answered about another login session.
+
+        **Not true on Windows, and not an edge case there.** Every Store app
+        splits across two processes: the toplevel is an `ApplicationFrameWindow`
+        owned by `ApplicationFrameHost.exe`, and the widgets inside it belong to
+        the application. pyguitest documents exactly this on `WINDOW_PID` --
+        `GetWindowThreadProcessId` reports the host, and UI Automation reports
+        the real process -- so on that platform the two pids differing is the
+        *expected* answer for a correctly resolved element.
+
+        Measured on a real recording of Calculator: the window was pid 8824
+        (the frame host) and its buttons pid 16672, so this rejected every
+        widget in the application. The only element that survived was `Close
+        Calculator` on the frame's own title bar, which the host does own --
+        which is what made the cause unmistakable.
+
+        So on Windows the pid is not evidence either way, and the question
+        falls through to `_fits`, which asks whether the element's rectangle
+        could be inside the window at all. That is the same corroboration this
+        method already defers to wherever a pid is missing, and it is a real
+        one: it is what rejects an element from another desktop.
+        """
         if element.pid == window.pid:
             return True
+        if is_windows():
+            return self._fits(element, window)
         self._warn(
             f"ignored an accessible element from pid {element.pid} under a "
-            f"window owned by pid {window.pid}; the accessibility bus is not "
-            "scoped to one X display"
+            f"window owned by pid {window.pid}; {foreign_element_reason()}"
         )
         return False
 

@@ -576,3 +576,49 @@ class TestWindowsEnvironmentSnapshot:
         env = self._describe("linux", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"})
         assert env.display == ":0"
         assert env.xwayland is True
+
+
+class TestInjectedInputIsReported:
+    """Input another process synthesised is marked, not silently included.
+
+    `RawEvent.injected` comes from `LLKHF_INJECTED`, which XRecord has no
+    equivalent of. The backend reads it and, until now, it went no further
+    than the raw log -- which is off by default -- so a keystroke nobody
+    pressed reached the script looking exactly like one that was. A real
+    case: a keep-awake script sending `{F15}` once a minute.
+    """
+
+    def _note_for(self, keysyms):
+        from pyguitest_recorder.recorder import _injected_note
+
+        return _injected_note(keysyms)
+
+    def test_the_note_names_the_key_and_the_count(self):
+        note = self._note_for(["F15", "F15", "F15"])
+        assert "3 keystroke" in note
+        assert "F15" in note
+        assert "injected" in note
+
+    def test_repeated_keys_are_named_once(self):
+        assert self._note_for(["F15", "F15"]).count("F15") == 1
+
+    def test_many_distinct_keys_are_truncated(self):
+        note = self._note_for(["F13", "F14", "F15", "F16", "F17", "F18", "F19"])
+        assert "..." in note
+
+    def test_only_injected_key_presses_are_counted(self):
+        # An injected pointer move is what a screen-sharing or remote-control
+        # tool does constantly; a note firing on every recording made over RDP
+        # would be noise rather than a finding.
+        from pyguitest_recorder.backends.base import RawEvent
+        from pyguitest_recorder.config import Settings
+        from pyguitest_recorder.recorder import Recorder
+
+        made = Recorder(Settings())
+        for raw in (
+            RawEvent(kind="key_press", timestamp=1.0, keysym="F15", injected=True),
+            RawEvent(kind="key_press", timestamp=2.0, keysym="a", injected=False),
+            RawEvent(kind="motion", timestamp=3.0, x=1, y=1, injected=True),
+        ):
+            made._note_injected(raw)
+        assert made._injected_keys == ["F15"]

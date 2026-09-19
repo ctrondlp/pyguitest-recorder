@@ -61,6 +61,27 @@ minutes, which is precisely the recording that produces them.
 """
 
 
+def _injected_note(keysyms: list[str]) -> str:
+    """Say which keystrokes came from another process, and how many.
+
+    Named rather than counted alone: a reader who sees `F15` here recognises
+    their own keep-awake script instantly, where "3 injected keystrokes" would
+    send them looking through the script for something they did.
+    """
+    seen: list[str] = []
+    for keysym in keysyms:
+        if keysym not in seen:
+            seen.append(keysym)
+    named = ", ".join(seen[:5]) + (", ..." if len(seen) > 5 else "")
+    return (
+        f"{len(keysyms)} keystroke(s) in this recording were injected by "
+        f"another process rather than typed ({named}); they are in the script "
+        "because this recorder does not drop what it saw, but nothing pressed "
+        "them -- a keep-awake or macro tool is the usual source, and stopping "
+        "it while recording is the fix"
+    )
+
+
 def _lag_note(lag: float, stopped_at: float | None) -> str:
     """What to say about a recording that fell behind the input it consumed.
 
@@ -321,6 +342,9 @@ class Recorder:
     """
 
     _worst_lag: float = field(default=0.0, init=False)
+    _injected_keys: list[str] = field(default_factory=list, init=False)
+    """Keysyms another process synthesised during this run. See
+    `_note_injected`."""
     """The furthest behind live input consumption ever fell during this run."""
 
     _lag_reported_at: float = field(default=0.0, init=False)
@@ -402,6 +426,8 @@ class Recorder:
             self.recording.environment.notes.append(
                 _lag_note(self._worst_lag, self._stop_pressed_at())
             )
+        if self._injected_keys:
+            self.recording.environment.notes.append(_injected_note(self._injected_keys))
         self._collect_warnings()
         return self.recording
 
@@ -472,10 +498,33 @@ class Recorder:
         application's escape presses to the script as keystrokes.
         """
         self._note_lag(raw)
+        self._note_injected(raw)
         keep, stop = self._stop_sequence(raw)
         if not stop:
             self._consume(keep)
         return stop
+
+    def _note_injected(self, raw: Any) -> None:
+        """Count input that another process synthesised rather than a person.
+
+        `RawEvent.injected` comes from `LLKHF_INJECTED`/`LLMHF_INJECTED`, which
+        XRecord has no equivalent of -- Windows is telling this recorder
+        something X11 structurally cannot. The backend already reads it, and
+        until now it went no further than the raw log, which is off by default:
+        so a keystroke no one pressed reached the generated script looking
+        exactly like one that was.
+
+        Not dropped, which is this package's rule about everything it saw --
+        marked. A real case: a keep-awake script sending `{F15}` once a minute
+        put a `gui.tap_key("F15")` in the middle of a recording of the Run
+        dialog, and nothing in the script or its notes said where it came from.
+        Counting keystrokes only, deliberately: an injected *pointer* move is
+        what a screen-sharing or remote-control tool does constantly, and a
+        note firing on every recording made over RDP would be noise rather
+        than a finding.
+        """
+        if getattr(raw, "injected", False) and getattr(raw, "kind", "") == "key_press":
+            self._injected_keys.append(getattr(raw, "keysym", "") or "?")
 
     def _note_lag(self, raw: Any) -> None:
         """Notice when consumption has fallen behind the input it is consuming.
