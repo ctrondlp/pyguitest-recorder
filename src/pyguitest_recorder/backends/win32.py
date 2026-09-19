@@ -502,13 +502,24 @@ def _off_desktop_reason() -> str | None:
     An unanswerable probe is not a refusal: `detect()` reports True where it
     cannot tell, and a recorder that refused on "cannot tell" would be worse
     than one that tries.
+
+    **The field is newer than the floor this package declares.** It arrived
+    with pyguitest's own Windows support, and no release carries it yet, so an
+    installed pyguitest that is otherwise perfectly usable has no such
+    attribute -- and neither does the type a checker sees when it reads the
+    same floor, which is what made this a lint failure rather than a runtime
+    one. `getattr` with a default of True is the shape the rest of the tree
+    uses for a pyguitest question an older version cannot answer (see
+    `describe_environment`): the missing field means "cannot tell", which the
+    paragraph above already resolves as try-anyway.
     """
     try:
         import pyguitest
 
-        if pyguitest.detect().is_interactive_desktop:
-            return None
+        detected = pyguitest.detect()
     except Exception:  # noqa: BLE001 - cannot tell is not a refusal
+        return None
+    if getattr(detected, "is_interactive_desktop", True):
         return None
     return (
         "this process is not attached to the interactive window station, so a "

@@ -979,3 +979,20 @@ class TestTheInteractiveDesktopCheck:
 
         monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Broken)
         assert unavailable_reason() is None
+
+    def test_a_pyguitest_without_the_field_does_not_refuse(self, monkeypatch):
+        # The field arrived with pyguitest's own Windows support and is in no
+        # release yet, so an installed pyguitest can be missing it while being
+        # otherwise perfectly usable -- and so can the type a checker reads off
+        # the floor this package declares, which is how this surfaced: as a
+        # lint failure rather than as a recording that refused. A field that is
+        # not there is "cannot tell", the same answer as a probe that raises.
+        patch_windows(monkeypatch, fake_user32=FakeUser32(), stub_desktop=False)
+
+        class _OlderPyguitest:
+            @staticmethod
+            def detect():
+                return object()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _OlderPyguitest)
+        assert unavailable_reason() is None
