@@ -454,7 +454,45 @@ def unavailable_reason() -> str | None:
             "logged on', or an SSH session with no desktop of its own)"
         )
     lib.UnhookWindowsHookEx(hook)
-    return None
+    return _off_desktop_reason()
+
+
+def _off_desktop_reason() -> str | None:
+    """Why a hook that installed will still see nothing, or None.
+
+    **Installing a hook is not evidence that it can observe anything.** A hook
+    is scoped to the window station and desktop of the thread that installs
+    it, and a process off the interactive desktop has a station of its own --
+    so `SetWindowsHookExW` succeeds there and then reports not one keystroke
+    from the session a person is actually using.
+
+    Measured over SSH on a real Windows 11 box: the probe above installed
+    cleanly, `unavailable_reason()` answered None, and `--doctor` printed
+    "ready to record" for a process that could not have captured anything.
+    The message it would have printed on failure even names SSH as the usual
+    cause -- the branch simply never fired.
+
+    Asked of pyguitest, whose `is_interactive_desktop` is the same question
+    already probed for `detect()` and confirmed correct on that machine, so
+    this neither duplicates the Win32 call nor invents a second answer to it.
+    An unanswerable probe is not a refusal: `detect()` reports True where it
+    cannot tell, and a recorder that refused on "cannot tell" would be worse
+    than one that tries.
+    """
+    try:
+        import pyguitest
+
+        if pyguitest.detect().is_interactive_desktop:
+            return None
+    except Exception:  # noqa: BLE001 - cannot tell is not a refusal
+        return None
+    return (
+        "this process is not attached to the interactive window station, so a "
+        "hook installs against a desktop nobody is using and would record "
+        "nothing. A service, a scheduled task not set to 'Run only when user "
+        "is logged on', and an SSH session all land here -- record from the "
+        "logged-in session instead"
+    )
 
 
 # -- the keysym vocabulary ----------------------------------------------------

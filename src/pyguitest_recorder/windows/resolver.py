@@ -1040,6 +1040,73 @@ class DesktopResolver:
         return (x, y, width, height)
 
 
+def _parent_pids_windows() -> dict[int, int]:
+    r"""Pid -> parent pid, from Toolhelp, on Windows.
+
+    `ps` does not exist there, so the Unix reader below returns nothing and
+    the recorder stopped excluding its own terminal -- which is the whole
+    point of the walk. Seen in a real Windows recording: the generated script
+    waited for a window titled `C:\WINDOWS\system32\cmd.exe -
+    pyguitest-recorder -o script3.py --save-session session3.json`, the very
+    console the recorder was running in, under a title that only exists while
+    a recording is being made and so can never match on replay.
+
+    `CreateToolhelp32Snapshot` is the same route pyguitest's own
+    `wait_for_process` takes, and `PROCESSENTRY32W` is declared here rather
+    than imported from it because a private name in another package is not an
+    interface. `dwSize` is *validated* by the API, so a wrong layout is a
+    refusal rather than a wrong answer.
+    """
+    import ctypes
+
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        return {}
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            # ULONG_PTR, so pointer-width: anything narrower puts every field
+            # after it at the wrong offset on 64-bit.
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_int32),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_uint16 * 260),
+        ]
+
+    try:
+        kernel32 = loader("kernel32", use_last_error=True)
+    except OSError:
+        return {}
+    kernel32.CreateToolhelp32Snapshot.argtypes = (ctypes.c_ulong, ctypes.c_ulong)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    for name in ("Process32FirstW", "Process32NextW"):
+        function = getattr(kernel32, name)
+        function.argtypes = (ctypes.c_void_p, ctypes.POINTER(_Entry))
+        function.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    invalid = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if not snapshot or snapshot == invalid:
+        return {}
+    parents: dict[int, int] = {}
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return parents
+
+
 def _ancestor_pids(limit: int = MAX_ANCESTRY) -> list[int]:
     """This process's ancestors, nearest first, up to `limit` of them.
 
@@ -1047,7 +1114,14 @@ def _ancestor_pids(limit: int = MAX_ANCESTRY) -> list[int]:
     linprocfs has no `/proc` at all, and this runs once at startup where a
     subprocess costs nothing. An unreadable process table is not fatal --
     the caller still ignores this process itself, as it always has.
+
+    Windows has no `ps`, so the call below raised `FileNotFoundError`, was
+    swallowed, and left the ancestry empty -- silently turning off the
+    terminal exclusion this exists for. `_parent_pids_windows` is that
+    platform's answer.
     """
+    if is_windows():
+        return _walk_parents(_parent_pids_windows(), limit)
     try:
         result = subprocess.run(
             ["ps", "-eo", "pid=,ppid="],
@@ -1064,12 +1138,25 @@ def _ancestor_pids(limit: int = MAX_ANCESTRY) -> list[int]:
         fields = line.split()
         if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
             parents[int(fields[0])] = int(fields[1])
+    return _walk_parents(parents, limit)
+
+
+def _walk_parents(parents: dict[int, int], limit: int) -> list[int]:
+    """This process's ancestors out of a pid -> parent map, nearest first.
+
+    Bounded by `limit` and by the walk reaching a root, and by `seen`: a
+    process table read while processes are exiting can hand back a cycle,
+    and a pid whose parent has been reused can point back down its own
+    chain. Neither is a reason to hang at startup.
+    """
     chain: list[int] = []
+    seen = {os.getpid()}
     pid = os.getpid()
     while len(chain) < limit:
         pid = parents.get(pid, 0)
-        if pid <= 1:
+        if pid <= 1 or pid in seen:
             break
+        seen.add(pid)
         chain.append(pid)
     return chain
 

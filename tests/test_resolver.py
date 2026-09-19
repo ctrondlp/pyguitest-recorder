@@ -1269,3 +1269,53 @@ class TestTheUwpProcessSplit:
             role="push button", name="Save", pid=16672, extents=(0, 0, 9999, 9999)
         )
         assert made.resolve(100, 100).element is None
+
+
+class TestProcessAncestry:
+    """Finding the terminal the recorder is being driven from.
+
+    `ps` does not exist on Windows, so the Unix reader raised
+    FileNotFoundError, was swallowed, and left the ancestry empty -- silently
+    turning off the terminal exclusion it exists for. A real Windows recording
+    then waited for a window titled after the recording command itself, a
+    title that only exists while recording and can never match on replay.
+    """
+
+    def test_the_chain_is_walked_nearest_first(self):
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        chain = _walk_parents({me: 100, 100: 200, 200: 300, 300: 0}, limit=8)
+        assert chain == [100, 200, 300]
+
+    def test_the_limit_is_honoured(self):
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        parents = {me: 1000}
+        parents.update({n: n + 1 for n in range(1000, 1020)})
+        assert len(_walk_parents(parents, limit=3)) == 3
+
+    def test_a_cycle_cannot_hang_the_walk(self):
+        # A process table read while processes are exiting can hand back a
+        # cycle, and a reused pid can point back down its own chain.
+        from pyguitest_recorder.windows.resolver import _walk_parents
+
+        me = os.getpid()
+        chain = _walk_parents({me: 100, 100: 200, 200: 100}, limit=8)
+        assert chain == [100, 200]
+
+    def test_windows_does_not_shell_out_to_ps(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "win32")
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("ps was called on Windows")
+
+        monkeypatch.setattr(resolver_module.subprocess, "run", _explode)
+        monkeypatch.setattr(
+            resolver_module, "_parent_pids_windows", lambda: {os.getpid(): 4242}
+        )
+        assert resolver_module._ancestor_pids() == [4242]

@@ -86,6 +86,29 @@ was released.
   remote-control tool does constantly, and a note on every recording made over
   RDP would be noise.
 
+- **The recorder recorded its own terminal on Windows.** `_ancestor_pids`
+  shells out to `ps -eo pid=,ppid=` to find the window-owning process the
+  recorder is driven from, so that terminal can be excluded. Windows has no
+  `ps`: the call raised `FileNotFoundError`, was swallowed, and left the
+  ancestry empty -- silently switching off the exclusion. A real recording's
+  script then waited for a window titled `C:\WINDOWS\system32\cmd.exe -
+  pyguitest-recorder -o script3.py --save-session session3.json`, the very
+  console the recorder was running in, under a title that exists only while
+  recording and so can never match on replay. Windows now reads parent pids
+  from Toolhelp. The walk also stops on a repeated pid, since a process table
+  read while processes exit can hand back a cycle.
+
+- **The recorder claimed it could record where it could not.** A low-level
+  hook is scoped to the window station and desktop of the thread installing
+  it, so a process off the interactive desktop installs one successfully
+  against a desktop nobody is using. `unavailable_reason()` took that success
+  as proof and answered None -- `--doctor` printed "ready to record" over SSH
+  on a real Windows 11 box, for a process that could not have captured a
+  keystroke. Its own failure message already named SSH as the usual cause; the
+  branch just never fired. It now asks pyguitest whether this process is on
+  the interactive window station, and a probe that cannot tell is still not a
+  refusal.
+
 - **A Windows recording resolved no window and no element, so every click was
   a bare screen coordinate.** `_open_session` named `x11` and `atspi` on every
   platform, and neither can open on Windows -- no X server for the first, no

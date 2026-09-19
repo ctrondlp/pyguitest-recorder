@@ -887,3 +887,51 @@ class TestDrain:
         finally:
             made.stop()
         assert [e.kind for e in drained] == ["button_press"]
+
+
+class TestTheInteractiveDesktopCheck:
+    """Installing a hook is not evidence that it can observe anything.
+
+    A hook is scoped to the window station and desktop of the thread that
+    installs it, so a process off the interactive desktop installs one
+    against a desktop nobody is using. Measured over SSH on Windows 11: the
+    probe installed cleanly and `--doctor` printed "ready to record" for a
+    process that could not capture a thing.
+    """
+
+    def _reason(self, monkeypatch, interactive):
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+
+        class _Env:
+            is_interactive_desktop = interactive
+
+        class _Pyguitest:
+            @staticmethod
+            def detect():
+                return _Env()
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Pyguitest)
+        return unavailable_reason()
+
+    def test_an_installed_hook_off_the_desktop_is_still_a_refusal(self, monkeypatch):
+        reason = self._reason(monkeypatch, interactive=False)
+        assert reason is not None
+        assert "interactive window station" in reason
+        assert not available()
+
+    def test_the_interactive_desktop_can_record(self, monkeypatch):
+        assert self._reason(monkeypatch, interactive=True) is None
+
+    def test_a_probe_that_cannot_tell_does_not_refuse(self, monkeypatch):
+        # detect() reports True where it cannot tell, and a recorder refusing
+        # on "cannot tell" would be worse than one that tries.
+        patch_windows(monkeypatch, fake_user32=FakeUser32())
+
+        class _Broken:
+            @staticmethod
+            def detect():
+                raise RuntimeError("probe exploded")
+
+        monkeypatch.setitem(__import__("sys").modules, "pyguitest", _Broken)
+        assert unavailable_reason() is None
