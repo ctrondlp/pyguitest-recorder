@@ -1573,6 +1573,8 @@ def _parent_pids_windows() -> dict[int, int]:
         return {}
 
     class _Entry(ctypes.Structure):
+        """`PROCESSENTRY32W`: one row of the snapshot, the exe name last."""
+
         _fields_ = [
             ("dwSize", ctypes.c_uint32),
             ("cntUsage", ctypes.c_uint32),

@@ -271,6 +271,8 @@ _SENTINEL = object()
 
 
 class _POINT(ctypes.Structure):
+    """A screen coordinate, as a Win32 `POINT`: two 32-bit `LONG`s."""
+
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
@@ -507,6 +509,7 @@ def unavailable_reason() -> str | None:
         return "user32.dll did not load, which should not happen on Windows itself"
 
     def _noop(_n: int, _w: int, _l: int) -> int:
+        """The probe hook's body: installed and removed without ever firing."""
         return 0
 
     probe = _HOOKPROC(_noop)
@@ -679,6 +682,7 @@ class _KeyVocabulary:
     """
 
     def __init__(self) -> None:
+        """Build the vocabulary and its keysym table once for this instance."""
         self._vk, self._fallback = _key_vocabulary()
         self._table = _build_keysym_table(self._vk)
         self._return = self._vk["VK_RETURN"]
@@ -718,6 +722,7 @@ class _KeyboardState:
     """
 
     def __init__(self) -> None:
+        """Start with every key up and no modifier latched."""
         self._state = bytearray(256)
 
     def press(self, vk_code: int) -> None:
@@ -869,6 +874,7 @@ class _SurrogatePairs:
     """
 
     def __init__(self) -> None:
+        """Start with no half of a surrogate pair pending."""
         self._high: int | None = None
 
     def character(self, unit: int) -> str:

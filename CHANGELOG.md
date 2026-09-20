@@ -35,6 +35,33 @@ was released.
 
 ### Fixed
 
+- **A hand-edited recording could crash `--regenerate` outside the error it
+  promises.** `Recording.from_dict` documents that a malformed file raises
+  `ValueError` -- `--regenerate` is where someone goes to edit one -- and it
+  checked `events` for that while leaving `environment`, `started_at` and
+  `raw` unchecked. An `environment` that was not an object raised
+  `AttributeError: 'str' object has no attribute 'get'` from inside
+  `Environment.from_dict`, and `main()` catches only `ValueError`, so a
+  mistyped line gave a traceback and exit 1 instead of
+  `pyguitest-recorder: ...` and exit 2. The other two were quieter and worse:
+  `"started_at": "3.0"` was stored on a `float` field and round-tripped, and
+  `"raw": "x"` came back as a list of characters. Both objects' fields are now
+  read through a check that names the field and the type it got instead.
+
+- **The README's link to `docs/developers/` landed on a file listing.** That
+  directory holds `architecture.md` and `status.md` and has no `README.md`, so
+  the link went to nothing a reader can read -- pyguitest's equivalent
+  directory has an index page, which is why the same link works there. The
+  entry now names the two pages, and the test that checks relative links
+  requires a directory target to have a README rather than merely to exist.
+
+- **Eight missing docstrings, all on private helpers.** `_POINT`, `_noop`,
+  `_Entry`, the `__init__`s of `_KeyVocabulary`, `_KeyboardState` and
+  `_SurrogatePairs`, and the two inner helpers in the Windows capture scripts.
+  None is lint-enforced -- `D105` is ignored and those `__init__`s sit on
+  private classes -- but they are the same set the sibling repo closed in its
+  own docstring-coverage pass.
+
 - **A click on an open menu item was recorded as a click on whatever lay
   underneath the menu.** Found live on GhostBSD/MATE, recording `File → New` in
   pluma: the script said `gui.button("Open").click()`, the toolbar button

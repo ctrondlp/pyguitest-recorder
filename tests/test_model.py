@@ -319,6 +319,55 @@ def test_recording_from_dict_names_which_event_index_is_malformed():
         )
 
 
+def test_recording_from_dict_rejects_an_environment_that_is_not_an_object():
+    # The contract `from_dict` documents covers every field, and this one was
+    # left out: `Environment.from_dict` called `.get` on whatever it was
+    # handed, so `"environment": "nonsense"` raised AttributeError past
+    # `main()`'s `except ValueError` -- a traceback and exit 1 where the
+    # promised message and exit 2 belong. Found reviewing the load path.
+    with pytest.raises(ValueError, match="'environment' is not an object"):
+        Recording.from_dict({"environment": "nonsense"})
+
+
+def test_recording_from_dict_rejects_a_non_numeric_started_at():
+    # `"started_at": "3.0"` used to be stored on a float field and written
+    # back out unchanged -- silently, unlike the event timestamps checked
+    # beside it.
+    with pytest.raises(ValueError, match="'started_at' is not a number"):
+        Recording.from_dict({"started_at": "3.0"})
+    with pytest.raises(ValueError, match="'started_at' is not a number"):
+        Recording.from_dict({"started_at": True})
+
+
+def test_recording_from_dict_rejects_a_non_list_raw():
+    # `list("x")` is one element per character, so a wrong type here used to
+    # load as corrupt raw data rather than as a refusal -- and the raw stream
+    # is the one field whose whole purpose is fidelity.
+    with pytest.raises(ValueError, match="'raw' is not a list"):
+        Recording.from_dict({"raw": "nonsense"})
+
+
+def test_recording_from_dict_rejects_a_malformed_environment_field():
+    # Every member is read through the same check, so a hand-edited one fails
+    # naming itself rather than as whatever it broke when it was first used.
+    with pytest.raises(ValueError, match="'capabilities' is not a list"):
+        Recording.from_dict({"environment": {"capabilities": "POINTER"}})
+    with pytest.raises(ValueError, match="a 'screens' entry is not"):
+        Recording.from_dict({"environment": {"screens": [1]}})
+    with pytest.raises(ValueError, match="a 'screens' entry is not four numbers"):
+        Recording.from_dict({"environment": {"screens": [[0, None, 1080, 1.0]]}})
+
+
+def test_an_environment_with_screens_round_trips():
+    # `screens` holds tuples in memory and lists on disk, and the scale is a
+    # float where the rest are ints: this pins the coercion on the way back
+    # in, on an environment that actually has a screen to carry.
+    recording = Recording(environment=Environment(screens=[(0, 1920, 1080, 1.0)]))
+    rebuilt = Recording.from_dict(recording.to_dict())
+    assert rebuilt.environment.screens == [(0, 1920, 1080, 1.0)]
+    assert rebuilt.started_at == recording.started_at
+
+
 def test_element_addressable_requires_a_name():
     assert ElementRef(role="push button", name="Save").addressable
     assert not ElementRef(role="push button").addressable

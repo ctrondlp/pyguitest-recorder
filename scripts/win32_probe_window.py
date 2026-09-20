@@ -389,6 +389,7 @@ def _build_window(title: str, at: tuple[int, int], size: tuple[int, int]) -> int
     )
 
     def add(class_name, text, style, box, control_id):
+        """Create one child control in the tab page, and return its handle."""
         return _create(hwnd, hinstance, class_name, text, style, box, control_id)
 
     tab_style = _WS_VISIBLE | _WS_TABSTOP

@@ -26,6 +26,63 @@ FORMAT_VERSION = 1
 """Bumped when the on-disk shape changes incompatibly."""
 
 
+def _text(data: dict[str, Any], key: str) -> str:
+    """One string field of a serialized object, or `ValueError` naming it."""
+    value = data.get(key, "")
+    if not isinstance(value, str):
+        raise ValueError(f"'{key}' is not a string (got {type(value).__name__})")
+    return value
+
+
+def _list(data: dict[str, Any], key: str) -> list[Any]:
+    """One list field of a serialized object, or `ValueError` naming it.
+
+    Deliberately not `list(data.get(key, []))`: a string is iterable, so a
+    hand-edited `"capabilities": "x"` would come back as one capability per
+    character instead of as a refusal.
+    """
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        raise ValueError(f"'{key}' is not a list (got {type(value).__name__})")
+    return value
+
+
+def _flag(data: dict[str, Any], key: str) -> bool:
+    """One boolean field of a serialized object, or `ValueError` naming it."""
+    value = data.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"'{key}' is not true or false (got {type(value).__name__})")
+    return value
+
+
+def _number(data: dict[str, Any], key: str) -> float:
+    """One numeric field of a serialized object, or `ValueError` naming it.
+
+    `bool` is refused by name rather than by type: it is an `int` subclass, so
+    `"started_at": true` would otherwise be read as the number 1. Finiteness is
+    not checked here, unlike an event's own timestamp -- nothing orders or
+    subtracts a start time, so a NaN in this field changes no outcome.
+    """
+    value = data.get(key, 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"'{key}' is not a number (got {type(value).__name__})")
+    return float(value)
+
+
+def _screen(entry: Any) -> tuple[int, int, int, float]:
+    """One `screens` entry as (index, width, height, scale), or `ValueError`."""
+    if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+        raise ValueError(
+            f"a 'screens' entry is not [index, width, height, scale] (got {entry!r})"
+        )
+    try:
+        return (int(entry[0]), int(entry[1]), int(entry[2]), float(entry[3]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"a 'screens' entry is not four numbers (got {entry!r})"
+        ) from exc
+
+
 @dataclass
 class Environment:
     """What the machine looked like when the recording was made."""
@@ -67,20 +124,31 @@ class Environment:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Environment:
-        """Rebuild from the serialized form."""
+        """Rebuild from the serialized form, or refuse a shape it can't read.
+
+        `Recording.from_dict` promises that a malformed file raises
+        `ValueError`, and `--regenerate` invites the hand-editing that
+        produces one -- so every field is read through a check that names it,
+        rather than left to fail as an `AttributeError` or a `TypeError` from
+        wherever the value is first used.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"'environment' is not an object (got {type(data).__name__})"
+            )
         return cls(
-            session_type=data.get("session_type", ""),
-            compositor=data.get("compositor", ""),
-            desktop=data.get("desktop", ""),
-            display=data.get("display", ""),
-            screens=[tuple(s) for s in data.get("screens", [])],
-            capture_backend=data.get("capture_backend", ""),
-            capabilities=list(data.get("capabilities", [])),
-            pyguitest_version=data.get("pyguitest_version", ""),
-            recorder_version=data.get("recorder_version", ""),
-            xwayland=data.get("xwayland", False),
-            notes=list(data.get("notes", [])),
-            recorded_at=data.get("recorded_at", ""),
+            session_type=_text(data, "session_type"),
+            compositor=_text(data, "compositor"),
+            desktop=_text(data, "desktop"),
+            display=_text(data, "display"),
+            screens=[_screen(entry) for entry in _list(data, "screens")],
+            capture_backend=_text(data, "capture_backend"),
+            capabilities=list(_list(data, "capabilities")),
+            pyguitest_version=_text(data, "pyguitest_version"),
+            recorder_version=_text(data, "recorder_version"),
+            xwayland=_flag(data, "xwayland"),
+            notes=list(_list(data, "notes")),
+            recorded_at=_text(data, "recorded_at"),
         )
 
 
@@ -206,8 +274,8 @@ class Recording:
         recording = cls(
             events=events,
             environment=Environment.from_dict(data.get("environment", {})),
-            raw=list(data.get("raw", [])),
-            started_at=data.get("started_at", 0.0),
+            raw=_list(data, "raw"),
+            started_at=_number(data, "started_at"),
         )
         # Every delay is recomputed from the neighbour the sort above just gave
         # it. A delay is the interval to the event in front of it, so an event
