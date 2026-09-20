@@ -66,7 +66,7 @@ from ..model import (
     WindowRef,
     describe_assertion,
 )
-from ..platforms import element_api
+from ..platforms import element_api, plain_name
 
 __all__ = [
     "GeneratorOptions",
@@ -2137,12 +2137,12 @@ def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
     # calls were checked against, and this says which recorder wrote them --
     # which is the question asked first when a generated script turns out to
     # have a bug in its own shape rather than in the application.
-    parenthetical = ", ".join(p for p in (env.compositor, env.desktop) if p)
+    parenthetical = ", ".join(p for p in (plain_name(env.compositor), env.desktop) if p)
     detail = [
         f"Recorder:    pyguitest-recorder {env.recorder_version or 'unknown'}",
         f"Recorded at: {env.recorded_at or 'unknown'}",
         f"Profile:     {PROFILE}",
-        f"Recorded on: {env.session_type or 'unknown'} "
+        f"Recorded on: {plain_name(env.session_type) or 'unknown'} "
         f"{('(' + parenthetical + ')') if parenthetical else ''}".rstrip(),
         f"Capture:     {env.capture_backend or 'unknown'}",
         f"pyguitest:   {env.pyguitest_version or 'unknown'}",

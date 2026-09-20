@@ -55,12 +55,19 @@ SECOND_TITLE = "Recorder Check Two"
 SECOND_AT = (600, 400)
 SECOND_SIZE = (320, 200)
 
-A11Y_DIRECTORIES = ("/usr/libexec", "/usr/lib/at-spi2-core", "/usr/lib")
+A11Y_DIRECTORIES = (
+    "/usr/libexec",
+    "/usr/lib/at-spi2-core",
+    "/usr/lib",
+    "/usr/local/libexec",
+)
 """Where the accessibility daemons live, which is not the same on every
 distribution: Fedora puts them in /usr/libexec, Debian and Ubuntu have used
-/usr/lib/at-spi2-core. Neither is on PATH, so both are searched rather than
-one being assumed -- guessing wrong here does not fail, it silently drops to
-"no accessibility bus" and the element half of the check stops being tested."""
+/usr/lib/at-spi2-core, and FreeBSD's port (GhostBSD included) installs under
+/usr/local/libexec. None is on PATH, so all are searched rather than one being
+assumed -- guessing wrong here does not fail, it silently drops to
+"no accessibility bus" and the element half of the check stops being tested.
+The last one was found exactly that way, running this on GhostBSD."""
 
 
 def a11y_daemon(name: str) -> str | None:
@@ -95,16 +102,23 @@ def reexec_on_a_private_bus() -> None:
     os.execvp(runner, [runner, "--", sys.executable, *sys.argv])
 
 
-def start_a11y_bus() -> subprocess.Popen[bytes] | None:
-    """Start the accessibility bus on this session bus, or report none."""
+def start_a11y_bus() -> list[subprocess.Popen[bytes]]:
+    """Start the accessibility bus on this session bus; empty if there is none.
+
+    Every process started is returned, because every one of them has to be
+    stopped: the registry used to be started and forgotten, and each run left an
+    orphaned `at-spi2-registryd` behind on the machine it ran on.
+    """
     bus = a11y_daemon("at-spi-bus-launcher")
     if bus is None or not os.environ.get(INNER):
-        return None
-    launcher = subprocess.Popen(
-        [bus, "--launch-immediately"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        return []
+    started = [
+        subprocess.Popen(
+            [bus, "--launch-immediately"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    ]
     time.sleep(2)
     # Started by hand because systemd activation is not available on a private
     # session bus. Without it the bus exists and answers nothing -- and
@@ -112,11 +126,50 @@ def start_a11y_bus() -> subprocess.Popen[bytes] | None:
     # resolver probes by counting children rather than by asking for a desktop.
     registry = a11y_daemon("at-spi2-registryd")
     if registry is not None:
-        subprocess.Popen(
-            [registry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        started.append(
+            subprocess.Popen(
+                [registry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         )
         time.sleep(2)
-    return launcher
+    return started
+
+
+def stop(process: subprocess.Popen[bytes]) -> None:
+    """Terminate a process this check started, and kill it if it will not go."""
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def app_environment(display: str) -> dict[str, str]:
+    """The environment an application under test is started in.
+
+    GDK_BACKEND and dropping WAYLAND_DISPLAY are both load-bearing: a GTK client
+    with a Wayland socket in its environment opens its window on the
+    developer's real compositor instead of the display under test, which is
+    silent and lands a window on their screen.
+
+    So is what this does about the accessibility bridge, and it is the same kind
+    of failure. `NO_AT_BRIDGE=1` -- exported by plenty of shells, containers and
+    tool runners to quiet GTK's "couldn't connect to accessibility bus"
+    warning -- stops the toolkit registering with the accessibility bus at all.
+    Inherited into the application under test it leaves the private bus up and
+    empty, every click resolving to no element, and the check still passing:
+    found running it on GhostBSD from a shell that set it. With no private bus
+    the bridge is turned off instead, because without one GTK stalls looking
+    for it.
+    """
+    environment = {**os.environ, "DISPLAY": display, "GDK_BACKEND": "x11"}
+    environment.pop("WAYLAND_DISPLAY", None)
+    if os.environ.get(INNER):
+        environment.pop("NO_AT_BRIDGE", None)
+    else:
+        environment["GTK_A11Y"] = "none"
+    return environment
 
 
 class Failure(Exception):
@@ -160,18 +213,9 @@ def start_app(display: str) -> subprocess.Popen[bytes]:
     ):
         if shutil.which(command[0]) is None:
             continue
-        # GDK_BACKEND and dropping WAYLAND_DISPLAY are both load-bearing: a
-        # GTK client with a Wayland socket in its environment opens its window
-        # on the developer's real compositor instead of the display under
-        # test, which is silent and lands a window on their screen.
-        environment = {**os.environ, "DISPLAY": display, "GDK_BACKEND": "x11"}
-        environment.pop("WAYLAND_DISPLAY", None)
-        if not os.environ.get(INNER):
-            # No accessibility bus to reach; without this GTK stalls on it.
-            environment["GTK_A11Y"] = "none"
         app = subprocess.Popen(
             command,
-            env=environment,
+            env=app_environment(display),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -233,8 +277,7 @@ def start_second_window(display: str) -> subprocess.Popen[bytes] | None:
     scenario went uncovered, rather than passing as though it had not.
     """
     script = Path(__file__).resolve().parent / "check_app.py"
-    environment = {**os.environ, "DISPLAY": display, "GDK_BACKEND": "x11"}
-    environment.pop("WAYLAND_DISPLAY", None)
+    environment = app_environment(display)
     app = subprocess.Popen(
         [
             sys.executable,
@@ -590,12 +633,19 @@ def main() -> int:
 
     reexec_on_a_private_bus()
     server = None
-    a11y = None
+    a11y: list[subprocess.Popen[bytes]] = []
     try:
         display = args.display
         if display is None:
             server = start_server(args.number)
             display = f":{args.number}"
+        # Before the accessibility daemons, not after. The registry injects
+        # input into whichever display it was started on, so one started here
+        # with the developer's own DISPLAY still set is attached to the desktop
+        # they are sitting in front of -- and one started with none can click
+        # into nothing while every call still reports success, which is how a
+        # replay that did nothing came to exit 0 on GhostBSD.
+        os.environ["DISPLAY"] = display
         a11y = start_a11y_bus()
         print("accessibility bus:", "private" if a11y else "none (elements off)")
         return check(display, record_motion=args.record_motion)
@@ -603,10 +653,11 @@ def main() -> int:
         print(f"live-capture-check: {exc}", file=sys.stderr)
         return 2
     finally:
-        for process in (a11y, server):
+        # The bus goes before the server it was started beside, and the
+        # registry before the launcher that owns the bus it is registered on.
+        for process in (*reversed(a11y), server):
             if process is not None:
-                process.terminate()
-                process.wait(timeout=5)
+                stop(process)
 
 
 if __name__ == "__main__":

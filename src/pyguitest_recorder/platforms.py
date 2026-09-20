@@ -24,10 +24,30 @@ import sys
 
 __all__ = [
     "is_windows",
+    "plain_name",
     "element_api",
     "foreign_focus_reason",
     "foreign_element_reason",
 ]
+
+
+def plain_name(detected: str) -> str:
+    """A detected session type or compositor, as a reader would write it.
+
+    `Environment.session_type` and `.compositor` store the `str()` of pyguitest's
+    `SessionType` and `Compositor` members -- `SessionType.X11` -- because
+    `is_windows` and every recording already on disk read that form, so it is
+    not changed. It is not what belongs in a file header or a diagnostic,
+    though: a generated script announced `Recorded on: SessionType.X11
+    (Compositor.OTHER, MATE)` where the README shows `x11 (mutter)`, the enum
+    reprs having been printed as they were stored. Found running a recording on
+    MATE under Python 3.12.
+
+    Also accepts the bare spelling (`x11`) a recording or a test may already
+    carry, and an empty string, which stays empty so a caller's own `or
+    "unknown"` still applies.
+    """
+    return detected.rsplit(".", 1)[-1].lower()
 
 
 def is_windows(session_type: str | None = None) -> bool:

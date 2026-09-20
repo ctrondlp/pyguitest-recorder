@@ -420,9 +420,14 @@ class Normalizer:
         rested = until - since
         if not self.options.hover_threshold or rested < self.options.hover_threshold:
             return []
+        # A rest is asked the same question as a press, with one difference a
+        # resolver may care about: it is not the act that chose anything. See
+        # `DesktopResolver.resolve_hover`; a resolver with no such distinction
+        # simply has no such method.
+        resolve = getattr(self.resolver, "resolve_hover", self.resolver.resolve)
         hover = MouseMove(
             timestamp=max(0.0, since - self.started),
-            target=self.resolver.resolve(settled[0], settled[1], screen),
+            target=resolve(settled[0], settled[1], screen),
             dwell=round(rested, 2),
         )
         # A buffered click always predates this hover: a button press flushes
