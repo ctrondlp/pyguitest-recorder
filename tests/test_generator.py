@@ -1217,6 +1217,22 @@ def test_the_header_names_the_recorder_that_wrote_the_script():
     assert "Recorder:    pyguitest-recorder 0.1.0" in source
 
 
+def test_the_header_names_the_session_the_way_a_reader_would():
+    # Environment stores the str() of pyguitest's enum members, and the header
+    # printed them as stored: `Recorded on: SessionType.X11 (Compositor.OTHER,
+    # MATE)`, where the README shows `x11 (mutter)`. Seen on the first real
+    # recording made on MATE.
+    recording = Recording(events=[KeyStroke(key="Return")])
+    recording.environment.session_type = "SessionType.X11"
+    recording.environment.compositor = "Compositor.MUTTER"
+    source = generate(recording)
+    assert "Recorded on: x11 (mutter)" in source
+    recording.environment.desktop = "MATE"
+    assert "Recorded on: x11 (mutter, MATE)" in generate(recording)
+    assert "SessionType" not in source
+    assert "Compositor" not in source
+
+
 @pytest.mark.needs_ruff
 def test_the_header_can_be_switched_off_entirely():
     source = full(KeyStroke(key="Return"), include_header=False)

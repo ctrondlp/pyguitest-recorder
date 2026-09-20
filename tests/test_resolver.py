@@ -247,6 +247,43 @@ class ListingSession(FakeSession):
         return list(self._windows)
 
 
+class LeaderSession(FakeSession):
+    """pluma under marco: the hit test names the window, the active window is a leader.
+
+    GTK maps a 1x1, untitled, pid-less leader window beside every application,
+    and here `_NET_ACTIVE_WINDOW` names it, a pixel from the real window's corner.
+    """
+
+    def __init__(self):
+        self.real = FakeWindow(
+            title="Unsaved Document 1 - Pluma", app_id="Pluma", pid=12163
+        )
+        self.leader = FakeWindow(title="", app_id="", pid=None)
+        super().__init__(window=self.real)
+        self.rects = {
+            id(self.real): (315, 165, 650, 500),
+            id(self.leader): (314, 164, 1, 1),
+        }
+
+    def active_window(self):
+        return self.leader
+
+    def geometry(self, window):
+        return self.rects[id(window)]
+
+
+def test_a_one_pixel_active_window_is_not_preferred_over_the_hit_test():
+    # Found live: the File menu of pluma under marco -- 20px from the window's
+    # corner, inside the decoration slack of the 1x1 leader window that was the
+    # "active" one -- resolved to a window with no title and no size, so the
+    # first click of the recording became an absolute coordinate and the
+    # window looked as if it had only just opened.
+    target = resolver(LeaderSession()).resolve(334, 177)
+    assert target.window is not None
+    assert target.window.title == "Unsaved Document 1 - Pluma"
+    assert target.window.geometry == (315, 165, 650, 500)
+
+
 def test_the_terminal_the_recorder_runs_in_is_never_the_target(monkeypatch):
     # The recorder has no window of its own: it runs in a terminal, and that
     # terminal's pid is what the window carries. Seen live on KDE -- typing
@@ -481,6 +518,77 @@ def test_the_mismatch_is_warned_about_once_not_per_event(monkeypatch):
     for _ in range(5):
         made.resolve(100, 100)
     assert len(made.warnings) == 1
+
+
+def stacked_resolver(windows, element_pid, **kwargs):
+    """A resolver over listed windows, whose hit test answers for `element_pid`.
+
+    The first window is the one under the pointer; the element is from whichever
+    process `element_pid` names, which is what a hit test with no stacking order
+    does when a smaller widget from a window underneath wins.
+    """
+    made = DesktopResolver(session=ListingSession(windows), elements=False, **kwargs)
+    made._resolves_elements = True
+    made._element = lambda x, y: ElementRef(
+        role="push button", name="Save", pid=element_pid
+    )
+    return made
+
+
+def test_an_element_from_a_window_stacked_underneath_is_not_blamed_on_a_session(
+    monkeypatch,
+):
+    # Found live, two overlapping windows on one private X server: the note
+    # said the element "came from another session", and it had come from the
+    # window next door. The accessible tree has no stacking order, so the hit
+    # test answers for whichever overlapping window has the smaller widget
+    # there. The refusal is right; the explanation was not.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
+    top = FakeWindow(title="Top", pid=77)
+    beneath = FakeWindow(title="Underneath", pid=4242)
+    made = stacked_resolver([top, beneath], element_pid=4242)
+    target = made.resolve(100, 100)
+    assert target.element is None
+    assert target.window is not None and target.window.title == "Top"
+    (warning,) = made.warnings
+    assert "pid 4242" in warning
+    assert "'Underneath'" in warning
+    assert "stacked underneath" in warning
+    assert "another session" not in warning
+
+
+def test_an_element_from_a_process_with_no_window_here_is_still_another_session(
+    monkeypatch,
+):
+    # The window list is what tells the two causes apart, so a process it does
+    # not list keeps the original explanation.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
+    made = stacked_resolver([FakeWindow(title="Top", pid=77)], element_pid=4242)
+    assert made.resolve(100, 100).element is None
+    (warning,) = made.warnings
+    assert "another session" in warning
+    assert "stacked underneath" not in warning
+
+
+def test_the_recorders_own_terminal_is_not_called_a_window_underneath(monkeypatch):
+    # A window the recorder deliberately ignores is not one of the recording's
+    # windows, so an element from it is not "stacked underneath" anything.
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
+    terminal = FakeWindow(title="Terminal", pid=4242)
+    made = stacked_resolver(
+        [FakeWindow(title="Top", pid=77), terminal],
+        element_pid=4242,
+        ignore_pids={4242},
+    )
+    assert made.resolve(100, 100).element is None
+    (warning,) = made.warnings
+    assert "stacked underneath" not in warning
 
 
 def test_an_element_from_the_same_process_is_kept():
@@ -762,6 +870,289 @@ def test_an_element_is_described_from_what_the_session_says():
     assert target.element.description == "Save the file"
     assert target.element.pid == 77
     assert target.element.extents == (120, 120, 60, 24)
+
+
+CLOSED_ITEM = (-2147483648, -2147483648, 233, 25)
+"""Where AT-SPI puts a menu item whose popup is not open, as pluma reports it.
+The position is `G_MININT` and the size is *kept* -- mate-calc's closed items are
+1x1 instead -- which is what made a test on size alone call them all showing."""
+
+MENU_BAR_ENTRY = (20, 10, 40, 20)
+TOOLBAR_BUTTON = (100, 190, 300, 40)
+NEW_ITEM = (100, 200, 100, 24)
+OPEN_ITEM = (100, 230, 100, 24)
+RECENT_ENTRY = (100, 260, 100, 24)
+
+
+@pytest.fixture(autouse=True)
+def no_popup_wait(monkeypatch):
+    """Do not wait for a popup that these tests have already decided is closed."""
+    monkeypatch.setattr(resolver_module, "POPUP_WAIT_SECONDS", 0)
+
+
+class PopupSession(ElementSession):
+    """A File menu whose popup is stacked over a toolbar button, as in pluma.
+
+    The hit test cannot see into the popup, so over the popup it answers for the
+    toolbar button beneath -- which is the whole trap. `elements(within=...)`
+    does find the popup's items, and they have a rectangle only while it is open.
+    """
+
+    def __init__(self, popup_open=True):
+        super().__init__(window=FakeWindow(title="Target", pid=77))
+        frame = FakeElement("frame", "Target")
+        self.popup_open = popup_open
+        self.menu = FakeElement("menu", "File", pid=77, parent=frame)
+        self.new = FakeElement("menu item", "New", pid=77, parent=self.menu)
+        self.opened = FakeElement("menu item", "Open...", pid=77, parent=self.menu)
+        # An entry that opens a submenu is a `menu` in GTK3, not a `menu item`.
+        self.recent = FakeElement("menu", "Recent", pid=77, parent=self.menu)
+        self.menu.children = [self.new, self.opened, self.recent]
+        self.beneath = FakeElement(
+            "button", "Open", pid=77, parent=frame, actions=["click"]
+        )
+        self.rects = {
+            id(self.menu): MENU_BAR_ENTRY,
+            id(self.beneath): TOOLBAR_BUTTON,
+        }
+        self.popup_open = popup_open
+        self._place_popup()
+
+    def _place_popup(self):
+        for item, rect in (
+            (self.new, NEW_ITEM),
+            (self.opened, OPEN_ITEM),
+            (self.recent, RECENT_ENTRY),
+        ):
+            self.rects[id(item)] = rect if self.popup_open else CLOSED_ITEM
+
+    def close_popup(self):
+        """What choosing an item does: every item loses its rectangle at once."""
+        self.popup_open = False
+        self._place_popup()
+
+    def element_at(self, x, y):
+        for element in (self.menu, self.beneath):
+            rect = self.rects[id(element)]
+            if rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]:
+                return element
+        return None
+
+    def elements(self, within=None, predicate=None, **kwargs):
+        if within is not self.menu:
+            return []
+        return [
+            item for item in self.menu.children if predicate is None or predicate(item)
+        ]
+
+    def extents(self, element):
+        return self.rects[id(element)]
+
+
+def popup_resolver(**kwargs):
+    # Pinned to a non-Windows recording, because the popup handling is Linux's:
+    # unpinned, `windows=None` asks the host, and on the Windows CI job every one
+    # of these would skip the logic they exist to test.
+    return DesktopResolver(session=PopupSession(**kwargs), elements=True, windows=False)
+
+
+def test_a_click_in_an_open_popup_is_named_for_the_item_not_the_widget_under_it():
+    # Found live on MATE: File -> New in pluma was recorded as
+    # `gui.button("Open").click()`. The toolbar button is the same process as the
+    # window and its rectangle contains the point, which is everything the
+    # resolver checks, so a script that opens a file dialog instead of making a
+    # document came out clean.
+    made = popup_resolver()
+    assert made.resolve(30, 20).element.name == "File"
+    target = made.resolve(150, 212)
+    assert (target.element.role, target.element.name) == ("menu item", "New")
+    assert target.element.extents == NEW_ITEM
+
+
+def test_a_point_between_popup_items_is_a_coordinate_never_what_lies_beneath():
+    # Inside the popup and on no item -- a separator. The toolbar button under it
+    # contains the point, and is not what was clicked.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    assert made.resolve(150, 227).element is None
+    assert made._menu_owner is not None, "the popup is still open"
+
+
+def test_a_click_outside_the_popup_hit_tests_normally_and_forgets_the_menu():
+    made = popup_resolver()
+    made.resolve(30, 20)
+    target = made.resolve(350, 210)
+    assert (target.element.role, target.element.name) == ("button", "Open")
+    assert made._menu_owner is None
+
+
+def test_a_menu_that_is_closed_claims_no_points():
+    # Its items report a rectangle at the far corner of the screen, so nothing
+    # has to be told that the menu closed.
+    made = popup_resolver(popup_open=False)
+    made.resolve(30, 20)
+    target = made.resolve(150, 212)
+    assert (target.element.role, target.element.name) == ("button", "Open")
+    assert made._menu_owner is None
+
+
+def test_a_press_consumed_after_its_popup_closed_is_still_named_for_the_item():
+    # The live failure the first version of this shipped with. Choosing an item
+    # closes the menu, the recorder handles the press after it happened, and a
+    # closed item has no rectangle -- so looking at the popup as it stood named
+    # the toolbar button again, in every real recording, while every test that
+    # left the popup open passed.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    target = made.resolve(150, 212)
+    assert (target.element.role, target.element.name) == ("menu item", "New")
+
+
+def test_a_rest_on_the_menu_entry_consumed_late_does_not_forget_the_popup():
+    # The second live failure, in the order events are actually consumed: the
+    # press that opens the menu, then the rest the pointer sat in on that entry
+    # -- consumed once the popup has already closed again -- then the press that
+    # chooses from it. A rest outside the popup dismisses nothing, and finding
+    # the same menu entry again must not replace the layout with nothing.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    assert made.resolve_hover(30, 20).element.name == "File"
+    assert made.resolve(150, 212).element.name == "New"
+
+
+def test_a_rest_on_another_menu_entry_takes_over_when_its_popup_is_showing():
+    # The pointer sliding along the menu bar with a menu open: GTK swaps the
+    # popup as it goes, with no press.
+    made = popup_resolver(popup_open=False)
+    made.resolve_hover(30, 20)
+    assert made._menu_owner is None
+    made.session.popup_open = True
+    made.session._place_popup()
+    made.resolve_hover(30, 20)
+    assert made._menu_owner is made.session.menu
+
+
+def test_the_press_that_chose_an_item_uses_the_popup_up():
+    # Or a later click on the toolbar button that was underneath, inside the
+    # same rectangle, would be answered with a menu item that no longer exists.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    assert made.resolve(150, 212).element.name == "New"
+    assert made.resolve(150, 212).element.name == "Open"
+    assert made._menu_owner is None
+
+
+def test_a_rest_beside_the_press_does_not_use_the_popup_up():
+    # The normalizer resolves the rest the pointer was in when the press arrives,
+    # then the press itself, and both after the popup has closed. The rest is not
+    # what chose anything.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    assert made.resolve_hover(150, 212).element.name == "New"
+    assert made.resolve(150, 212).element.name == "New"
+
+
+def test_a_check_does_not_use_the_popup_up_either():
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.inspect(150, 212)
+    assert made._menu_owner is not None
+
+
+def test_a_press_on_a_submenu_entry_leaves_the_popup_in_play():
+    # It opens more menu rather than choosing anything, so the item picked from
+    # it next is still inside the popup this layout describes.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    assert made.resolve(150, 272).element.name == "Recent"
+    assert made.resolve(150, 212).element.name == "New"
+
+
+def test_a_remembered_popup_expires(clock):
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    clock.advance(resolver_module.POPUP_MEMORY_SECONDS + 1)
+    assert made.resolve(150, 212).element.name == "Open"
+
+
+def test_a_menu_that_went_stale_mid_read_falls_back_to_what_was_remembered():
+    made = popup_resolver()
+    made.resolve(30, 20)
+
+    def gone(**kwargs):
+        raise RuntimeError("no such object path")
+
+    made.session.elements = gone
+    assert made.resolve(150, 212).element.name == "New"
+
+
+@pytest.mark.parametrize(
+    "closed",
+    [
+        (-2147483648, -2147483648, 233, 25),  # pluma: sentinel position, real size
+        (-2147483648, -2147483648, 1, 1),  # mate-calc: sentinel position, 1x1
+    ],
+)
+def test_a_closed_item_is_recognised_by_its_position_not_its_size(closed):
+    # Found live by tracing the real recorder: pluma's nine closed File items
+    # kept their 233x25, so a size test called them all showing, their bounds
+    # came out as the far corner of the screen, and a press inside the popup was
+    # taken to be outside it and dismissed the layout it needed.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    made.session.close_popup()
+    for item in (made.session.new, made.session.opened, made.session.recent):
+        made.session.rects[id(item)] = closed
+    assert made.resolve(150, 212).element.name == "New"
+
+
+def test_a_menu_that_was_never_seen_open_has_nothing_to_remember():
+    # Resting the pointer over a menu-bar entry, say: nothing opened.
+    made = popup_resolver(popup_open=False)
+    made.resolve_hover(30, 20)
+    assert made.resolve(150, 212).element.name == "Open"
+
+
+def test_a_check_recorded_on_a_popup_item_reads_the_item(monkeypatch):
+    # The check re-reads what is under the point, so it has to look where the
+    # click looked -- or it reports the element "changed between being named and
+    # being read" for every check made inside a menu.
+    made = popup_resolver()
+    made.resolve(30, 20)
+    observation = made.inspect(150, 212)
+    assert observation.target.element.name == "New"
+    assert not any("changed between" in warning for warning in made.warnings)
+
+
+def test_windows_is_left_to_ui_automation_which_sees_popups_itself():
+    made = DesktopResolver(session=PopupSession(), elements=True, windows=True)
+    made.resolve(30, 20)
+    assert made.resolve(150, 212).element.name == "Open"
+
+
+def test_windows_never_pays_for_a_popup_it_will_not_use(monkeypatch):
+    # The lookup was skipped there from the start, but tracking the menu and
+    # waiting for its popup was not: every press on a menu would have cost up to
+    # POPUP_WAIT_SECONDS and a subtree read over UI Automation, and been thrown
+    # away. Nothing about Linux is asked for on Windows.
+    monkeypatch.setattr(resolver_module, "POPUP_WAIT_SECONDS", 5)
+    session = PopupSession(popup_open=False)
+    reads = []
+    session.elements = lambda **kwargs: reads.append(kwargs) or []
+    made = DesktopResolver(session=session, elements=True, windows=True)
+    slept = []
+    monkeypatch.setattr(resolver_module.time, "sleep", slept.append)
+    made.resolve(30, 20)
+    made.resolve_hover(30, 20)
+    assert reads == []
+    assert slept == []
+    assert made._menu_owner is None
 
 
 def test_a_run_of_moves_in_one_window_looks_the_window_up_once():

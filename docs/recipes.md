@@ -126,6 +126,21 @@ pyguitest-recorder --record-motion
 Use it for a menu that opens on hover, a tooltip you want to assert on, or a
 toolbar that reveals controls under the pointer.
 
+A click on an open menu is recorded by the item's name --
+`gui.menu_item("New").click()` after `gui.element(role=Role.MENU, name="File")
+.click()` -- not by whatever sits underneath the popup, which is what the
+accessibility hit-test alone would report. That is read while the popup is
+showing, so it needs the menu to have been opened by a click the recording saw.
+
+**Choose the motion for a menu-driven interface deliberately.** Under
+`motion = "natural"` a move from one point to the next with no rest beside it
+is drawn as a bowed line, and from a menu-bar entry down to an item that line can
+clip the neighbouring entry -- in GTK, an open menu switches to whichever entry
+the pointer crosses, so the item the next line clicks is no longer showing. The
+same recording replayed correctly under `--teleport-motion` (the default) and
+failed under `--natural-motion`, measured on pluma; `--recorded-motion` keeps the
+route the hand actually took.
+
 ## Keeping secrets out of the script
 
 Keyboard capture sees every application's keystrokes, so this matters more

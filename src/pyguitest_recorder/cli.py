@@ -20,7 +20,7 @@ from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
 from .model import Event, Origin, Recording, describe_assertion
-from .platforms import is_windows
+from .platforms import is_windows, plain_name
 from .recorder import (
     ContextReport,
     Recorder,
@@ -628,8 +628,8 @@ def _doctor(settings: Settings) -> int:
         print(f"capture:           unavailable\n                   {exc}")
         capture_ok = False
     environment = describe_environment(None, backend_name)
-    print(f"session:           {environment.session_type or 'unknown'}")
-    print(f"compositor:        {environment.compositor or 'unknown'}")
+    print(f"session:           {plain_name(environment.session_type) or 'unknown'}")
+    print(f"compositor:        {plain_name(environment.compositor) or 'unknown'}")
     # The backend decides, not the host: a Windows machine can run an X server
     # (Xming, VcXsrv, WSLg) and `backend = "xrecord"` there records that
     # server's clients, so pyguitest still detecting a Windows session must not

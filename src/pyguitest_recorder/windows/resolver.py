@@ -23,7 +23,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from ..model import ElementRef, Target, WindowRef
@@ -47,6 +47,36 @@ The same three pyguitest's `Role.WINDOW_ROLES` counts as windows, spelled
 out here because they arrive as plain role strings from a recording that
 may have been made on another machine.
 """
+
+MENU_OWNER_ROLES = frozenset({"menu", "combo box"})
+"""Roles that open a popup when clicked -- a menu-bar entry, a drop-down.
+
+The popup is a window of its own, stacked over whatever is under it, and it is
+not a child of the frame it opened from, so a hit test made from that frame
+answers for the widget *underneath* the popup. See `DesktopResolver._popup_at`.
+"""
+
+POPUP_ITEM_ROLES = frozenset(
+    {"menu item", "check menu item", "radio menu item", "menu"}
+)
+"""What a popup is made of. `menu` is here because an entry that opens a submenu
+is one -- and it is the popup's own container for a combo box."""
+
+POPUP_WAIT_SECONDS = 0.3
+"""How long a click on a menu waits for its popup to appear before giving up on
+seeing it. A popup is opened by the application, after the click, so a recorder
+that consumes the click promptly can get here first."""
+
+POPUP_POLL_SECONDS = 0.05
+"""Between looks, while waiting for a popup to appear."""
+
+POPUP_MEMORY_SECONDS = 6.0
+"""How long a popup last seen open is still believed to be what a press landed
+in, once it has closed. Not a guess about how long a menu stays open -- the
+recorder consumes a click some time after it happened, and choosing an item
+closes the popup, so by then it is usually gone. What this bounds is how long a
+layout can outlive the popup it described: a click on whatever was beneath the
+popup, later, must not be answered with a menu item."""
 
 EXTENTS_SLACK = 8
 """Pixels an element may lie outside its window before it is disbelieved.
@@ -148,6 +178,37 @@ def _contains(
         and ex + ewidth <= wx + width + EXTENTS_SLACK
         and ey + eheight <= wy + height + EXTENTS_SLACK
     )
+
+
+def _has_point(rect: tuple[int, int, int, int], x: int, y: int) -> bool:
+    """Whether a rectangle contains a point."""
+    left, top, width, height = rect
+    return left <= x < left + width and top <= y < top + height
+
+
+_UNPLACED = -(2**31)
+"""The x and y AT-SPI reports for a widget that is not on screen: `G_MININT`."""
+
+
+def _placed(rect: tuple[int, int, int, int]) -> bool:
+    """Whether a rectangle says where a widget is, rather than that it is nowhere.
+
+    Position is the signal and size is not. A closed menu's items report
+    `(-2147483648, -2147483648, 1, 1)` in mate-calc and
+    `(-2147483648, -2147483648, 233, 25)` in pluma -- the same items, the same
+    sentinel, but pluma keeps their size. A test on size alone called nine
+    closed items showing, and the popup logic built its bounds from them.
+    """
+    return rect[0] > _UNPLACED and rect[1] > _UNPLACED and rect[2] > 1 and rect[3] > 1
+
+
+class _NoPopup:
+    """The type of `_NO_POPUP`, so that answer can be told from the others."""
+
+
+_NO_POPUP = _NoPopup()
+"""`DesktopResolver._popup_at`'s answer for "no popup has a claim on this point",
+which is a different answer from None ("a popup does, and nothing in it is here")."""
 
 
 @dataclass(frozen=True)
@@ -280,6 +341,21 @@ class DesktopResolver:
     """The last window lookup, for a recorded move to reuse while it is fresh --
     see `_recent_lookup`. Set by `_window`, so a click leaves the motion path a
     warm answer behind it."""
+    _menu_owner: Any = field(default=None, init=False)
+    """The live menu or drop-down the pointer was last resolved to, whose popup a
+    later point may be inside. See `_popup_at`."""
+    _popup_layout: list[tuple[Any, tuple[int, int, int, int], str]] | None = field(
+        default=None, init=False
+    )
+    """The popup's items -- live element, rectangle, role -- as last seen open.
+    Kept because by the time a press is consumed the popup it landed in has
+    usually closed, and a closed item has no rectangle."""
+    _popup_seen: float = field(default=0.0, init=False)
+    """When `_popup_layout` was last seen open, on `_now`'s clock."""
+    _spending: bool = field(default=True, init=False)
+    """Whether the resolve in progress is a press -- see `resolve_hover`. Carried
+    here rather than passed down because `_element` is a seam callers replace,
+    and its two-argument shape is part of that."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -446,6 +522,22 @@ class DesktopResolver:
         like the right one. Observed: a recording made on a private Xvfb
         resolving its clicks onto the editor the recorder was written in.
         """
+        return self._resolve(x, y, screen, spend=True)
+
+    def resolve_hover(self, x: int, y: int, screen: int = 0) -> Target:
+        """`resolve`, for a place the pointer rested rather than one it pressed.
+
+        The same answer, except that it does not use up an open popup: choosing
+        an item from a menu closes it, and a rest is consumed alongside the press
+        that ended it, so a rest that spent the popup would leave that press with
+        the widget underneath. See `_popup_at`. Optional for a resolver -- the
+        normalizer falls back to `resolve` where there is none.
+        """
+        return self._resolve(x, y, screen, spend=False)
+
+    def _resolve(self, x: int, y: int, screen: int, *, spend: bool) -> Target:
+        """The window and element under a point; see `resolve`."""
+        self._spending = spend
         window = self._window(x, y, screen)
         element = self._element(x, y) if self._resolves_elements else None
         if element is not None and not self._is_widget(element):
@@ -549,7 +641,7 @@ class DesktopResolver:
         the check was aimed at, so the state is dropped and the check
         degrades to "this is showing".
         """
-        target = self.resolve(x, y, screen)
+        target = self._resolve(x, y, screen, spend=False)
         if target.element is None:
             return Observation(target=target)
         return self._state(x, y, target)
@@ -558,7 +650,8 @@ class DesktopResolver:
         """Read text and checked state off the live element under this point."""
         expected = target.element
         try:
-            element = self.session.element_at(x, y)
+            found = self._live_at(x, y, spend=False)
+            element = found[0] if found is not None else None
             if element is None or expected is None:
                 return Observation(target=target)
             if element.role != expected.role or (element.name or "") != expected.name:
@@ -815,9 +908,45 @@ class DesktopResolver:
         self._warn(
             f"ignored an accessible element from pid {element.pid} under a "
             f"window owned by pid {window.pid}; "
-            f"{foreign_element_reason(self._session_type())}"
+            f"{self._mismatch_reason(element)}"
         )
         return False
+
+    def _mismatch_reason(self, element: ElementRef) -> str:
+        """Why an element's process is not the one that owns the window under it.
+
+        Two causes that look identical from the pids alone, and are not the same
+        problem. The accessibility bus really is scoped to the login session
+        rather than the display, so an element can be another session's. But it
+        can as easily belong to a window *of this display* that is merely
+        underneath the one clicked: the accessible tree carries no stacking
+        order, so a hit-test answers for whichever overlapping window has the
+        smaller widget there -- pyguitest's `element_at` says as much. Found
+        live with two overlapping windows on one private X server, where the
+        note blamed another session for an element from the window next door.
+
+        The window list settles it: a process that owns a window here is not
+        another session's.
+        """
+        stacked = self._other_window_of(element)
+        if stacked is None:
+            return foreign_element_reason(self._session_type())
+        return (
+            f"that process owns another window on this display "
+            f"({stacked.title or stacked.app_id!r}), so this is the hit-test "
+            "answering for a window stacked underneath the one clicked -- the "
+            "accessible tree has no stacking order"
+        )
+
+    def _other_window_of(self, element: ElementRef) -> Any | None:
+        """A window on the recorded display owned by the element's process."""
+        if element.pid is None or element.pid in self.ignore_pids:
+            return None
+        try:
+            windows = list(self.session.windows())
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail a recording
+            return None
+        return next((w for w in windows if w.pid == element.pid), None)
 
     def _windows_mismatch(self, element: ElementRef, window: WindowRef) -> bool:
         """Whether an unequal pid on Windows means "same application", or not.
@@ -981,6 +1110,16 @@ class DesktopResolver:
         if geometry is None:
             return window
         ax, ay, awidth, aheight = geometry
+        if awidth <= 1 or aheight <= 1:
+            # A window a pixel wide has no chrome to have been clicked. GTK maps
+            # a 1x1 leader window beside every application, and on some window
+            # managers that -- untitled, no pid -- is what the active window
+            # is. Preferred anyway, its slack put every click within
+            # DECORATION_SLACK of the real window's corner onto it, and the
+            # File menu of pluma under marco was recorded against a window with
+            # neither a title nor a size: found live, and it turned the whole
+            # script into absolute coordinates.
+            return window
         if ax <= x < ax + awidth and ay <= y < ay + aheight:
             # Inside the active window's own client rect: the plain hit test
             # already agrees, or disagrees for some other reason this slack
@@ -1156,12 +1295,184 @@ class DesktopResolver:
         than the coordinate it would replace.
         """
         try:
-            element = self.session.element_at(x, y)
-            if element is None:
+            found = self._live_at(x, y, spend=self._spending)
+            if found is None:
                 return None
-            return self._describe_element(element)
+            element, rect = found
+            described = self._describe_element(element)
+            # A popup's item read after the popup closed reports a rectangle at
+            # the far corner of the screen, which no point is inside; the one it
+            # had while it was open is what the press landed in.
+            return replace(described, extents=rect) if rect is not None else described
         except Exception:  # noqa: BLE001 - a stale tree raises freely
             return None
+
+    def _live_at(
+        self, x: int, y: int, *, spend: bool
+    ) -> tuple[Any, tuple[int, int, int, int] | None] | None:
+        """The live accessible under this point, an open popup's items included.
+
+        With the rectangle to describe it by where that is not the element's own:
+        see `_element`. The single place an element is looked up, so a click and
+        a check made on the same point cannot disagree about what is there.
+        """
+        popup = self._popup_at(x, y, spend=spend)
+        if not isinstance(popup, _NoPopup):
+            return popup
+        element = self.session.element_at(x, y)
+        if element is None:
+            return None
+        # Not on Windows, where UI Automation hit-tests popups itself and there is
+        # nothing to remember: this would be up to `POPUP_WAIT_SECONDS` and a
+        # subtree read over UI Automation on every press on a menu, for an answer
+        # `_popup_at` never uses there.
+        if element.role in MENU_OWNER_ROLES and not self._on_windows():
+            if spend:
+                # Looked at now, waiting a moment for it: a press is what opens a
+                # popup, and this is the last time it can be seen open -- the
+                # next press is consumed after the item it chooses has closed it.
+                self._menu_owner = element
+                self._popup_layout = self._await_popup(element)
+                self._popup_seen = _now()
+            else:
+                # A rest on the entry the popup came from is consumed after the
+                # press that opened it, and often after the popup has closed
+                # again, so it must not replace what that press remembered with
+                # nothing. It only takes over where a popup is really showing --
+                # the pointer sliding from one menu-bar entry to the next.
+                shown = self._visible_items(element)
+                if shown:
+                    self._menu_owner = element
+                    self._popup_layout, self._popup_seen = shown, _now()
+        return element, None
+
+    def _popup_at(
+        self, x: int, y: int, *, spend: bool
+    ) -> tuple[Any, tuple[int, int, int, int]] | _NoPopup | None:
+        """A popup's item here and its rectangle; None if on none; else `_NO_POPUP`.
+
+        `element_at` cannot see into a popup. The popup is a window of its own,
+        stacked over the application, and no descendant of the frame the hit
+        test starts from, so the point is answered for the widget *underneath*.
+        Found live on MATE with pluma's File menu open: `New` came back as the
+        toolbar's `Open` button, the recording said `gui.button("Open").click()`,
+        and the script that replays it opens a file dialog instead of making a
+        document -- clean, plausible, and wrong, because that button is the same
+        process as the window and its rectangle does contain the point, which
+        is everything the resolver checks. `Save` came back as the tab beneath it.
+
+        The popup's own items are in the tree, though, and are found by looking
+        inside the menu that was opened, so the click is named for what it
+        pressed. A menu is opened by a click on something whose role says so, so
+        the last such element the pointer resolved to is remembered rather than
+        every menu in the application being searched on each click.
+
+        **The popup is usually gone by the time the press is consumed.** Choosing
+        an item closes the menu, the recorder handles events after they happen,
+        and a closed item has no rectangle -- so the first version of this,
+        which looked at the popup as it stood, passed every test and changed
+        nothing in a live recording: the press was consumed a moment after the
+        popup had closed, and the hit test named the toolbar button again. So
+        the popup is looked at while it is open (`_live_at`, right after the
+        click that opened it) and its layout kept, and a press is answered from
+        that layout when the popup itself has gone.
+
+        A kept layout must not outlive its popup, or a later click on the widget
+        that was underneath would be answered with a menu item. It is spent by
+        the press that chooses an item -- `spend`, which a hover is not, since a
+        rest is consumed alongside the press that ended it and must not use the
+        popup up first -- and by any point outside the popup, and it expires
+        after `POPUP_MEMORY_SECONDS`. Not spent by a press on an entry that opens
+        a submenu, which leaves the popup open.
+
+        Inside the popup but on no item -- a separator, a gap -- is answered
+        None, which is a coordinate, and never the hit test: whatever it would
+        name is under the popup and is not what was clicked.
+
+        Skipped on Windows, where UI Automation hit-tests popups themselves.
+        """
+        owner = self._menu_owner
+        if owner is None or self._on_windows():
+            return _NO_POPUP
+        shown = self._visible_items(owner)
+        if shown:
+            self._popup_layout, self._popup_seen = shown, _now()
+        elif (
+            self._popup_layout is not None
+            and _now() - self._popup_seen <= POPUP_MEMORY_SECONDS
+        ):
+            shown = self._popup_layout
+        if not shown:
+            self._forget_popup()
+            return _NO_POPUP
+        left = min(rect[0] for _, rect, _ in shown)
+        top = min(rect[1] for _, rect, _ in shown)
+        right = max(rect[0] + rect[2] for _, rect, _ in shown)
+        bottom = max(rect[1] + rect[3] for _, rect, _ in shown)
+        if not _has_point((left, top, right - left, bottom - top), x, y):
+            # Only a press outside dismisses a popup. A rest outside it -- on the
+            # menu-bar entry it came from, typically -- does not, and is consumed
+            # after the press that opened the popup and before the one that
+            # chooses from it.
+            if spend:
+                self._forget_popup()
+            return _NO_POPUP
+        under = [entry for entry in shown if _has_point(entry[1], x, y)]
+        if not under:
+            return None
+        item, rect, role = min(under, key=lambda entry: entry[1][2] * entry[1][3])
+        if spend and role not in MENU_OWNER_ROLES:
+            self._forget_popup()
+        return item, rect
+
+    def _visible_items(
+        self, owner: Any
+    ) -> list[tuple[Any, tuple[int, int, int, int], str]]:
+        """The items of a menu's popup that have a rectangle, which means it is open.
+
+        A closed item reports a position at the far corner of the screen (see
+        `_placed`), so nothing has to be told when a menu opens or closes: an item
+        with a real rectangle is showing.
+        """
+        try:
+            items = self.session.elements(
+                within=owner, predicate=lambda e: e.role in POPUP_ITEM_ROLES
+            )
+        except Exception:  # noqa: BLE001 - a menu that closed mid-read is closed
+            return []
+        shown = []
+        for item in items:
+            try:
+                rect = self._extents(item)
+                if rect is not None and _placed(rect):
+                    shown.append((item, rect, item.role))
+            except Exception:  # noqa: BLE001 - an item can go stale under the read
+                continue
+        return shown
+
+    def _await_popup(
+        self, owner: Any
+    ) -> list[tuple[Any, tuple[int, int, int, int], str]] | None:
+        """Look for a menu's popup, waiting a moment for the application to open it.
+
+        Bounded by the clock and not by a count of looks, because a look is a
+        round trip per item: a drop-down of hundreds of entries would otherwise
+        cost that many times over before giving up on a click that never opened
+        anything. It always looks once, and never again after the time is up.
+        """
+        deadline = time.monotonic() + POPUP_WAIT_SECONDS
+        while True:
+            shown = self._visible_items(owner)
+            if shown:
+                return shown
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(POPUP_POLL_SECONDS)
+
+    def _forget_popup(self) -> None:
+        """Stop believing any popup is open."""
+        self._menu_owner = None
+        self._popup_layout = None
 
     def _describe_element(self, element: Any) -> ElementRef:
         """Snapshot a live accessible as the durable reference a recording keeps."""

@@ -144,8 +144,46 @@ keys are in the same position. The `LowLevelHooksTimeout` limit itself has not
 been provoked. What has been measured is the callback's cost: 0.04 ms at the
 median and 3 ms at the worst over 20,000 key-downs, against the 300 ms limit.
 
+## Run live on GhostBSD 26.1 / MATE, recorded and replayed (2026-09-20)
+
+A private Xvfb with the real MATE window manager (`marco`) on it, a private
+session bus and a private accessibility bus -- never the desktop the machine was
+being used from -- with real applications on it: mate-calc and pluma. Each was
+recorded with the CLI, the generated script replayed into a fresh copy of the
+application, and then replayed again into a window moved across the screen.
+
+**Confirmed working:** `7 + 3 =` in mate-calc, by button name, replayed into the
+same window and into a moved one, the display reading `10` each time; typed text,
+a Ctrl+Home chord and a menu in pluma, replayed into both, the document reading
+back exactly; `File → New` in pluma by menu-item name, two document tabs after
+replay with teleport motion.
+
+**Found and fixed, all described in the CHANGELOG:** a click on an open menu item
+recorded as the widget under the menu (`gui.button("Open")` for `New`); a click
+near a window's corner recorded against its one-pixel GTK leader window; the
+header printing enum reprs; a misleading "another session" note; and the live
+check itself, which silently tested nothing here and leaked a daemon per run. The
+popup bug took three attempts to fix live because each passed its tests and
+changed nothing -- the press is consumed after the popup has closed, and a closed
+item's size is not always a sign of it -- and the second and third were found by
+tracing the real recorder rather than by reading it.
+
+**Measured, not fixed:** `Session.focused()` is a walk of every node on the
+desktop, ~1.5s per call on pluma's 461 nodes (~3ms a node), and the recorder calls
+it once per run of typed text -- that is the "fell 1.7s behind live input" note in
+a light recording, and it grows with the application. A prototype that reads only
+the active frame, skips what is not showing and stops at the first hit took 0.3s
+on the same tree. It belongs in pyguitest, so it is recorded here rather than
+worked around. **Not run:** the user's own live desktop, where the same fixes are
+unconfirmed.
+
 ## Known gaps
 
+- **The X11 live check records and regenerates but never replays**, where the
+  Windows one replays by default. Every replay above was run by hand. A replay
+  alone is not enough either: the worst bug of that day produced a script that
+  validated clean *and* ran clean, and only reading an end state back -- the tab
+  count, the calculator's display -- showed it doing the wrong thing.
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
 - **Two recordings have been made of a real desktop application** — a file

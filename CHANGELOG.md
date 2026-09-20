@@ -35,6 +35,75 @@ was released.
 
 ### Fixed
 
+- **A click on an open menu item was recorded as a click on whatever lay
+  underneath the menu.** Found live on GhostBSD/MATE, recording `File → New` in
+  pluma: the script said `gui.button("Open").click()`, the toolbar button
+  beneath the popup, and replaying it opens a file dialog instead of making a
+  document -- clean, plausible, and wrong. `element_at` walks down from each
+  application's frames, and a popup is a window of its own that is no
+  descendant of them, so the point is answered for the widget under it; and
+  every check the resolver makes passed, because that button is the same process
+  as the window and its rectangle does contain the point. pyguitest's own
+  docstring says as much (its tree "carries no stacking order"). Menu items are
+  in the tree, though, and are found by name inside the menu that was opened, so
+  a click on something that opens a popup (`menu`, `combo box`) is now remembered
+  as its owner and the popup's items are read while it is open. The script comes
+  out as `gui.element(role=Role.MENU, name="File").click()` and
+  `gui.menu_item("New").click()`, and replays: two document tabs, not one and a
+  dialog.
+
+  It took three attempts to make that true live, and each passed its unit tests
+  and changed nothing. **The popup is gone by the time the press is consumed** --
+  choosing an item closes it and the recorder handles events after they
+  happen -- so the layout is kept from when the popup was open and a press is
+  answered from it, and spent by the press that chose an item (a rest beside it,
+  which is consumed first, is not a press and spends nothing; nor is one outside
+  the popup, which dismisses nothing). **A closed item does not always shrink**:
+  mate-calc's report `1x1`, but pluma's kept `233x25` with the position at
+  `-2147483648`, so a test on size called nine closed items showing and built the
+  popup's bounds from them. Found by tracing the real recorder rather than
+  reading it. Windows is skipped, where UI Automation hit-tests popups itself.
+  Still weak where the recorder falls far behind (the note on that is in the
+  file): a popup that closed before the click that opened it was consumed is
+  never seen, and this answers as before. Verified on pluma and mate-calc only.
+- **A click within 40 pixels of a window's corner could be recorded against a
+  window one pixel wide.** Found by the same run: the File menu of pluma, 20px
+  from the corner, came out as an absolute coordinate, and because the window
+  looked as if it had only just appeared the 2.5s wait before the next click was
+  explained as `expect_window` rather than the popup it was actually waiting
+  for. `_prefer_decoration_owner` swaps the hit-test's answer for the *active*
+  window when a click is that close, on the theory that a titlebar was just
+  clicked -- but GTK maps a 1x1 untitled leader window beside every application
+  and under marco that is what `_NET_ACTIVE_WINDOW` names, so its slack claimed
+  every click near the real window's corner. A window a pixel wide has no chrome
+  and is no longer preferred.
+- **A generated script's header read `Recorded on: SessionType.X11
+  (Compositor.OTHER, MATE)`.** `Environment` stores the `str()` of pyguitest's
+  enum members and always has, because `is_windows` and every saved recording
+  read that form; the header printed it as stored where the README shows `x11
+  (mutter)`. It is now written as a reader would (`x11 (other, MATE)`), in the
+  header and in `--doctor`, and what is stored is unchanged.
+- **The note for an element refused for the wrong process blamed "another
+  session" when it was from the window next door.** With two windows overlapping
+  on one private display, the hit-test answered for the one underneath and the
+  note said the accessibility bus was not scoped to one X display, so it came
+  from another session -- true of the bus, and no help to someone looking at a
+  script with two windows in it. When the element's process owns a window on the
+  recorded display the note now says that, and names the window.
+- **The live capture check silently tested nothing on GhostBSD, and left a
+  daemon behind on every run.** It looked for the accessibility daemons in
+  `/usr/libexec`, `/usr/lib/at-spi2-core` and `/usr/lib`; FreeBSD's port
+  installs them in `/usr/local/libexec`, so it fell to "elements off" and
+  passed. Fixing that showed that a shell exporting `NO_AT_BRIDGE=1` -- as this
+  one's tool runner does, to quiet GTK -- stopped the application under test
+  registering at all, so the private bus was up and empty and the check passed
+  again. `NO_AT_BRIDGE` is now dropped from the application's environment when
+  there is a private bus to register on. The registry was started and never
+  stopped, leaving an orphaned `at-spi2-registryd` per run, and the daemons
+  started before `DISPLAY` was set, which attaches the registry to whichever
+  display the developer's shell has -- their own desktop -- and, with none, leaves
+  it unable to inject anything: an element `click()` returned success and did
+  nothing. Both are fixed, and every process the check starts is stopped.
 - **On a keyboard layout with AltGr, typing `@` or `€` on Windows was
   recorded as a Ctrl+Alt chord and the character was lost.** Found reading the
   win32 backend against what Windows documents, not by a live run -- the

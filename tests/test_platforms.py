@@ -10,7 +10,21 @@ from pyguitest_recorder.platforms import (
     foreign_element_reason,
     foreign_focus_reason,
     is_windows,
+    plain_name,
 )
+
+
+class TestPlainName:
+    def test_a_stored_enum_member_loses_its_class_and_its_capitals(self):
+        assert plain_name("SessionType.X11") == "x11"
+        assert plain_name("Compositor.OTHER") == "other"
+
+    def test_a_bare_spelling_is_left_alone(self):
+        assert plain_name("xwayland") == "xwayland"
+
+    def test_empty_stays_empty_so_a_callers_unknown_still_applies(self):
+        assert plain_name("") == ""
+        assert (plain_name("") or "unknown") == "unknown"
 
 
 class TestIsWindows:
