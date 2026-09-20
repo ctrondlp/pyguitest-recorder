@@ -1,4 +1,4 @@
-"""The win32 capture backend, driven against fakes: no Windows machine here.
+"""The win32 capture backend, driven against fakes: no Windows machine needed.
 
 `X11CaptureBackend` needs a live X server only to *capture*; everything after
 the bytes arrive -- decoding, keysym resolution, coming apart cleanly -- is
@@ -9,7 +9,10 @@ stand in for `user32`/`kernel32` themselves, the same shape
 `tests/test_win32_backend.py` in pyguitest fakes `user32`/`gdi32` for its own
 Windows backend, and for the same reason -- a message layout or a flag pair
 can be checked with no DLL in sight, and what a real Windows box still has to
-confirm is a different, smaller list.
+confirm is a different, smaller list. That list is
+`scripts/win32-live-capture-check.py`, which runs the same backend against a
+real desktop; these tests are what keep it honest on the CI runners that have
+no interactive one.
 
 Every fake is installed through pytest's own `monkeypatch`, never by hand, so
 a failing assertion still leaves the module's real `_user32`/`_kernel32`
@@ -807,6 +810,141 @@ class TestKeyboardCallback:
         assert len(fake.next_calls) == 1
 
 
+class TestAltGr:
+    """AltGr is a fake left Control plus the real right Alt, on Windows.
+
+    Found by review, not by a live run: this machine's layout is US English,
+    which has no AltGr. On every layout that has one, a press of it reaches a
+    low-level hook as `VK_LCONTROL` with scan code `0x21D` and then `VK_RMENU`,
+    so `@` on a German layout (AltGr+Q) recorded as a Ctrl+Alt chord and the
+    character was lost. X11 reports one key, `ISO_Level3_Shift`, which the
+    normalizer already knows makes text. These tests pin that the Windows
+    backend says the same thing -- with `ToUnicodeEx` and the hook structures
+    faked, since no real AltGr keyboard was available to measure it on.
+    """
+
+    def _altgr_typing(self, made, character_vk=0x51):
+        """AltGr held, one key struck, everything released, in Windows' order."""
+        steps = (
+            (0xA2, 0x21D, WM_KEYDOWN, 0),
+            (0xA5, 0x38, WM_SYSKEYDOWN, LLKHF_EXTENDED),
+            (character_vk, 0x10, WM_SYSKEYDOWN, 0),
+            (character_vk, 0x10, WM_KEYUP, 0),
+            (0xA2, 0x21D, WM_KEYUP, 0),
+            (0xA5, 0x38, WM_KEYUP, LLKHF_EXTENDED),
+        )
+        for vk_code, scan_code, message, flags in steps:
+            lparam, _info = keyboard_lparam(vk_code, scan_code=scan_code, flags=flags)
+            made._on_keyboard_event(HC_ACTION, message, lparam)
+
+    def test_the_fake_control_is_never_reported_and_the_alt_is_altgr(self, monkeypatch):
+        fake = FakeUser32(text="@")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        self._altgr_typing(made)
+        events = [(raw.kind, raw.keysym) for raw in drain(made)]
+        assert events == [
+            ("key_press", "ISO_Level3_Shift"),
+            ("key_press", "q"),
+            ("key_release", "q"),
+            ("key_release", "ISO_Level3_Shift"),
+        ]
+
+    def test_toUnicodeEx_still_sees_control_and_alt_both_down(self, monkeypatch):
+        # The fake Control is not enqueued, but the layout has to be asked with
+        # it held: an AltGr character is defined at Ctrl+Alt, and asking with
+        # only the Alt down would answer with the plain key's character.
+        seen = []
+
+        class Recording(FakeUser32):
+            def ToUnicodeEx(self, vk, scan, state, buffer, size, flags, layout):
+                seen.append((state[0x11] & 0x80, state[0x12] & 0x80))
+                return super().ToUnicodeEx(vk, scan, state, buffer, size, flags, layout)
+
+        patch_windows(monkeypatch, fake_user32=Recording(text="@"))
+        made = Win32CaptureBackend()
+        self._altgr_typing(made)
+        # Once per key-down: the fake Control, the Alt, then the letter.
+        assert seen[-1] == (0x80, 0x80)
+
+    def test_the_character_arrives_as_text_and_not_as_a_hotkey(self, monkeypatch):
+        import dataclasses
+
+        from pyguitest_recorder.analyzer import Normalizer
+        from pyguitest_recorder.model import HotKey, TextInput
+        from pyguitest_recorder.windows import NullResolver
+
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        # `ToUnicodeEx` answers for the Ctrl+Alt state only; the modifiers
+        # themselves are text-less, so the answer is keyed on the key struck.
+        fake.ToUnicodeEx = lambda vk, _s, _st, buffer, _n, _f, _l: (
+            setattr(buffer, "value", "@") or 1 if vk == 0x51 else 0
+        )
+        self._altgr_typing(made)
+        normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        events = []
+        for step, raw in enumerate(drain(made)):
+            events += normalizer.feed(dataclasses.replace(raw, timestamp=0.05 * step))
+        events += normalizer.flush()
+        assert not any(isinstance(event, HotKey) for event in events)
+        assert [type(event) for event in events] == [TextInput]
+        assert events[0].text == "@"
+
+    def test_a_real_left_control_with_the_right_alt_is_still_a_chord(self, monkeypatch):
+        # Only the scan code tells the two apart -- on a US layout, with no
+        # AltGr, Ctrl+Right-Alt is a real chord and must stay one.
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for vk_code, scan_code, flags in (
+            (0xA2, 0x1D, 0),
+            (0xA5, 0x38, LLKHF_EXTENDED),
+        ):
+            lparam, _info = keyboard_lparam(vk_code, scan_code=scan_code, flags=flags)
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        assert [raw.keysym for raw in drain(made)] == ["Control_L", "Alt_R"]
+
+    def test_a_held_altgr_repeating_stays_altgr_until_it_is_released(self, monkeypatch):
+        # Auto-repeat re-announces both halves on every repeat.
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        for _ in range(3):
+            for vk_code, scan_code, flags in (
+                (0xA2, 0x21D, 0),
+                (0xA5, 0x38, LLKHF_EXTENDED),
+            ):
+                lparam, _info = keyboard_lparam(
+                    vk_code, scan_code=scan_code, flags=flags
+                )
+                made._on_keyboard_event(HC_ACTION, WM_SYSKEYDOWN, lparam)
+        lparam, _info = keyboard_lparam(0xA5, scan_code=0x38, flags=LLKHF_EXTENDED)
+        made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        assert {raw.keysym for raw in drain(made)} == {"ISO_Level3_Shift"}
+
+    def test_a_plain_right_alt_after_altgr_is_released_is_alt_again(self, monkeypatch):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        self._altgr_typing(made)
+        drain(made)
+        lparam, _info = keyboard_lparam(0xA5, scan_code=0x38, flags=LLKHF_EXTENDED)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        assert [raw.keysym for raw in drain(made)] == ["Alt_R"]
+
+    def test_the_fake_control_release_leaves_no_stuck_ctrl_in_the_state(
+        self, monkeypatch
+    ):
+        fake = FakeUser32(text="")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        self._altgr_typing(made)
+        assert made._state.array()[0x11] & 0x80 == 0
+        assert made._state.array()[0x12] & 0x80 == 0
+
+
 class TestMouseCallback:
     def test_a_click_reaches_the_queue_and_call_next_hook_ex(self, monkeypatch):
         fake = FakeUser32()
@@ -904,6 +1042,45 @@ class TestStartStopEvents:
         made.start()
         made.stop()
         assert list(made.events()) == []
+
+    def test_events_never_waits_without_a_timeout(self):
+        # On Windows a thread in an untimed `queue.get()` is not woken by
+        # Ctrl-C: measured on Windows 11, a signal raised one second in was not
+        # delivered until a safety valve released the wait eight seconds later,
+        # and arrived at one second when the wait had a quarter-second timeout.
+        # A typed Ctrl-C only looked fine because its own keystrokes reached the
+        # hook and woke the queue; Ctrl+Break or a signal from another tool did
+        # not. A unit test cannot send a real Ctrl-C, but it can hold the
+        # property that makes one deliverable: every wait is bounded, and an
+        # empty queue means look up and wait again, not stop.
+        import queue
+
+        waits = []
+
+        class Spy(queue.Queue):
+            def get(self, block=True, timeout=None):
+                waits.append(timeout)
+                if len(waits) < 3:
+                    raise queue.Empty
+                return win32_module._SENTINEL
+
+        made = Win32CaptureBackend()
+        made._queue = Spy()
+        assert list(made.events()) == []
+        assert waits == [win32_module._INTERRUPT_POLL] * 3
+        assert 0 < win32_module._INTERRUPT_POLL <= 0.5
+
+    def test_a_keyboard_interrupt_during_the_wait_reaches_the_caller(self):
+        import queue
+
+        class Interrupting(queue.Queue):
+            def get(self, block=True, timeout=None):
+                raise KeyboardInterrupt
+
+        made = Win32CaptureBackend()
+        made._queue = Interrupting()
+        with pytest.raises(KeyboardInterrupt):
+            next(made.events())
 
     def test_both_hooks_are_installed_with_no_dll_and_thread_zero(self, monkeypatch):
         fake = FakeUser32()

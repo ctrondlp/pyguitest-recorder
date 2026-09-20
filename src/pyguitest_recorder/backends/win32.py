@@ -24,13 +24,15 @@ over low-level hooks for exactly this use, and it has neither the timeout nor
 the silent-removal failure mode. It is not what this module does: it needs a
 message-only window (`RegisterClassExW`/`CreateWindowExW`, a `WNDPROC` of its
 own) rather than a callback, which is a materially larger surface for a
-first implementation to get right with no Windows machine to verify it on --
-see docs/developers/adr-003-windows.md in pyguitest for the sibling decision
-to keep new Win32 surface small and reviewable before it depends on hardware.
-Low-level hooks are simpler, are what nearly every real-world tool in this
-space actually ships, and their one failure mode is already the honest thing
-to document rather than solve. If the gap proves real in practice, raw input
-is the documented next step, not a surprise.
+first implementation to get right -- see docs/developers/adr-003-windows.md
+in pyguitest for the sibling decision to keep new Win32 surface small and
+reviewable. Low-level hooks are simpler, are what nearly every real-world tool
+in this space actually ships, and their one failure mode is already the honest
+thing to document rather than solve. Measured on Windows 11, the callback
+(`ToUnicodeEx` included) takes 0.04ms at the median and 3ms at the worst of
+20,000 key-downs, against the 300ms limit; the gap is a property of the
+mechanism, not something a live run has shown to happen. If it proves real in
+practice, raw input is the documented next step, not a surprise.
 
 **The reach sentence this module's honesty depends on**: a low-level hook
 sees every keystroke on the machine, in every application, with no permission
@@ -50,12 +52,18 @@ computing it here rather than reconstructing it later keeps `analyzer/normalize.
 completely untouched: every downstream module sees the same `RawEvent` shape
 X11 already produces, `raw.text` populated exactly where X11 populates it,
 which is what "the same behaviour as Linux" actually requires of this
-backend. The one caveat this route inherits from `ToUnicodeEx` itself: dead-key
-composition can misbehave across two calls the way it can in any tool that
-polls a live keyboard state rather than owning the input queue outright.
-X11's own `_resolve_keysym` does not model dead keys either, so this is not a
-regression from what the Linux backend already does -- both backends draw the
-same honest line at plain Shift and CapsLock.
+backend. The one caveat this route inherits from `ToUnicodeEx` itself: a dead
+key is not resolved into the character it composes (see `_text_for`), and
+what a dead-key sequence records as has not been checked against a layout that
+has one -- this machine's is US English. X11's own `_resolve_keysym` does not
+model dead keys either, so this is not a regression from what the Linux
+backend already does -- both backends draw the same honest line at plain Shift
+and CapsLock.
+
+Keys are named the way X11 names them, so nothing downstream needs to know
+which backend it is reading: Windows' one real difference, AltGr arriving as a
+fake Control plus the right Alt, is folded back into X11's single
+`ISO_Level3_Shift` here (see `_ALTGR_FAKE_CONTROL_SCAN`).
 
 Modifier state is tracked from the event stream, the same thing X11's own
 `_resolve_keysym` does with its shift and lock masks -- Windows documents
@@ -196,6 +204,28 @@ actually reports, so both have to be kept in step by hand (3.8's own point:
 `GetKeyboardState` cannot be asked inside the callback, so nothing here reads
 the real one)."""
 
+_ALTGR_FAKE_CONTROL_SCAN = 0x21D
+"""The scan code of the left Control key Windows invents for AltGr.
+
+A keyboard layout with an AltGr key (German, French, Spanish, Polish and most
+others that are not US or UK English) has no such key as far as the hardware
+is concerned: AltGr is the right Alt key, and Windows treats "Ctrl+Alt" as the
+same thing. So a press of it arrives at a low-level hook as two keystrokes --
+a `VK_LCONTROL` whose scan code is this value rather than the real left
+Control's `0x1D`, immediately followed by the real `VK_RMENU`. Nothing the
+person pressed produced the first of them; it is Windows saying "Ctrl+Alt".
+
+Read as it arrives, that is a Ctrl+Alt chord: typing `@` on a German layout
+(AltGr+Q) or `€` (AltGr+E) recorded as a hotkey and the character was lost.
+X11 never has the problem -- there AltGr is `ISO_Level3_Shift`, one key and
+one modifier the normalizer already knows makes text rather than commands --
+so `_record_key` produces the same thing here: the fake Control is kept in
+the shadow keyboard state (`ToUnicodeEx` needs Ctrl and Alt both down to
+answer with the AltGr character) but never enqueued, and the `VK_RMENU` that
+follows it is named `ISO_Level3_Shift`."""
+
+_ALTGR_KEYSYM = "ISO_Level3_Shift"
+
 _TOGGLE_KEYS = (_VK_CAPITAL, _VK_NUMLOCK, _VK_SCROLL)
 """Keys whose *toggle* bit (0x01 in the key-state byte) matters to
 `ToUnicodeEx`, flipped on every key-down transition rather than tracked as
@@ -226,6 +256,13 @@ _JOIN_TIMEOUT = 2.0
 """Seconds to wait for the pump thread to leave `GetMessageW` after `stop()`
 posts `WM_QUIT` -- the same margin `X11CaptureBackend` gives its own pump
 thread leaving `record_enable_context`."""
+
+_INTERRUPT_POLL = 0.25
+"""Seconds `events` waits on its queue before looking up, so Ctrl-C can land.
+
+Windows does not interrupt an untimed wait for a signal; see `events`. A quarter
+of a second is short enough that an interrupt is prompt to a person and long
+enough that an idle recording costs four wake-ups a second, not a busy loop."""
 
 _SENTINEL = object()
 
@@ -871,7 +908,7 @@ class Win32CaptureBackend:
     `CaptureBackend.stop_pressed_at` says a backend that leaves this None gets.
     Running one in a hook callback would put work in the one place that is kept
     to reading a structure and enqueueing it -- see `_on_keyboard_event` for
-    why -- and there is no Windows machine to measure what it would cost.
+    why -- and the consumer's recogniser costs nothing a person can perceive.
     """
 
     def __init__(self, display: str | None = None, screen: int = 0) -> None:
@@ -897,6 +934,8 @@ class Win32CaptureBackend:
         self._vocabulary = _KeyVocabulary()
         self._state = _KeyboardState()
         self._surrogates = _SurrogatePairs()
+        self._altgr_announced = False
+        self._altgr_down = False
 
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
@@ -1009,9 +1048,9 @@ class Win32CaptureBackend:
         deferring the keyboard-state update it depends on too, and this
         module's whole approach to shift/lock tracking is "the event stream
         is the only source of truth, read it in order." `ToUnicodeEx` itself
-        is fast enough that this has not measured as a problem -- there is
-        no live Windows machine to measure it on, which is why this
-        decision is written down rather than left implicit.
+        is fast enough that this is not a problem: the whole callback,
+        `ToUnicodeEx` included, measured 0.04ms at the median and 3ms at the
+        worst of 20,000 key-downs on Windows 11, against the 300ms limit.
         """
         lib = _user32()
         if code == HC_ACTION:
@@ -1061,7 +1100,29 @@ class Win32CaptureBackend:
                     # whole character.
                     return
         else:
+            if vk_code == _VK_LCONTROL and info.scanCode == _ALTGR_FAKE_CONTROL_SCAN:
+                # Half of AltGr, not a key anyone pressed -- see
+                # `_ALTGR_FAKE_CONTROL_SCAN`. Tracked for `ToUnicodeEx` but
+                # never enqueued, so the normalizer never sees a Ctrl.
+                if pressed:
+                    self._state.press(vk_code)
+                    self._altgr_announced = True
+                else:
+                    self._state.release(vk_code)
+                return
             keysym = self._vocabulary.name(vk_code, extended)
+            if vk_code == _VK_RMENU:
+                # The real half. It is AltGr when Windows just announced one,
+                # and the release is named to match whichever the press was
+                # -- the fake Control may already be up by then, so the
+                # release cannot be told apart by looking for it again.
+                if pressed:
+                    self._altgr_down = self._altgr_down or self._altgr_announced
+                    self._altgr_announced = False
+                if self._altgr_down:
+                    keysym = _ALTGR_KEYSYM
+                if not pressed:
+                    self._altgr_down = False
             if pressed:
                 # A high half still waiting for its pair was never going to be
                 # paired by this key.
@@ -1166,9 +1227,23 @@ class Win32CaptureBackend:
         return None
 
     def events(self) -> Iterator[RawEvent]:
-        """Yield captured events until `stop` is called."""
+        """Yield captured events until `stop` is called.
+
+        The wait is timed, and that is not a polling habit: on Windows a thread
+        blocked in an untimed `queue.get()` is not woken by Ctrl-C, so the
+        `KeyboardInterrupt` that ends a recording (and `--help` promises will)
+        is held back until some unrelated event arrives. Measured here: a
+        signal raised one second in was not delivered for the eight seconds it
+        took a safety valve to release the wait, and delivered at one second
+        with a quarter-second timeout. A typed Ctrl-C only *looked* fine,
+        because its own keystrokes reach this hook and wake the queue;
+        `Ctrl+Break`, or a signal sent by another tool, did not.
+        """
         while True:
-            item = self._queue.get()
+            try:
+                item = self._queue.get(timeout=_INTERRUPT_POLL)
+            except queue.Empty:
+                continue
             if item is _SENTINEL:
                 return
             if isinstance(item, Exception):

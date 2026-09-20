@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -326,6 +327,11 @@ class DesktopResolver:
         panels and menus it most needs to see. An ancestry with no
         window-owning process in it -- the recorder driven over SSH, say --
         contributes nothing.
+
+        On Windows the console's own window is found directly too, by asking
+        Windows which window hosts this process's console -- see
+        `_console_owner_pid` -- and it counts only if that process owns a
+        window this session lists, exactly as an ancestor must.
         """
         if self.session is None:
             return set()
@@ -333,10 +339,21 @@ class DesktopResolver:
             owners = {window.pid for window in self.session.windows() if window.pid}
         except Exception:  # noqa: BLE001 - no window list is no terminal to find
             return set()
+        found: set[int] = set()
         for pid in _ancestor_pids():
             if pid in owners:
-                return {pid}
-        return set()
+                found.add(pid)
+                break
+        # Asked of Windows as well, because the terminal is not always an
+        # ancestor there: a console started from the shell (Win+R `cmd`, a
+        # double-clicked script) is handed to Windows Terminal, which is
+        # launched by the system rather than by the process that asked for it.
+        # Its window then belongs to a process whose parent is `svchost`, so the
+        # walk above never meets it -- and the recorder recorded its own console.
+        console = _console_owner_pid()
+        if console is not None and console in owners:
+            found.add(console)
+        return found
 
     def _can_resolve_elements(self) -> bool:
         """Whether this session can name what is under a point, and say so.
@@ -1168,6 +1185,57 @@ class DesktopResolver:
             return None
         x, y, width, height = (int(v) for v in rect)
         return (x, y, width, height)
+
+
+_GA_ROOTOWNER = 3
+"""`GetAncestor`'s flag for the root of the owner chain -- the visible window a
+pseudoconsole belongs to, where the console window itself is hidden."""
+
+
+def _console_owner_pid() -> int | None:
+    r"""The pid of the window that hosts this process's console, on Windows.
+
+    Asked of Windows rather than inferred from the process tree, because the
+    two disagree exactly where it matters. Under Windows Terminal -- the default
+    on Windows 11 -- `GetConsoleWindow` answers a hidden `PseudoConsoleWindow`,
+    and `GetAncestor(..., GA_ROOTOWNER)` from it is the visible
+    `CASCADIA_HOSTING_WINDOW_CLASS` window, which is Microsoft's own documented
+    route to "the terminal I am running in". Measured on Windows 11 with a
+    console started through Explorer: the launching chain was `python` ->
+    `cmd.exe` -> `explorer.exe` -> `svchost.exe`, and the window's owner was
+    `WindowsTerminal.exe`, in none of it.
+
+    Private DLL handles, so the prototypes set here are not written onto the
+    shared `ctypes.windll` objects other code in the process reads. None off
+    Windows, when there is no console (a GUI launcher, a service), or when any
+    call fails: an unanswerable question is not a reason to stop recording.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32")
+        user32 = ctypes.WinDLL("user32")
+        kernel32.GetConsoleWindow.argtypes = ()
+        kernel32.GetConsoleWindow.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    except (OSError, AttributeError):
+        return None
+    console = kernel32.GetConsoleWindow()
+    if not console:
+        return None
+    owner = user32.GetAncestor(console, _GA_ROOTOWNER) or console
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(owner, ctypes.byref(pid))
+    return int(pid.value) or None
 
 
 def _parent_pids_windows() -> dict[int, int]:

@@ -126,11 +126,25 @@ machine (confirmed by a non-elevated process being refused even
 `TerminateProcess` on them) — out of reach for a non-elevated recorder
 session by UIPI before capture even enters into it, which is why the
 "real application" checks above use Notepad and a hand-rolled window rather
-than one of those. And the module's own two documented open questions —
-whether a real `LowLevelHooksTimeout` miss is truly undetectable, and
-whether `_TOUNICODE_NO_KEYBOARD_STATE_CHANGE` holds up on a genuinely
-international keyboard layout with real dead keys — were not reachable from
-this US-layout run and remain open.
+than one of those. `--doctor` now says so up front on Windows: whether this
+process is elevated, and whether the window in front is.
+
+**A second pass, on what a recording depends on but a probe window does not
+exercise,** found four more bugs, each reproduced before it was fixed and
+described in the CHANGELOG: a script redirected to a file was written in the
+ANSI code page rather than UTF-8; Ctrl-C did nothing while recording; the
+recorder recorded the Windows Terminal it was started from; and a fall-back to
+a smaller UI Automation context said nothing about why. `--doctor` now reports
+whether the recorder and the window in front are elevated.
+
+**Not verified, and why.** AltGr (the fake left Control Windows sends with it,
+scan code `0x21D`) is handled and unit-tested, but this machine has a US
+layout, which has no AltGr, so it has not been seen on a real keyboard; dead
+keys are in the same position. The `LowLevelHooksTimeout` limit itself has not
+been provoked. What has been measured is the callback's cost: 0.04 ms at the
+median and 3 ms at the worst over 20,000 key-downs, against the 300 ms limit.
+
+## Known gaps
 
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.

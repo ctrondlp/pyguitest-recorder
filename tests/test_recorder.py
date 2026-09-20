@@ -787,3 +787,72 @@ class TestInjectedInputIsReported:
             ]
         )
         assert made._injected_keys == ["Escape", "a"]
+
+
+class TestASmallerContextThanAskedForSaysWhy:
+    """A session that opens with less than was asked for must give its reason.
+
+    `_connect` tries the composed backends first and each alone after, so a
+    recording is still made when one half will not open. That fallback threw
+    the reason away: the recording then said only that element resolution was
+    off, which is indistinguishable from a desktop that never had any -- and on
+    Windows the UI Automation half has been seen to drop out for one run and be
+    back for the next (`--doctor` answering "element context: no" and then
+    "yes" minutes apart, with nothing else changed), which is exactly the case
+    where the reason is the only clue.
+    """
+
+    class _Capability:
+        name = "WINDOW_LIST"
+
+    class _Session:
+        capabilities = None  # set per instance below
+
+        def close(self):
+            pass
+
+    def _session(self):
+        session = self._Session()
+        session.capabilities = [self._Capability()]
+        return session
+
+    def test_the_failure_of_the_fuller_attempt_reaches_the_notes(self, monkeypatch):
+        import pyguitest
+
+        attempts = []
+
+        def fake_connect(backend=None, environment=None, **_kwargs):
+            attempts.append(list(backend))
+            if len(backend) > 1:
+                raise RuntimeError("UI Automation is not answering")
+            return self._session()
+
+        monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        made = Recorder(Settings())
+        notes: list[str] = []
+        session = made._open_session("", notes)
+        assert session is not None
+        assert len(attempts[0]) == 2 and len(attempts[1]) == 1
+        (note,) = [n for n in notes if "smaller context" in n]
+        assert "UI Automation is not answering" in note
+        assert "RuntimeError" in note
+
+    def test_a_first_attempt_that_works_says_nothing(self, monkeypatch):
+        import pyguitest
+
+        monkeypatch.setattr(pyguitest, "connect", lambda **_kwargs: self._session())
+        notes: list[str] = []
+        assert Recorder(Settings())._open_session("", notes) is not None
+        assert not any("smaller context" in n for n in notes)
+
+    def test_no_session_at_all_keeps_its_own_message(self, monkeypatch):
+        import pyguitest
+
+        def fake_connect(**_kwargs):
+            raise RuntimeError("nothing answers")
+
+        monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        notes: list[str] = []
+        assert Recorder(Settings())._open_session("", notes) is None
+        assert any("window and element context off" in n for n in notes)
+        assert not any("smaller context" in n for n in notes)

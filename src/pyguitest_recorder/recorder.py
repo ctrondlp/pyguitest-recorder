@@ -784,6 +784,14 @@ class Recorder:
                 "carry bare coordinates"
             )
             return None
+        if failure is not None:
+            notes.append(
+                f"opened a smaller context than asked for: connecting "
+                f"{' + '.join(wanted)} failed ({type(failure).__name__}: {failure}), "
+                "so only part of it is in use -- clicks may lose their element "
+                "names. It has been seen to come and go between runs, so "
+                "recording again is worth trying"
+            )
         if self.settings.window_context and not _lists_windows(session):
             notes.append(
                 "window context off: the session that opened lists no windows; "
@@ -800,6 +808,14 @@ class Recorder:
         resolution without window context still names buttons, and window
         context without elements still gives window-relative coordinates.
         The resolver says in the recording's notes which one it lost.
+
+        Returns the session and the failure that came *before* it, if any: the
+        error of the last fuller attempt that did not work, or None when the
+        first attempt did. With no session at all it is the last failure. The
+        earlier failure is the one worth keeping -- a session that opens with
+        less than was asked for is otherwise indistinguishable from one that
+        was never going to have more, and the reason is the only clue to a
+        drop-out that comes and goes.
         """
         import pyguitest
 
@@ -816,7 +832,7 @@ class Recorder:
                         pyguitest.connect(
                             backend=names, environment=pyguitest.detect(scoped)
                         ),
-                        None,
+                        failure,
                     )
                 except Exception as exc:  # noqa: BLE001 - context is optional
                     failure = exc
