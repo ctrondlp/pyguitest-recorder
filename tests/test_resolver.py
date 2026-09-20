@@ -284,12 +284,15 @@ def test_an_ancestry_owning_no_window_is_ignored_no_further(monkeypatch):
 
 
 def test_a_console_hosted_outside_the_process_tree_is_still_the_terminal(monkeypatch):
-    # Measured on Windows 11 with a console started through Explorer: the
-    # launching chain was python -> cmd.exe -> explorer.exe -> svchost.exe, and
-    # the window that hosted the console belonged to WindowsTerminal.exe, which
-    # is in none of it -- Windows Terminal is launched by the system, not by the
-    # process that asked for a console. The ancestry walk found no terminal, and
-    # the recorder recorded its own console window.
+    """A console's owner is ignored even when it is in none of the ancestry.
+
+    Measured on Windows 11 with a console started through Explorer: the
+    launching chain was python -> cmd.exe -> explorer.exe -> svchost.exe, and
+    the window that hosted the console belonged to WindowsTerminal.exe, which
+    is in none of it -- Windows Terminal is launched by the system, not by the
+    process that asked for a console. The ancestry walk found no terminal, and
+    the recorder recorded its own console window.
+    """
     terminal = FakeWindow(title=r"C:\WINDOWS\system32\cmd.exe", pid=13492)
     other = FakeWindow(title="Example", pid=999)
     monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [3660, 8088])
@@ -300,8 +303,10 @@ def test_a_console_hosted_outside_the_process_tree_is_still_the_terminal(monkeyp
 
 
 def test_the_console_owner_and_an_ancestor_terminal_are_both_ignored(monkeypatch):
-    # A terminal that is an ancestor keeps being found by the walk; the console
-    # answer adds to it rather than replacing it.
+    """A terminal that is an ancestor keeps being found by the walk.
+
+    The console answer adds to it rather than replacing it.
+    """
     editor = FakeWindow(title="Editor", pid=4649)
     terminal = FakeWindow(title="Terminal", pid=13492)
     monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [4649])
@@ -311,9 +316,11 @@ def test_the_console_owner_and_an_ancestor_terminal_are_both_ignored(monkeypatch
 
 
 def test_a_console_owner_with_no_listed_window_is_not_ignored(monkeypatch):
-    # The same rule an ancestor is held to: a pid counts only if it owns a
-    # window this session lists. A console answer naming some other process
-    # must not put an arbitrary pid on the ignore list.
+    """A console owner is held to the rule an ancestor is: it must own a window.
+
+    A pid counts only if it owns a window this session lists. A console answer
+    naming some other process must not put an arbitrary pid on the ignore list.
+    """
     window = FakeWindow(title="Example", pid=999)
     monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [])
     monkeypatch.setattr(resolver_module, "_console_owner_pid", lambda: 77777)
@@ -322,7 +329,10 @@ def test_a_console_owner_with_no_listed_window_is_not_ignored(monkeypatch):
 
 
 def test_no_console_answer_changes_nothing(monkeypatch):
-    # A GUI launcher, a service, or a platform with no such thing.
+    """No console owner leaves the ignore set as the ancestry alone made it.
+
+    That is a GUI launcher, a service, or a platform with no such thing.
+    """
     terminal = FakeWindow(title="Konsole", pid=4649)
     monkeypatch.setattr(resolver_module, "_ancestor_pids", lambda *a, **k: [4649])
     monkeypatch.setattr(resolver_module, "_console_owner_pid", lambda: None)
@@ -331,15 +341,18 @@ def test_no_console_answer_changes_nothing(monkeypatch):
 
 
 def test_the_console_owner_is_none_off_windows(monkeypatch):
+    """Off Windows there is no console owner to ask about."""
     monkeypatch.setattr(resolver_module.sys, "platform", "linux")
     assert resolver_module._console_owner_pid() is None
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="asks the real Windows API")
 def test_the_console_owner_call_is_safe_on_a_real_windows_process():
-    # Whatever this process's console is -- a real one, a pseudoconsole, or none
-    # at all under a CI runner or an IDE -- the answer is a pid or None, never
-    # an exception.
+    """Asking the real Windows API gives a pid or None, never an exception.
+
+    Whatever this process's console is -- a real one, a pseudoconsole, or none
+    at all under a CI runner or an IDE.
+    """
     answer = resolver_module._console_owner_pid()
     assert answer is None or (isinstance(answer, int) and answer > 0)
 

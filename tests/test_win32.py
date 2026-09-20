@@ -838,6 +838,7 @@ class TestAltGr:
             made._on_keyboard_event(HC_ACTION, message, lparam)
 
     def test_the_fake_control_is_never_reported_and_the_alt_is_altgr(self, monkeypatch):
+        """The synthetic Control is dropped and the right Alt is `ISO_Level3_Shift`."""
         fake = FakeUser32(text="@")
         patch_windows(monkeypatch, fake_user32=fake)
         made = Win32CaptureBackend()
@@ -851,13 +852,18 @@ class TestAltGr:
         ]
 
     def test_toUnicodeEx_still_sees_control_and_alt_both_down(self, monkeypatch):
-        # The fake Control is not enqueued, but the layout has to be asked with
-        # it held: an AltGr character is defined at Ctrl+Alt, and asking with
-        # only the Alt down would answer with the plain key's character.
+        """The layout is asked with the fake Control held, though it is not enqueued.
+
+        An AltGr character is defined at Ctrl+Alt, and asking with only the Alt
+        down would answer with the plain key's character.
+        """
         seen = []
 
         class Recording(FakeUser32):
+            """A fake `user32` that notes the modifier state each lookup was made in."""
+
             def ToUnicodeEx(self, vk, scan, state, buffer, size, flags, layout):
+                """Record whether Control and Alt were down, then answer as usual."""
                 seen.append((state[0x11] & 0x80, state[0x12] & 0x80))
                 return super().ToUnicodeEx(vk, scan, state, buffer, size, flags, layout)
 
@@ -868,6 +874,7 @@ class TestAltGr:
         assert seen[-1] == (0x80, 0x80)
 
     def test_the_character_arrives_as_text_and_not_as_a_hotkey(self, monkeypatch):
+        """Through the normalizer, AltGr+Q is one `TextInput` and no `HotKey`."""
         import dataclasses
 
         from pyguitest_recorder.analyzer import Normalizer
@@ -893,8 +900,11 @@ class TestAltGr:
         assert events[0].text == "@"
 
     def test_a_real_left_control_with_the_right_alt_is_still_a_chord(self, monkeypatch):
-        # Only the scan code tells the two apart -- on a US layout, with no
-        # AltGr, Ctrl+Right-Alt is a real chord and must stay one.
+        """A real left Control with the right Alt stays a chord.
+
+        Only the scan code tells the two apart -- on a US layout, with no
+        AltGr, Ctrl+Right-Alt is a real chord and must stay one.
+        """
         fake = FakeUser32(text="")
         patch_windows(monkeypatch, fake_user32=fake)
         made = Win32CaptureBackend()
@@ -907,7 +917,7 @@ class TestAltGr:
         assert [raw.keysym for raw in drain(made)] == ["Control_L", "Alt_R"]
 
     def test_a_held_altgr_repeating_stays_altgr_until_it_is_released(self, monkeypatch):
-        # Auto-repeat re-announces both halves on every repeat.
+        """Auto-repeat re-announces both halves on every repeat, and it stays AltGr."""
         fake = FakeUser32(text="")
         patch_windows(monkeypatch, fake_user32=fake)
         made = Win32CaptureBackend()
@@ -925,6 +935,7 @@ class TestAltGr:
         assert {raw.keysym for raw in drain(made)} == {"ISO_Level3_Shift"}
 
     def test_a_plain_right_alt_after_altgr_is_released_is_alt_again(self, monkeypatch):
+        """Once AltGr is let go, a bare right Alt is an ordinary `Alt_R` again."""
         fake = FakeUser32(text="")
         patch_windows(monkeypatch, fake_user32=fake)
         made = Win32CaptureBackend()
@@ -937,6 +948,7 @@ class TestAltGr:
     def test_the_fake_control_release_leaves_no_stuck_ctrl_in_the_state(
         self, monkeypatch
     ):
+        """Neither Control nor Alt is left down in the key state afterwards."""
         fake = FakeUser32(text="")
         patch_windows(monkeypatch, fake_user32=fake)
         made = Win32CaptureBackend()
@@ -1044,21 +1056,27 @@ class TestStartStopEvents:
         assert list(made.events()) == []
 
     def test_events_never_waits_without_a_timeout(self):
-        # On Windows a thread in an untimed `queue.get()` is not woken by
-        # Ctrl-C: measured on Windows 11, a signal raised one second in was not
-        # delivered until a safety valve released the wait eight seconds later,
-        # and arrived at one second when the wait had a quarter-second timeout.
-        # A typed Ctrl-C only looked fine because its own keystrokes reached the
-        # hook and woke the queue; Ctrl+Break or a signal from another tool did
-        # not. A unit test cannot send a real Ctrl-C, but it can hold the
-        # property that makes one deliverable: every wait is bounded, and an
-        # empty queue means look up and wait again, not stop.
+        """Every wait on the queue is bounded, and an empty one waits again.
+
+        On Windows a thread in an untimed `queue.get()` is not woken by
+        Ctrl-C: measured on Windows 11, a signal raised one second in was not
+        delivered until a safety valve released the wait eight seconds later,
+        and arrived at one second when the wait had a quarter-second timeout.
+        A typed Ctrl-C only looked fine because its own keystrokes reached the
+        hook and woke the queue; Ctrl+Break or a signal from another tool did
+        not. A unit test cannot send a real Ctrl-C, but it can hold the
+        property that makes one deliverable: every wait is bounded, and an
+        empty queue means look up and wait again, not stop.
+        """
         import queue
 
         waits = []
 
         class Spy(queue.Queue):
+            """A queue that records each timeout and is empty twice, then ends."""
+
             def get(self, block=True, timeout=None):
+                """Note the timeout asked for, and end the stream on the third call."""
                 waits.append(timeout)
                 if len(waits) < 3:
                     raise queue.Empty
@@ -1071,10 +1089,14 @@ class TestStartStopEvents:
         assert 0 < win32_module._INTERRUPT_POLL <= 0.5
 
     def test_a_keyboard_interrupt_during_the_wait_reaches_the_caller(self):
+        """A Ctrl-C landing in the wait propagates instead of being swallowed."""
         import queue
 
         class Interrupting(queue.Queue):
+            """A queue whose wait is interrupted the way a Ctrl-C would."""
+
             def get(self, block=True, timeout=None):
+                """Raise as a signal handler would from inside the wait."""
                 raise KeyboardInterrupt
 
         made = Win32CaptureBackend()

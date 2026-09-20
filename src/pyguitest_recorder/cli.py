@@ -618,17 +618,26 @@ def _doctor(settings: Settings) -> int:
     """Report whether this session can be recorded, and what would degrade."""
     print(_version_string())
     print(f"generator profile: {PROFILE}")
+    backend_name = "n/a"
     try:
         backend = choose_backend(settings)
+        backend_name = backend.name
         print(f"capture:           {backend.name} (available)")
         capture_ok = True
     except CaptureUnavailable as exc:
         print(f"capture:           unavailable\n                   {exc}")
         capture_ok = False
-    environment = describe_environment(None, "n/a")
+    environment = describe_environment(None, backend_name)
     print(f"session:           {environment.session_type or 'unknown'}")
     print(f"compositor:        {environment.compositor or 'unknown'}")
-    on_windows = is_windows(environment.session_type)
+    # The backend decides, not the host: a Windows machine can run an X server
+    # (Xming, VcXsrv, WSLg) and `backend = "xrecord"` there records that
+    # server's clients, so pyguitest still detecting a Windows session must not
+    # hide the `$DISPLAY` being recorded or print Windows-only advice for it.
+    # With no backend to ask, the detected session is the best that is left.
+    on_windows = (
+        backend_name == "win32" if capture_ok else is_windows(environment.session_type)
+    )
     # `$DISPLAY` names an X server; on Windows there is none to name, and
     # "unset" read as something missing rather than as not applicable.
     print(

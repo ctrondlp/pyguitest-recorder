@@ -809,19 +809,22 @@ class TestASmallerContextThanAskedForSaysWhy:
         capabilities = None  # set per instance below
 
         def close(self):
-            pass
+            """Do nothing: there is no connection behind the fake to release."""
 
     def _session(self):
+        """A session that lists windows, which is all `_open_session` asks of it."""
         session = self._Session()
         session.capabilities = [self._Capability()]
         return session
 
     def test_the_failure_of_the_fuller_attempt_reaches_the_notes(self, monkeypatch):
+        """The composed list's error is what the note gives for the smaller session."""
         import pyguitest
 
         attempts = []
 
         def fake_connect(backend=None, environment=None, **_kwargs):
+            """Refuse the composed list and open either half alone."""
             attempts.append(list(backend))
             if len(backend) > 1:
                 raise RuntimeError("UI Automation is not answering")
@@ -837,7 +840,40 @@ class TestASmallerContextThanAskedForSaysWhy:
         assert "UI Automation is not answering" in note
         assert "RuntimeError" in note
 
+    def test_the_composed_failure_is_kept_when_a_later_singleton_opens(
+        self, monkeypatch
+    ):
+        """The note names the composed list, so it carries that list's own error.
+
+        With the composed attempt and the first singleton both failing and the
+        second singleton opening, the error of the first singleton used to be
+        the one reported -- under a note saying the composed list failed.
+        """
+        import pyguitest
+
+        errors = iter(
+            [
+                RuntimeError("composed would not open"),
+                RuntimeError("first half would not open"),
+            ]
+        )
+
+        def fake_connect(backend=None, environment=None, **_kwargs):
+            """Fail the composed list and the first half, then open the second."""
+            try:
+                raise next(errors)
+            except StopIteration:
+                return self._session()
+
+        monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        notes: list[str] = []
+        assert Recorder(Settings())._open_session("", notes) is not None
+        (note,) = [n for n in notes if "smaller context" in n]
+        assert "composed would not open" in note
+        assert "first half would not open" not in note
+
     def test_a_first_attempt_that_works_says_nothing(self, monkeypatch):
+        """A session that opens as asked for carries no note about its size."""
         import pyguitest
 
         monkeypatch.setattr(pyguitest, "connect", lambda **_kwargs: self._session())
@@ -846,9 +882,11 @@ class TestASmallerContextThanAskedForSaysWhy:
         assert not any("smaller context" in n for n in notes)
 
     def test_no_session_at_all_keeps_its_own_message(self, monkeypatch):
+        """With nothing opening, the note says context is off, not that it shrank."""
         import pyguitest
 
         def fake_connect(**_kwargs):
+            """Refuse every attempt."""
             raise RuntimeError("nothing answers")
 
         monkeypatch.setattr(pyguitest, "connect", fake_connect)

@@ -810,16 +810,20 @@ class Recorder:
         The resolver says in the recording's notes which one it lost.
 
         Returns the session and the failure that came *before* it, if any: the
-        error of the last fuller attempt that did not work, or None when the
-        first attempt did. With no session at all it is the last failure. The
-        earlier failure is the one worth keeping -- a session that opens with
-        less than was asked for is otherwise indistinguishable from one that
-        was never going to have more, and the reason is the only clue to a
-        drop-out that comes and goes.
+        error of the first attempt, which is the composed list whenever there
+        is more than one name, or None when that attempt worked. With no
+        session at all it is the last failure. The first failure is the one
+        worth keeping, and not that of whichever singleton failed just before
+        the one that opened: the note built from it says the composed list
+        failed, so it has to be the composed list's own error. A session that
+        opens with less than was asked for is otherwise indistinguishable from
+        one that was never going to have more, and the reason is the only clue
+        to a drop-out that comes and goes.
         """
         import pyguitest
 
         failure: Exception | None = None
+        first_failure: Exception | None = None
         # The display goes through the environment rather than
         # `backend_options`: pyguitest's x11 factory takes only the
         # environment, so `display_name` -- which `X11Backend.__init__` does
@@ -832,9 +836,11 @@ class Recorder:
                         pyguitest.connect(
                             backend=names, environment=pyguitest.detect(scoped)
                         ),
-                        failure,
+                        first_failure,
                     )
                 except Exception as exc:  # noqa: BLE001 - context is optional
+                    if first_failure is None:
+                        first_failure = exc
                     failure = exc
         return (None, failure)
 
