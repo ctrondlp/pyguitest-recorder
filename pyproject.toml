@@ -49,8 +49,8 @@ classifiers = [
     # The suite and a live recording both pass on FreeBSD 15.
     "Operating System :: POSIX :: BSD :: FreeBSD",
     "Operating System :: POSIX",
-    # win32 capture: transcribed from Microsoft's documentation and tested
-    # against fakes, not yet run on a Windows machine -- see
+    # win32 capture: run live on Windows 11 with a US-English layout; what
+    # that could not reach (AltGr, dead keys, elevated windows) is listed in
     # docs/developers/status.md.
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",

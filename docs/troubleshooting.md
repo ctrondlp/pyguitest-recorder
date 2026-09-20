@@ -7,6 +7,7 @@ that specific recording.
 - [Why is my script all coordinates?](#why-is-my-script-all-coordinates)
 - [`--doctor` says element resolution is off](#doctor-says-element-resolution-is-off)
 - [Nothing was captured at all](#nothing-was-captured-at-all)
+- [On Windows, one window records nothing](#on-windows-one-window-records-nothing)
 - [The recording stopped when I did not mean it to](#the-recording-stopped-when-i-did-not-mean-it-to)
 - [The check key typed into the application instead of recording a check](#the-check-key-typed-into-the-application-instead-of-recording-a-check)
 - [The script clicked the wrong thing](#the-script-clicked-the-wrong-thing)
@@ -92,13 +93,29 @@ Check which one the application under test actually is: in a GNOME Wayland
 session, some applications are native Wayland and some are XWayland, and they
 look identical on screen.
 
-**Is `python-xlib` installed?** Capture needs the `x11` extra:
-`pip install '.[x11]'`.
+**Is `python-xlib` installed?** On Linux and the BSDs, capture needs the `x11`
+extra: `pip install '.[x11]'`.
 
 **Is this a rootless XWayland?** A private headless GNOME session is not a
 substitute for Xvfb — the RECORD context comes up cleanly, but the compositor
 owns the pointer and neither XTEST nor `uinput` can inject into it, so there
 is nothing to record. Use a real Xvfb for automated capture testing.
+
+## On Windows, one window records nothing
+
+Windows does not show an unelevated process the input going to an elevated
+window (UIPI), so a recorder started from an ordinary prompt sees nothing
+typed into Task Manager, `regedit`, an MMC snap-in such as `services.msc`, or
+anything else that runs as administrator. Nothing fails; the recording just
+has no events for it.
+
+`pyguitest-recorder --doctor` says whether the recorder is elevated and, if it
+is not, whether the window in front is. To record an administrator window,
+start the recorder from an elevated prompt too.
+
+The other Windows-only limit is a keyboard layout with dead keys or AltGr,
+which has been unit-tested but not tried on a real keyboard; if `é` or `@`
+comes out wrong, that is worth a report.
 
 ## The recording stopped when I did not mean it to
 

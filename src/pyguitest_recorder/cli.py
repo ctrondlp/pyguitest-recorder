@@ -20,6 +20,7 @@ from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
 from .model import Event, Origin, Recording, describe_assertion
+from .platforms import is_windows
 from .recorder import (
     ContextReport,
     Recorder,
@@ -288,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the recorder. Returns the process exit status."""
+    _tolerate_unencodable_output()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -494,6 +496,48 @@ def _trimmed_events(
     return kept
 
 
+def _write_source(source: str) -> None:
+    """Write a generated script to stdout as UTF-8, whatever stdout's code page is.
+
+    A Python source file is UTF-8 unless it says otherwise, so this has to be
+    too -- and stdout is not, on Windows, once it is redirected: it takes the
+    ANSI code page (cp1252 here), so `pyguitest-recorder > script.py` failed
+    with "'charmap' codec can't encode" on any recording that typed an emoji or
+    a non-Latin word, leaving an empty file. Even text the code page *could*
+    hold would have been written as cp1252 and read back by Python as invalid
+    UTF-8. An interactive console is left alone: it takes text and does its own
+    Unicode, which is what a person reading the output wants.
+
+    The stream's own buffer is written when there is one, after flushing what
+    the text layer is holding so the order is kept; a stand-in stdout with no
+    buffer gets the text as before.
+    """
+    stream = sys.stdout
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None or stream.isatty():
+        stream.write(source)
+        return
+    stream.flush()
+    buffer.write(source.encode("utf-8"))
+    buffer.flush()
+
+
+def _tolerate_unencodable_output() -> None:
+    """Stop a character stdout cannot hold from turning a report into a crash.
+
+    Diagnostics quote things this program does not control -- a config path
+    under a user name, a window title in a note -- and on a redirected Windows
+    stdout (the ANSI code page) any of them can hold a character it cannot
+    encode. `--doctor` printed those with `print`, so one such name ended the
+    report with a traceback instead of a line saying `?`. stderr already
+    replaces; this gives stdout the same.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
+
+
 def _emit(
     recording: Recording,
     settings: Settings,
@@ -542,7 +586,7 @@ def _emit(
         Path(settings.output).write_text(source, encoding="utf-8")
         print(f"Script written to {settings.output}", file=sys.stderr)
     else:
-        sys.stdout.write(source)
+        _write_source(source)
     _summarize(analyzed, problems)
     return 1 if problems else 0
 
@@ -574,18 +618,40 @@ def _doctor(settings: Settings) -> int:
     """Report whether this session can be recorded, and what would degrade."""
     print(_version_string())
     print(f"generator profile: {PROFILE}")
+    backend_name = "n/a"
     try:
         backend = choose_backend(settings)
+        backend_name = backend.name
         print(f"capture:           {backend.name} (available)")
         capture_ok = True
     except CaptureUnavailable as exc:
         print(f"capture:           unavailable\n                   {exc}")
         capture_ok = False
-    environment = describe_environment(None, "n/a")
+    environment = describe_environment(None, backend_name)
     print(f"session:           {environment.session_type or 'unknown'}")
     print(f"compositor:        {environment.compositor or 'unknown'}")
-    print(f"display:           {environment.display or 'unset'}")
+    # The backend decides, not the host: a Windows machine can run an X server
+    # (Xming, VcXsrv, WSLg) and `backend = "xrecord"` there records that
+    # server's clients, so pyguitest still detecting a Windows session must not
+    # hide the `$DISPLAY` being recorded or print Windows-only advice for it.
+    # With no backend to ask, the detected session is the best that is left.
+    on_windows = (
+        backend_name == "win32" if capture_ok else is_windows(environment.session_type)
+    )
+    # `$DISPLAY` names an X server; on Windows there is none to name, and
+    # "unset" read as something missing rather than as not applicable.
+    print(
+        "display:           "
+        + (
+            "n/a (Windows has no X display)"
+            if on_windows
+            else environment.display or "unset"
+        )
+    )
     print(f"pyguitest:         {environment.pyguitest_version or 'not importable'}")
+    if on_windows:
+        for line in _windows_lines():
+            print(line)
 
     # Capture answers "can input be seen"; this answers what the generated
     # script will look like, which is the part worth knowing before spending
@@ -601,6 +667,57 @@ def _doctor(settings: Settings) -> int:
         print(f"  {'*' if path.is_file() else '-'} {path}")
     print(f"verdict:           {_verdict(capture_ok, context)}")
     return 0 if capture_ok else 1
+
+
+def _windows_lines() -> list[str]:
+    """What only a Windows session can get wrong, for `--doctor`.
+
+    Two facts the capture line cannot carry. **Elevation**: a low-level hook in
+    an unelevated process is not reliably shown the input aimed at an elevated
+    window (User Interface Privilege Isolation), so a recording of Task
+    Manager, an installer, or an MMC console made from an ordinary prompt has
+    silent gaps -- no error, no note, just missing input -- and a replay cannot
+    click them either. **The hook timeout**: the limit Windows puts on how long
+    the hook may take, past which it is removed with no word to this process
+    (see `backends/win32.py`); the configured value is what says how much room
+    there is.
+
+    Read off pyguitest's detection with a default for each field, since an
+    older pyguitest does not carry them and a doctor that raised for want of one
+    would be worse than one that said less. Nothing is printed for a field the
+    installed pyguitest cannot answer.
+    """
+    try:
+        import pyguitest
+
+        detected = pyguitest.detect()
+    except Exception:  # noqa: BLE001 - a diagnostic must not fail for want of one
+        return []
+    lines = []
+    elevated = getattr(detected, "is_elevated", None)
+    if elevated is not None:
+        state = "elevated (administrator)" if elevated else "not elevated"
+        lines.append(f"elevation:         {state}")
+    timeout = getattr(detected, "low_level_hooks_timeout_ms", None)
+    if timeout:
+        lines.append(
+            f"hook timeout:      {timeout} ms (a slower hook is removed without a word)"
+        )
+    if elevated is False:
+        if getattr(detected, "foreground_is_elevated", False):
+            lines.append(
+                "note:              the window in front right now is elevated, and "
+                "an unelevated recorder is not reliably shown its input -- "
+                "recording it would come out with gaps"
+            )
+        else:
+            lines.append(
+                "note:              input aimed at an elevated window (Task Manager, "
+                "regedit, an MMC console, anything run as administrator) is not "
+                "reliably shown to an unelevated recorder, and a replay cannot "
+                "click it; record from an elevated prompt to include one"
+            )
+    return lines
 
 
 def _stop_hint(settings: Settings) -> str:

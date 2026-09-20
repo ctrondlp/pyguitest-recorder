@@ -35,6 +35,47 @@ was released.
 
 ### Fixed
 
+- **On a keyboard layout with AltGr, typing `@` or `€` on Windows was
+  recorded as a Ctrl+Alt chord and the character was lost.** Found reading the
+  win32 backend against what Windows documents, not by a live run -- the
+  machine here has a US layout, which has no AltGr. On every layout that does,
+  a press of it reaches a low-level hook as a left Control with scan code
+  `0x21D` that nobody pressed, then the real right Alt; the normalizer read
+  `ctrl`+`alt` held and turned `AltGr+Q` into a hotkey. X11 has one key,
+  `ISO_Level3_Shift`, which the normalizer already treats as making text, so
+  the backend now says that here too: the fake Control is kept in the shadow
+  keyboard state (`ToUnicodeEx` needs Ctrl and Alt both down to answer with the
+  AltGr character) but never reported, and the Alt is named to match. A real
+  Ctrl+Right-Alt on a US layout, whose Control has the ordinary scan code, is
+  still a chord. Covered by tests against faked hook structures only.
+- **A recording written to a file on Windows was in the wrong encoding.**
+  Windows encodes redirected output in the ANSI code page, so
+  `pyguitest-recorder > demo.py` turned an emoji into an error or a `?`, in a
+  script Python then read as UTF-8. Found live: `Ada😀` typed, recorded and
+  replayed. The script now goes to stdout's buffer as UTF-8 whenever stdout is
+  not a terminal, and a diagnostic containing a character the code page cannot
+  hold prints with a backslash escape rather than raising.
+- **Ctrl-C did nothing while a Windows recording was running.** The consumer
+  sat in an untimed `queue.get()`, which Windows never interrupts, so the only
+  way out was the stop chord. The wait is now timed (a quarter of a second),
+  and Ctrl-C lands in about two seconds, measured.
+- **A recording made in Windows Terminal recorded the terminal.** Its window
+  belongs to a process that is not an ancestor of the recorder -- the console
+  is hosted by a pseudo-console -- so the ancestry walk that excludes the
+  recorder's own terminal found nothing and the recording began with clicks on
+  it. The console's owning window is excluded as well now.
+- **A recording that quietly fell back to a smaller UI Automation context said
+  nothing about why.** When the fuller connection failed and a smaller one
+  opened, the clicks in the result had lost their element names and the notes
+  did not say so. They now name what failed. It was seen once and did not
+  reproduce, so its cause is still unknown.
+- **`--doctor` reported X11 facts on Windows.** It printed `display: unset` --
+  Windows has no display to set -- and said nothing about the one thing that
+  decides whether a Windows recording sees a window at all. It now says whether
+  the recorder is elevated, whether the window in front is, and the hook
+  timeout, and warns that Task Manager, `regedit` and other administrator
+  windows are not seen by an unelevated recorder.
+
 - **A win32 recording of typed text produced `gui.tap_key("0xe7")` instead of
   `gui.type_text(...)`, because the recorder never read the character
   `SendInput`'s `KEYEVENTF_UNICODE` actually sent.** Found live, the first

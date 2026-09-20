@@ -134,6 +134,158 @@ def test_regenerate_writes_to_stdout_without_output(saved, tmp_path, capsys):
     assert "import pyguitest" in capsys.readouterr().out
 
 
+class _Stdout:
+    """A stdout with a text layer over a byte buffer, as a redirected one has.
+
+    `encoding` is the code page the text layer would use -- cp1252 is what a
+    redirected Windows stdout gets -- and `tty` says whether it is a console.
+    """
+
+    def __init__(self, encoding, tty=False):
+        """Set the text layer's encoding and whether this pretends to be a console."""
+        import io
+
+        self.bytes = io.BytesIO()
+        self.buffer = self.bytes
+        self.encoding = encoding
+        self._tty = tty
+        self.text = []
+
+    def isatty(self):
+        """Report the console-ness this was built with."""
+        return self._tty
+
+    def write(self, value):
+        """Collect text written through the text layer, apart from the bytes."""
+        self.text.append(value)
+        return len(value)
+
+    def flush(self):
+        """Do nothing: there is no device behind either layer to flush."""
+
+
+def _unicode_recording(tmp_path):
+    """A saved recording that typed an emoji and a non-Latin word."""
+    from pyguitest_recorder.model import TextInput
+
+    window = WindowRef(title="Example", app_id="org.example.App", geometry=(0, 0, 8, 6))
+    recording = Recording()
+    target = Target(x=1, y=2, window=window)
+    recording.add(Click(timestamp=0.0, target=target))
+    recording.add(
+        TextInput(
+            timestamp=1.0, text="caf\u00e9 \u65e5\u672c\u8a9e \U0001f600", target=target
+        )
+    )
+    path = tmp_path / "unicode.json"
+    recording.save(path)
+    return path
+
+
+def test_a_redirected_script_is_utf8_even_on_a_legacy_code_page(tmp_path, monkeypatch):
+    """A redirected stdout gets UTF-8 bytes whatever code page it reports.
+
+    Found on Windows, where a *redirected* stdout takes the ANSI code page:
+    `pyguitest-recorder --regenerate rec.json > script.py` died with
+    "'charmap' codec can't encode" on any recording that typed an emoji or a
+    non-Latin word, and left an empty file. Even text cp1252 could hold would
+    have been written as cp1252 and read back by Python as invalid UTF-8.
+    """
+    fake = _Stdout(encoding="cp1252")
+    monkeypatch.setattr("sys.stdout", fake)
+    code = main(
+        [
+            "--regenerate",
+            str(_unicode_recording(tmp_path)),
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert code == 0
+    source = fake.bytes.getvalue().decode("utf-8")
+    assert "\U0001f600" in source and "\u65e5\u672c\u8a9e" in source
+    compile(source, "script.py", "exec")
+    assert fake.text == []
+
+
+def test_a_console_is_handed_text_not_bytes(tmp_path, monkeypatch):
+    """An interactive console does its own Unicode, so it keeps getting text.
+
+    Bytes written under it would be shown as mojibake.
+    """
+    fake = _Stdout(encoding="utf-8", tty=True)
+    monkeypatch.setattr("sys.stdout", fake)
+    main(
+        [
+            "--regenerate",
+            str(_unicode_recording(tmp_path)),
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert fake.bytes.getvalue() == b""
+    assert "\U0001f600" in "".join(fake.text)
+
+
+def test_a_stdout_without_a_buffer_still_gets_the_script(saved, tmp_path, capsys):
+    """A stream with no `.buffer` falls back to text rather than failing.
+
+    That is what a test double or an embedding host may supply.
+    """
+    from pyguitest_recorder.cli import _write_source
+
+    class Bare:
+        """A stand-in stream: a text `write` and nothing underneath it."""
+
+        def __init__(self):
+            """Start with nothing written."""
+            self.written = ""
+
+        def isatty(self):
+            """Never a console."""
+            return False
+
+        def write(self, value):
+            """Accumulate the text handed to it."""
+            self.written += value
+
+    import sys
+
+    bare, real = Bare(), sys.stdout
+    sys.stdout = bare
+    try:
+        _write_source("print('hi')\n")
+    finally:
+        sys.stdout = real
+    assert bare.written == "print('hi')\n"
+
+
+def test_diagnostics_survive_a_character_the_code_page_cannot_hold():
+    """A character the code page cannot encode does not end a `--doctor` report.
+
+    `--doctor` prints paths and notes that quote things this program does not
+    control -- a user name, a window title. On a redirected Windows stdout one
+    non-ANSI character in any of them ended the report with a traceback.
+    """
+    import io
+
+    from pyguitest_recorder.cli import _tolerate_unencodable_output
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="ascii", errors="strict")
+    import sys
+
+    real = sys.stdout
+    sys.stdout = stream
+    try:
+        _tolerate_unencodable_output()
+        print("C:\\Users\\\u5c71\u7530\\config.toml")
+        stream.flush()
+    finally:
+        sys.stdout = real
+    assert b"config.toml" in raw.getvalue()
+
+
 def test_stop_progress_message_names_the_configured_key_and_interval():
     settings = Settings(stop_key="ctrl+Escape", stop_key_interval=2.0)
     message = _stop_progress_message(settings, 1, 2)
@@ -398,3 +550,167 @@ def test_drop_parses_a_comma_separated_list():
 def test_a_malformed_drop_list_is_rejected_by_the_parser(capsys):
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--drop", "not-a-number"])
+
+
+class TestDoctorOnWindows:
+    """What `--doctor` says that only a Windows session can get wrong."""
+
+    def _detected(self, **fields):
+        """What pyguitest's detection returns on Windows, with `fields` changed."""
+        from types import SimpleNamespace
+
+        base = {
+            "session_type": "SessionType.WIN32",
+            "compositor": "Compositor.DWM",
+            "desktop": "",
+            "is_elevated": False,
+            "foreground_is_elevated": False,
+            "low_level_hooks_timeout_ms": 300,
+        }
+        return SimpleNamespace(**{**base, **fields})
+
+    def _capture(self, monkeypatch, backend):
+        """Fix which capture backend `--doctor` finds, whatever this host offers.
+
+        `backend` is the name it selects, or None for none being available.
+        The report's platform follows the backend when there is one, so a test
+        that leaves it to the host passes on one operating system and fails on
+        the next.
+        """
+        from types import SimpleNamespace
+
+        from pyguitest_recorder import cli
+        from pyguitest_recorder.backends.base import CaptureUnavailable
+        from pyguitest_recorder.recorder import ContextReport
+
+        def choose(_settings):
+            """Answer as the host would if `backend` were all it had."""
+            if backend is None:
+                raise CaptureUnavailable("no capture here")
+            return SimpleNamespace(name=backend)
+
+        monkeypatch.setattr(cli, "choose_backend", choose)
+        monkeypatch.setattr(cli, "probe_context", lambda _s: ContextReport())
+
+    def _lines(self, monkeypatch, detected):
+        """The Windows-only lines `--doctor` prints for this detection."""
+        import pyguitest
+
+        from pyguitest_recorder.cli import _windows_lines
+
+        monkeypatch.setattr(pyguitest, "detect", lambda *_a, **_k: detected)
+        return _windows_lines()
+
+    def test_an_unelevated_recorder_is_told_what_it_cannot_reach(self, monkeypatch):
+        """An unelevated recorder is told about the elevated windows it cannot see."""
+        lines = self._lines(monkeypatch, self._detected())
+        text = "\n".join(lines)
+        assert "elevation:         not elevated" in text
+        assert "300 ms" in text
+        # An elevated window's input is the silent gap: no error, no note, just
+        # missing events -- so the doctor has to be where it is said.
+        assert "elevated window" in text and "administrator" in text
+
+    def test_an_elevated_foreground_window_gets_the_sharper_warning(self, monkeypatch):
+        """An elevated window in front right now is named, not just possible."""
+        lines = self._lines(monkeypatch, self._detected(foreground_is_elevated=True))
+        assert any("in front right now is elevated" in line for line in lines)
+        assert not any("Task Manager" in line for line in lines)
+
+    def test_an_elevated_recorder_is_not_warned(self, monkeypatch):
+        """An elevated recorder sees everything, so it is given no warning."""
+        lines = self._lines(monkeypatch, self._detected(is_elevated=True))
+        assert "elevation:         elevated (administrator)" in "\n".join(lines)
+        assert not any(line.startswith("note:") for line in lines)
+
+    def test_an_older_pyguitest_with_none_of_the_fields_prints_nothing_wrong(
+        self, monkeypatch
+    ):
+        """A pyguitest that carries none of the fields yields no lines, not an error."""
+        from types import SimpleNamespace
+
+        bare = SimpleNamespace(session_type="SessionType.WIN32")
+        assert self._lines(monkeypatch, bare) == []
+
+    def test_a_detection_that_raises_does_not_fail_the_diagnostic(self, monkeypatch):
+        """A detection that raises leaves the Windows lines out and `--doctor` up."""
+        import pyguitest
+
+        from pyguitest_recorder.cli import _windows_lines
+
+        def boom(*_a, **_k):
+            """Stand in for a detector that cannot run."""
+            raise RuntimeError("no detector")
+
+        monkeypatch.setattr(pyguitest, "detect", boom)
+        assert _windows_lines() == []
+
+    def test_a_windows_report_has_no_x_display_line_to_misread(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """A native Windows report says `$DISPLAY` is not applicable, not unset."""
+        import pyguitest
+
+        self._capture(monkeypatch, "win32")
+        monkeypatch.setattr(pyguitest, "detect", lambda *_a, **_k: self._detected())
+        main(["--doctor", "--config", str(_empty(tmp_path))])
+        out = capsys.readouterr().out
+        assert "display:           n/a (Windows has no X display)" in out
+        assert "display:           unset" not in out
+        assert "elevation:" in out
+
+    def test_a_linux_report_keeps_its_display_line_and_has_no_windows_lines(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """An X11 report keeps its display line and gets no Windows-only ones."""
+        import pyguitest
+
+        self._capture(monkeypatch, "xrecord")
+        monkeypatch.setattr(
+            pyguitest,
+            "detect",
+            lambda *_a, **_k: self._detected(session_type="SessionType.X11"),
+        )
+        main(["--doctor", "--config", str(_empty(tmp_path))])
+        out = capsys.readouterr().out
+        assert "display:" in out and "n/a (Windows" not in out
+        assert "elevation:" not in out and "hook timeout:" not in out
+
+    def test_an_x_recording_on_a_windows_host_is_reported_as_an_x_one(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Selecting `xrecord` on Windows gets the X display and no Windows advice.
+
+        Windows can run an X server (Xming, VcXsrv, WSLg), so pyguitest still
+        detects a Windows session there. The recording is of that server's
+        clients all the same, and the report used to hide the display being
+        recorded and advise about elevation for a recording that has none.
+        """
+        import pyguitest
+
+        self._capture(monkeypatch, "xrecord")
+        monkeypatch.setenv("DISPLAY", ":7")
+        monkeypatch.setattr(pyguitest, "detect", lambda *_a, **_k: self._detected())
+        main(["--doctor", "--config", str(_empty(tmp_path))])
+        out = capsys.readouterr().out
+        assert "capture:           xrecord (available)" in out
+        assert "display:           :7" in out and "n/a (Windows" not in out
+        assert "elevation:" not in out and "hook timeout:" not in out
+
+    def test_a_win32_backend_is_reported_as_windows_whatever_the_session_says(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The selected backend outranks the detected session when capture works."""
+        import pyguitest
+
+        self._capture(monkeypatch, "win32")
+        monkeypatch.setenv("DISPLAY", ":7")
+        monkeypatch.setattr(
+            pyguitest,
+            "detect",
+            lambda *_a, **_k: self._detected(session_type="SessionType.X11"),
+        )
+        main(["--doctor", "--config", str(_empty(tmp_path))])
+        out = capsys.readouterr().out
+        assert "display:           n/a (Windows has no X display)" in out
+        assert "elevation:" in out
