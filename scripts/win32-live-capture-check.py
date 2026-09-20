@@ -437,6 +437,7 @@ def check(*, do_replay: bool) -> int:
     sender_error: BaseException | None = None
 
     def run_sender() -> None:
+        """Drive the probe window on its own thread, keeping any failure."""
         nonlocal sender_error
         try:
             drive_probe_window(title)

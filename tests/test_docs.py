@@ -125,6 +125,14 @@ def test_relative_links_point_at_something_that_exists():
                 continue
             linked = (_ROOT / page).parent / path
             assert linked.exists(), f"{page} links to missing {path}"
+            if linked.is_dir():
+                # A directory is only a page where it has a README. Without one
+                # the link lands a reader on a file listing, which is what
+                # `docs/developers/` did until the README named the pages in
+                # it -- and `exists()` alone cannot tell the two apart.
+                assert (linked / "README.md").exists(), (
+                    f"{page} links to the directory {path}, which has no README"
+                )
 
 
 def test_each_pages_own_table_of_contents_resolves():

@@ -319,8 +319,9 @@ Notepad), and what GTK4 hit-testing costs — are in
   coordinates?", and the rest
 - [docs/testable-guis.md](docs/testable-guis.md) — how to build a GUI that can
   be tested at all; written to be handed to application developers
-- [docs/developers/](docs/developers/) — why Wayland has no capture backend,
-  the element-resolution rules, and what has actually been run
+- [docs/developers/architecture.md](docs/developers/architecture.md) and
+  [docs/developers/status.md](docs/developers/status.md) — why Wayland has no
+  capture backend, the element-resolution rules, and what has actually been run
 
 ## License
 
