@@ -69,6 +69,20 @@ def _number(data: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def _whole(data: dict[str, Any], key: str, default: int = 0) -> int:
+    """One whole-number field of a serialized object, or `ValueError` naming it.
+
+    `bool` is refused by name for the same reason `_number` refuses it: it is
+    an `int` subclass, so `"format": true` would otherwise be read as the
+    number 1. A float is refused rather than truncated, since a format is a
+    version a comparison is made against, not a measurement.
+    """
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"'{key}' is not a whole number (got {type(value).__name__})")
+    return value
+
+
 def _screen(entry: Any) -> tuple[int, int, int, float]:
     """One `screens` entry as (index, width, height, scale), or `ValueError`."""
     if not isinstance(entry, (list, tuple)) or len(entry) != 4:
@@ -246,7 +260,13 @@ class Recording:
                 "recording is not a JSON object at the top level "
                 f"(got {type(data).__name__})"
             )
-        version = data.get("format", 0)
+        # Read through the same field check as everything else below it. A
+        # quoted version -- `"format": "1"`, which is what a hand-edited file
+        # and a strict JSON writer both produce -- reached the comparison
+        # beneath as a string and raised `TypeError: '>' not supported between
+        # instances of 'str' and 'int'`, outside the `ValueError` that
+        # `--regenerate` promises and past `main()`'s `except ValueError`.
+        version = _whole(data, "format")
         if version > FORMAT_VERSION:
             raise ValueError(
                 f"recording format {version} is newer than this recorder "

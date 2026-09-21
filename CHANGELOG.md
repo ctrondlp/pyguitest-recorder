@@ -35,6 +35,34 @@ was released.
 
 ### Fixed
 
+- **A chord's `keys` could crash -- or silently misread -- the same way.**
+  The field was converted *after* `event_from_dict`'s error translation rather
+  than inside it, so `"keys": 5` and `"keys": null` escaped as a bare
+  `TypeError: 'int' object is not iterable`: outside the `ValueError` that
+  function and `--regenerate` promise, and so one more case of a traceback and
+  exit 1 where the message and exit 2 belong. The shapes that did *not* crash
+  were the worse outcome -- `"keys": "ctrl+c"` became a six-key chord of one
+  character each (`tuple("ctrl+c")`) and `"keys": {"ctrl": 1}` became
+  `("ctrl",)`, both accepted in silence, in the very field a generated
+  `gui.hotkey(...)` line is built from. `keys` is now read as a list or tuple
+  of key names and anything else is refused by name. A hand-typed
+  `"ctrl+c"`-style spelling is refused along with them, deliberately: this
+  recorder writes and reads the list form, and accepting a second spelling
+  would be inventing syntax no `--regenerate` output contains.
+
+- **A quoted `format` still crashed `--regenerate` outside the error it
+  promises.** The pass above checked `environment`, `started_at` and `raw` and
+  left the version line over them alone: `"format": "1"` -- what a hand-edited
+  file, or any writer that quotes its numbers, produces -- reached
+  `version > FORMAT_VERSION` as a `str` and raised `TypeError: '>' not
+  supported between instances of 'str' and 'int'`. `main()` catches only
+  `ValueError`, so the first line of the file a reader is invited to edit gave
+  a traceback and exit 1 instead of `pyguitest-recorder: ...` and exit 2: the
+  same defect, one field over, and the one reached first. `"format": true` was
+  quieter than that -- a `bool` is an `int` subclass, so it loaded as format 1.
+  `format` is now read through the same check every other field uses, which
+  refuses a `bool` and a float by name.
+
 - **A hand-edited recording could crash `--regenerate` outside the error it
   promises.** `Recording.from_dict` documents that a malformed file raises
   `ValueError` -- `--regenerate` is where someone goes to edit one -- and it
