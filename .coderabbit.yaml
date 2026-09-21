@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+reviews:
+  pre_merge_checks:
+    docstrings:
+      # Docstring Coverage is scored over the whole diff against a single
+      # percentage threshold, and the schema gives it no per-path option:
+      # `mode` and `threshold` are all it takes. What it cannot see is that
+      # pyproject.toml's own ruff config *deliberately* ignores D100-D104
+      # and D107 (missing docstrings) under tests/*: every test in this
+      # suite is named for what it asserts rather than carrying a docstring
+      # that restates that name. Leaving this check on therefore fights
+      # that convention on every PR that adds tests -- which is most of
+      # them -- for no gain, since coverage of src/ and scripts/ is already
+      # enforced by ruff's pydocstyle rules in the gate
+      # (./scripts/pre-commit-test.sh), which IS path-aware.
+      mode: "off"
+  # The exclusion the check above cannot express, stated where it *is*
+  # path-scoped: the reviewer. This holds whether or not that check is ever
+  # switched back on.
+  path_instructions:
+    - path: "tests/**"
+      instructions: >-
+        Do not ask for docstrings on test functions, methods or classes.
+        `[tool.ruff.lint.per-file-ignores]` in pyproject.toml ignores
+        D100-D104 and D107 under tests/* on purpose: each test is named for
+        the behaviour it pins, and a docstring restating that name is noise.
+        The test modules do carry a docstring, and a comment explaining what
+        a test is proving is welcome where the name alone does not carry it.
+        Docstrings ARE required in src/ and scripts/, where ruff's
+        pydocstyle rules enforce them.

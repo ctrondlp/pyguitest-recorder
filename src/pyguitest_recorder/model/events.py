@@ -568,6 +568,27 @@ def _require_timestamp(payload: dict[str, Any], whole: dict[str, Any]) -> None:
         raise ValueError(f"'timestamp' is not a finite number: {shown}")
 
 
+def _keys(value: Any) -> tuple[str, ...]:
+    """One chord's key names as a tuple, or `ValueError` naming the field.
+
+    Read rather than trusted to `tuple(...)`, which is what this used to be:
+    that call sat outside the error translation in `event_from_dict`, so
+    `"keys": 5` and `"keys": null` raised a bare `TypeError` -- past the
+    `ValueError` `--regenerate` promises and past `main()`'s `except
+    ValueError` -- while `"keys": "ctrl+c"` and `"keys": {"ctrl": 1}` were
+    *accepted* and silently became the six one-character keys
+    `("c", "t", "r", "l", "+", "c")` and the single key `("ctrl",)`. A string
+    is iterable and a mapping iterates its keys, which is the same trap
+    `recording.py`'s `_list` and `_text` exist for on the fields next to this
+    one.
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"'keys' is not a list (got {type(value).__name__})")
+    if any(not isinstance(name, str) for name in value):
+        raise ValueError(f"'keys' holds something that is not a key name: {value!r}")
+    return tuple(value)
+
+
 def event_from_dict(data: dict[str, Any]) -> Event:
     """Rebuild an event from its serialized form, by its `kind` tag.
 
@@ -603,10 +624,10 @@ def event_from_dict(data: dict[str, Any]) -> Event:
         for name, context in _CONTEXT_FIELDS.items():
             if name in payload:
                 payload[name] = _rebuild(context, payload[name])
+        if "keys" in payload:
+            payload["keys"] = _keys(payload["keys"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed {kind!r} event ({exc})") from exc
-    if "keys" in payload:
-        payload["keys"] = tuple(payload["keys"])
     known = {f.name for f in fields(cls)}
     try:
         return cls(**{k: v for k, v in payload.items() if k in known})

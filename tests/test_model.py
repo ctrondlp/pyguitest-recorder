@@ -234,6 +234,26 @@ def test_a_required_field_missing_entirely_raises_a_clear_error():
         event_from_dict({"kind": "mouse_move", "timestamp": 1.0})
 
 
+def test_a_malformed_chord_raises_a_clear_error_instead_of_a_type_error():
+    # `keys` was the one field the error translation did not cover: it was
+    # converted with `tuple(...)` *after* that try block, so `"keys": 5` and
+    # `"keys": null` escaped as a bare TypeError -- past `main()`'s `except
+    # ValueError`, giving a traceback and exit 1 where `--regenerate` promises
+    # the message and exit 2. The two shapes on the right were worse than a
+    # crash: `tuple("ctrl+c")` is six keys of one character each and
+    # `tuple({"ctrl": 1})` is `("ctrl",)`, both accepted in silence.
+    for bad in (5, None, "ctrl+c", {"ctrl": 1}, [1, 2]):
+        with pytest.raises(ValueError, match="malformed 'hotkey' event"):
+            event_from_dict({"kind": "hotkey", "timestamp": 1.0, "keys": bad})
+
+
+def test_a_well_formed_chord_still_round_trips():
+    # Refusing the shapes above must not cost the working one: a chord written
+    # as its serialized list comes back as the tuple the model holds.
+    event = event_from_dict({"kind": "hotkey", "timestamp": 1.0, "keys": ["ctrl", "s"]})
+    assert event.keys == ("ctrl", "s")
+
+
 def test_an_event_with_no_timestamp_raises_a_clear_error():
     # `Event.timestamp` defaults to 0.0 for one built in memory, which read a
     # missing one as "the recording began here" -- over the field this model
@@ -345,6 +365,19 @@ def test_recording_from_dict_rejects_a_non_list_raw():
     # is the one field whose whole purpose is fidelity.
     with pytest.raises(ValueError, match="'raw' is not a list"):
         Recording.from_dict({"raw": "nonsense"})
+
+
+def test_recording_from_dict_rejects_a_format_that_is_not_a_whole_number():
+    # The one field the load contract still let through: `"format": "1"` --
+    # a quoted version, which is what a hand-edited file and a strict JSON
+    # writer both produce -- reached `version > FORMAT_VERSION` and raised
+    # `TypeError: '>' not supported between instances of 'str' and 'int'`.
+    # `main()` catches only ValueError, so the first line a reader would edit
+    # gave a traceback and exit 1 rather than `pyguitest-recorder: ...` and
+    # exit 2. `true` was worse: an int subclass, so it loaded as format 1.
+    for bad in ("1", None, True, 1.5, []):
+        with pytest.raises(ValueError, match="'format' is not a whole number"):
+            Recording.from_dict({"format": bad})
 
 
 def test_recording_from_dict_rejects_a_malformed_environment_field():
