@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -426,6 +427,16 @@ class Recorder:
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
     _consuming: bool = field(default=False, init=False)
+    _lifecycle: threading.Lock = field(default_factory=threading.Lock, init=False)
+    """Guards `_stopping`, `_consuming`, and the decision each makes about who
+    closes the context. `stop` is called from another thread by design -- a
+    watchdog, a timer, the command line's interrupt -- so "is a run consuming
+    right now?" and "then I will not close this" have to be one indivisible
+    step. Read and acted on separately, a `stop` arriving in the gap between
+    `run` starting and `run` marking itself as consuming saw `_consuming`
+    false, closed the session, and left the run to consume its backlog against
+    a dead one: the very failure `_consuming` was added to prevent, in a
+    smaller window."""
     """Whether `run` is still working through events. See `stop`.
 
     `stop` is documented as the way to end a run from another thread, and it
@@ -527,7 +538,12 @@ class Recorder:
         # asks them which window and which element an event landed in, and a
         # `stop` from another thread arriving mid-backlog used to answer those
         # questions with nothing at all.
-        self._consuming = True
+        with self._lifecycle:
+            # If a stop got in first it has already closed the context, so
+            # this run must not claim it -- the backend is stopped and the
+            # loop below will simply find nothing to consume.
+            already_stopped = self._stopping
+            self._consuming = not already_stopped
         try:
             try:
                 for raw in self._backend.events():
@@ -543,12 +559,17 @@ class Recorder:
             for event in self._normalizer.flush():
                 self.recording.add(event)
         finally:
-            self._consuming = False
-            # Only where a `stop` has already been asked for and deferred. A run
-            # that ended on its own stop key is still owed a `stop` by its
-            # caller, and closing the session early here would take the context
-            # away from anything that reads the recording afterwards.
-            if self._stopping:
+            with self._lifecycle:
+                was_consuming = self._consuming
+                self._consuming = False
+                # Only where a `stop` has already been asked for and deferred
+                # to this run. A run that ended on its own stop key is still
+                # owed a `stop` by its caller, and closing the session early
+                # here would take the context away from anything that reads the
+                # recording afterwards; a run that never claimed the context
+                # (a stop that beat it to admission) must not close it twice.
+                mine = was_consuming and self._stopping
+            if mine:
                 self._close_context()
         if self._worst_lag > _LAG_WARN_SECONDS:
             self.recording.environment.notes.append(
@@ -761,12 +782,17 @@ class Recorder:
         it here when there is no run to wait for -- `start`'s own failure path
         being the case that needs that.
         """
-        if self._stopping:
-            return
-        self._stopping = True
+        with self._lifecycle:
+            if self._stopping:
+                return
+            self._stopping = True
+            # Decided here, while the flags cannot move: a run that is
+            # consuming closes the context itself when it is done, and if
+            # there is no such run this call owns it.
+            mine = not self._consuming
         if self._backend is not None:
             self._backend.stop()
-        if not self._consuming:
+        if mine:
             self._close_context()
 
     def _close_context(self) -> None:

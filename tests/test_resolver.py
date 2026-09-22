@@ -559,6 +559,38 @@ def test_an_element_from_a_window_stacked_underneath_is_not_blamed_on_a_session(
     assert "another session" not in warning
 
 
+def test_priming_takes_exactly_one_window_list(monkeypatch):
+    """Its docstring promises one, and the ambiguity check used to ask again.
+
+    `_identify` calls `_app_id_ambiguous`, which lists windows to see whether
+    anything else shares the app id -- so priming N windows cost N+1 lists,
+    not the one claimed, and on a desktop with many windows that is real
+    startup latency for an answer already in hand.
+    """
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
+    windows = [
+        FakeWindow(title="One", pid=11, app_id="shell"),
+        FakeWindow(title="Two", pid=12, app_id="shell"),
+        FakeWindow(title="Three", pid=13, app_id="editor"),
+    ]
+    made = stacked_resolver(windows, element_pid=11)
+    calls = []
+    original = made.session.windows
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    made.session.windows = counted
+    made.prime()
+    assert len(calls) == 1, f"one window list, not {len(calls)}"
+    # And the answer is still right: two windows share "shell", one does not.
+    assert made._identify(windows[0]).app_id_ambiguous is True
+    assert made._identify(windows[2]).app_id_ambiguous is False
+
+
 def test_an_element_from_a_process_with_no_window_here_names_both_causes(
     monkeypatch,
 ):

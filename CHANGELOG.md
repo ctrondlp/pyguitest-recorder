@@ -7,6 +7,23 @@ was released.
 
 ### Fixed
 
+- **A `stop()` arriving before `run()` marked itself as consuming could still
+  close the context out from under it.** The flag that fixed the larger version
+  of this was set after `run()`'s setup checks, leaving a gap in which a stop
+  saw no run in progress, closed the session, and left the run to work through
+  its backlog against a dead one -- losing exactly the window and element
+  attribution the flag was added to protect. Admission and teardown now happen
+  under one lock, so whichever arrives first owns the context and the other
+  leaves it alone. Found by review, not by a failing run: the window is
+  narrow, which is what makes it the kind that survives testing.
+
+- **Priming the resolver cost one window list per window, not the one its own
+  docstring claimed.** `_identify` asks `_app_id_ambiguous` whether anything
+  else shares the app id, and that listed the windows again for each one --
+  N+1 lists on a desktop with many windows, all for an answer already in hand.
+  The snapshot `prime()` has just taken is passed down instead. It is not a
+  cache: it is that moment's list, which is what the ambiguity rule wants.
+
 - **"It came from another session" was usually the wrong explanation on a
   Wayland desktop.** An element belonging to a process that owns no window on
   the recorded display is refused, correctly -- but the note saying why named

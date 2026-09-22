@@ -393,6 +393,32 @@ def test_a_stop_from_another_thread_keeps_the_context_until_run_has_drained() ->
     assert [e.text for e in recording.events] == ["ab"]
 
 
+def test_a_stop_landing_before_run_claims_the_context_does_not_lose_it() -> None:
+    """The same loss as above, in the gap `_consuming` left open.
+
+    `run` marks itself as consuming after its setup checks, so a `stop` from
+    another thread arriving in that gap used to see a run that was not yet
+    consuming, close the session, and leave the run to work through its
+    backlog against a dead one. Narrow, but it is the exact failure the flag
+    was added to prevent, so the transition is made under a lock and this
+    pins it: the stop wins admission, the run consumes nothing, and the
+    context is closed exactly once.
+    """
+    session = FakeSession()
+    recorder = _recorder(session)
+    backend = FakeBackend(fails=False)
+    with mock.patch("pyguitest_recorder.recorder.choose_backend", return_value=backend):
+        recorder.start()
+
+    recorder.stop()  # lands before run() is ever entered
+    assert session.closed, "no run was consuming, so stop closes it itself"
+
+    session.closed = False  # would be set again by a second, wrong close
+    recording = recorder.run()
+    assert not session.closed, "the run must not close a context it never claimed"
+    assert recording.events == []
+
+
 class TestTheCollectedTail:
     """What an interrupted run does with input capture already delivered."""
 

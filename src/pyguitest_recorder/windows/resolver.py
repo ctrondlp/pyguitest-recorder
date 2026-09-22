@@ -1050,9 +1050,12 @@ class DesktopResolver:
         freshly opened copy of the same application. Confirmed live on GNOME
         Shell 51.rc, both the failure and this fix.
 
-        Priming costs one window list -- 2ms measured on that session -- and
-        anchors every window already open to the title it had before the
-        recording started, so a title that moves during the recording is
+        Priming costs one window list -- 2ms measured on that session, and one
+        is the whole point: the snapshot is handed down to `_identify` so that
+        the ambiguity check does not ask again per window, which would make
+        this N+1 lists on a busy desktop and the sentence you are reading
+        false. It anchors every window already open to the title it had before
+        the recording started, so a title that moves during the recording is
         correctly seen to have moved and the generator reaches for the app id
         instead. A window opened *during* a recording is unaffected: the first
         title anyone sees is genuinely its first.
@@ -1065,7 +1068,10 @@ class DesktopResolver:
             return
         for window in windows:
             try:
-                self._identify(window)
+                # The list just taken, not a fresh one per window: identifying
+                # N windows otherwise cost N+1 window lists, against the one
+                # this docstring claims.
+                self._identify(window, among=windows)
             except Exception:  # noqa: BLE001 - one unreadable window is not fatal
                 continue
 
@@ -1215,7 +1221,7 @@ class DesktopResolver:
             app_id_ambiguous=identity.app_id_ambiguous,
         )
 
-    def _identify(self, window: Any) -> _Identity:
+    def _identify(self, window: Any, among: Any = None) -> _Identity:
         """Follow one live window even as its title changes underneath it.
 
         Keyed on the window itself, which pyguitest hashes and compares by
@@ -1253,13 +1259,13 @@ class DesktopResolver:
             known = _Identity(
                 app_id=window.app_id or "",
                 title=title,
-                app_id_ambiguous=self._app_id_ambiguous(window),
+                app_id_ambiguous=self._app_id_ambiguous(window, among),
             )
             self._identity[key] = known
             return known
         if not known.app_id and window.app_id:
             known.app_id = window.app_id
-            known.app_id_ambiguous = self._app_id_ambiguous(window)
+            known.app_id_ambiguous = self._app_id_ambiguous(window, among)
         if title and title != known.title:
             # Warned once per window, not once per title. An editor retitles
             # itself on every keystroke, so naming the new title here put
@@ -1288,7 +1294,7 @@ class DesktopResolver:
             return f"{window.app_id}\x00{window.title}"
         return window
 
-    def _app_id_ambiguous(self, window: Any) -> bool:
+    def _app_id_ambiguous(self, window: Any, among: Any = None) -> bool:
         """Whether another currently open window shares this app_id.
 
         A single process can own several toplevels sharing one app_id -- a
@@ -1299,13 +1305,22 @@ class DesktopResolver:
         rather than the one actually meant. A live list is used rather than
         anything cached, because the answer is about what else is open right
         now, not what this window itself reports.
+
+        `among` is that same list, already in hand. Only `prime` passes it,
+        and only because it has just taken one: without it priming N windows
+        cost N+1 window lists rather than the one its docstring claimed, since
+        every `_identify` asked again. It is not a cache -- it is this
+        moment's list, which is exactly what the rule above wants.
         """
         if not window.app_id or self.session is None:
             return False
-        try:
-            live = self.session.windows()
-        except Exception:  # noqa: BLE001 - fails open, to app_id trusted as before
-            return False
+        if among is not None:
+            live = among
+        else:
+            try:
+                live = self.session.windows()
+            except Exception:  # noqa: BLE001 - fails open, to app_id trusted as before
+                return False
         return any(
             other != window
             and other.app_id == window.app_id
