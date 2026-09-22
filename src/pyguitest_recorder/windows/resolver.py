@@ -268,6 +268,9 @@ class ContextResolver(Protocol):
     def focused(self) -> Target | None:
         """Return the element holding keyboard focus, where that is knowable."""
 
+    def prime(self) -> None:
+        """Note what is already open, before any of it has reacted to input."""
+
     def close(self) -> None:
         """Release anything held open."""
 
@@ -291,6 +294,9 @@ class NullResolver:
     def focused(self) -> Target | None:
         """Nothing here knows what has focus."""
         return None
+
+    def prime(self) -> None:
+        """Nothing here has windows to note."""
 
     def close(self) -> None:
         """Nothing is held open."""
@@ -1028,6 +1034,40 @@ class DesktopResolver:
         """Record a degradation once, however many events hit it."""
         if message not in self._warned:
             self._warned.append(message)
+
+    def prime(self) -> None:
+        """Fix every open window's identity before any input is recorded.
+
+        Identity is otherwise established the first time an event resolves to
+        a window, and that is *consume* time, not capture time. A consumer
+        that has fallen behind therefore meets the window only after it has
+        already reacted to the input being consumed -- so an editor that
+        appends a modified-marker to its title on the first keystroke was
+        first seen as `*Untitled Document 1 - gedit`, a title that does not
+        exist until the recorded typing has happened. Nothing had seen it
+        drift, so `_identify` judged it stable, the generator matched on it,
+        and the replay raised `WindowNotFound` on its first line against a
+        freshly opened copy of the same application. Confirmed live on GNOME
+        Shell 51.rc, both the failure and this fix.
+
+        Priming costs one window list -- 2ms measured on that session -- and
+        anchors every window already open to the title it had before the
+        recording started, so a title that moves during the recording is
+        correctly seen to have moved and the generator reaches for the app id
+        instead. A window opened *during* a recording is unaffected: the first
+        title anyone sees is genuinely its first.
+        """
+        if self.session is None:
+            return
+        try:
+            windows = list(self.session.windows())
+        except Exception:  # noqa: BLE001 - priming is an optimisation, not a need
+            return
+        for window in windows:
+            try:
+                self._identify(window)
+            except Exception:  # noqa: BLE001 - one unreadable window is not fatal
+                continue
 
     def close(self) -> None:
         """Nothing to release: the session belongs to the caller."""

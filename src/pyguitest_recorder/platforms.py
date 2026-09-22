@@ -77,9 +77,18 @@ def foreign_focus_reason(session_type: str | None = None) -> str:
 
     Different mechanisms, so different sentences. On Linux the accessibility
     bus is scoped to the login session rather than to one X display, so it
-    genuinely reports another session's applications. On Windows UI Automation
-    is desktop-wide and the same symptom means something narrower -- an
-    application this recording simply never listed a window for.
+    reports applications that are not on the display being recorded. On
+    Windows UI Automation is desktop-wide and the same symptom means something
+    narrower -- an application this recording simply never listed a window for.
+
+    The Linux sentence deliberately stops short of naming *which* off-display
+    thing it is. It used to say the element "came from another session", which
+    on a Wayland desktop is usually wrong and always unfalsifiable from here:
+    the commonest cause by far is a native Wayland window in this very
+    session, invisible to XRecord and to the X window list while publishing
+    elements to the same bus. Recording gedit on GNOME Shell 51.rc produced
+    this note for the shell's own widgets -- from the session the recording
+    was being made in. See `docs/developers/status.md`.
     """
     if is_windows(session_type):
         return (
@@ -87,8 +96,10 @@ def foreign_focus_reason(session_type: str | None = None) -> str:
             "application this recording lists no window for"
         )
     return (
-        "the accessibility bus is not scoped to one X display, so it came "
-        "from another session"
+        "the accessibility bus covers the whole login session while this "
+        "recording covers one X display, so it belongs to something not on "
+        "it -- a native Wayland window in this same session, or another "
+        "session entirely"
     )
 
 
@@ -100,6 +111,8 @@ def foreign_element_reason(session_type: str | None = None) -> str:
             "applications this recording lists no window for"
         )
     return (
-        "the accessibility bus is not scoped to one X display, so they came "
-        "from another session"
+        "the accessibility bus covers the whole login session while this "
+        "recording covers one X display, so they belong to something not on "
+        "it -- native Wayland windows in this same session, or another "
+        "session entirely"
     )

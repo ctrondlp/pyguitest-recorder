@@ -180,6 +180,22 @@ def selected_backend_name(settings: Settings) -> str:
     return ""
 
 
+def _is_xwayland_display(display: str) -> bool | None:
+    """Whether `display` is served by XWayland, or None if it cannot be asked.
+
+    A thin wrapper so that `describe_environment` stays importable on a host
+    with no X11 extra installed: the capture backend module is only reached
+    when there is a display to ask about at all.
+    """
+    if not display:
+        return None
+    try:
+        from .backends.x11 import is_xwayland
+    except ImportError:  # pragma: no cover - the x11 extra is not installed
+        return None
+    return is_xwayland(display)
+
+
 def _windows_desktop(backend_name: str) -> bool:
     """Whether a recording through `backend_name` is about a Windows desktop.
 
@@ -291,17 +307,51 @@ def describe_environment(
     # out of *that* recording's header would delete the one fact explaining
     # where its coordinates came from.
     windows = _windows_desktop(backend_name)
-    environment.display = "" if windows else os.environ.get("DISPLAY", "")
-    # Prefer what pyguitest detected; fall back to the environment only when
-    # detection failed, since both variables being set does not by itself
-    # prove the target application is an XWayland client.
-    environment.xwayland = not windows and (
-        "XWAYLAND" in environment.session_type.upper()
-        or (
-            not environment.session_type
-            and bool(os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"))
+    # From the environment this was *handed*, not the ambient one. `env`
+    # already carries the display actually being recorded -- `scoped_environment`
+    # puts `--display` into it -- and reading `os.environ` instead recorded the
+    # developer's own `:0` in the header of a recording made on a private Xvfb,
+    # which is the one fact that header exists to carry. It also decides which
+    # server the XWayland probe below asks.
+    source = env if env is not None else os.environ
+    environment.display = "" if windows else source.get("DISPLAY", "")
+    # Ask the server being recorded, and only guess where it cannot be asked.
+    #
+    # Detection alone cannot answer this, because the environment it is handed
+    # has had `WAYLAND_DISPLAY` removed on purpose -- see `scoped_environment`,
+    # which removes it so that a recording of X clients is not described as a
+    # Wayland session. `_classify` needs that variable to say XWAYLAND at all,
+    # so every recording made on a real Wayland desktop came back `x11` with
+    # `xwayland` false: no note, no header block, and a script that looked
+    # exactly like one recorded on Xorg while native Wayland clients had been
+    # invisible to it the whole time. `--doctor` said "xwayland" in the same
+    # breath, because it detects against the ambient environment instead --
+    # two paths disagreeing, with the wrong one going into the file.
+    #
+    # `is_xwayland` asks the display itself, which is the only thing that can
+    # tell a session's own XWayland from a private Xvfb started on that same
+    # session -- both have the two variables set, and only the first is an
+    # XWayland recording. The environment heuristic stays as the fallback for
+    # a host with no python-xlib, where nothing can be asked.
+    probed = _is_xwayland_display(environment.display) if not windows else None
+    if probed is not None:
+        environment.xwayland = probed
+    else:
+        environment.xwayland = not windows and (
+            "XWAYLAND" in environment.session_type.upper()
+            or (
+                not environment.session_type
+                and bool(
+                    os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY")
+                )
+            )
         )
-    )
+    if environment.xwayland:
+        # The session the *recording* is of, said the way a reader of the
+        # header expects to see it. Left as detection found it, this read
+        # "Recorded on: x11 (mutter, GNOME)" -- a line naming a Wayland
+        # compositor and an X11 session in the same breath.
+        environment.session_type = "xwayland"
     if environment.xwayland:
         environment.notes.append(
             "recorded through XWayland: native Wayland clients are invisible "
@@ -375,6 +425,20 @@ class Recorder:
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
+    _consuming: bool = field(default=False, init=False)
+    """Whether `run` is still working through events. See `stop`.
+
+    `stop` is documented as the way to end a run from another thread, and it
+    used to close the resolver and its pyguitest session the moment it was
+    called -- while `run` was still consuming whatever capture had already
+    delivered. Every event left in that backlog then resolved against a closed
+    session, so it kept its coordinates and lost its window and its element:
+    the recording came out as bare `gui.move_mouse(...)`/`gui.click()` with no
+    `expect_window`, validated clean, and said nothing about what it had lost.
+    Reproduced on a live GNOME Shell 51.rc session, where the same gedit
+    interaction generated `gui.button("Open").click()` when the consumer was
+    allowed to catch up first and a bare coordinate when it was not.
+    """
     _stop_key: StopKey = field(init=False)
     """The stop-key recogniser, from the settings this recorder was built with.
 
@@ -420,6 +484,10 @@ class Recorder:
         opening: list[str] = []
         self._session = self._open_session(display, opening)
         self._resolver = self._open_resolver()
+        # Before capture starts, so that every window already open is known by
+        # the title it had before anything was recorded into it -- see
+        # `DesktopResolver.prime`.
+        self._resolver.prime()
         self.recording.environment = describe_environment(
             self._session, self._backend.name, scoped_environment(display)
         )
@@ -454,19 +522,34 @@ class Recorder:
         if self._backend is None or self._normalizer is None:
             raise RuntimeError("start() must be called before run()")
         interrupted = False
+        # From here until the last event has been consumed, `stop` leaves the
+        # resolver and its session alone -- see `stop`. Everything below still
+        # asks them which window and which element an event landed in, and a
+        # `stop` from another thread arriving mid-backlog used to answer those
+        # questions with nothing at all.
+        self._consuming = True
         try:
-            for raw in self._backend.events():
-                if self._absorb(raw):
-                    break
-        except KeyboardInterrupt:
-            interrupted = True
-        if interrupted:
-            self._collect_the_tail()
-        # Presses held for a stop run that never completed are the
-        # application's, not the recorder's, so they belong in the recording.
-        self._consume(self._stop_key.release())
-        for event in self._normalizer.flush():
-            self.recording.add(event)
+            try:
+                for raw in self._backend.events():
+                    if self._absorb(raw):
+                        break
+            except KeyboardInterrupt:
+                interrupted = True
+            if interrupted:
+                self._collect_the_tail()
+            # Presses held for a stop run that never completed are the
+            # application's, not the recorder's, so they belong in the recording.
+            self._consume(self._stop_key.release())
+            for event in self._normalizer.flush():
+                self.recording.add(event)
+        finally:
+            self._consuming = False
+            # Only where a `stop` has already been asked for and deferred. A run
+            # that ended on its own stop key is still owed a `stop` by its
+            # caller, and closing the session early here would take the context
+            # away from anything that reads the recording afterwards.
+            if self._stopping:
+                self._close_context()
         if self._worst_lag > _LAG_WARN_SECONDS:
             self.recording.environment.notes.append(
                 _lag_note(self._worst_lag, self._stop_pressed_at())
@@ -665,12 +748,34 @@ class Recorder:
         self.on_stop_progress(self._stop_key.pending_presses, needed)
 
     def stop(self) -> None:
-        """Stop capture and close everything opened by `start`."""
+        """Stop capture, and close what `start` opened once `run` is done with it.
+
+        Capture stops immediately -- that is what ending a recording means, and
+        what the stop key, the command line's interrupt and any watchdog are
+        asking for. The *context* behind it does not, while `run` is still
+        consuming: resolving a click to its window and its element is a
+        question asked of that pyguitest session at consume time, not at
+        capture time, so closing it out from under a consumer that has fallen
+        behind silently strips the window and the element off every event still
+        in hand. `run` closes it instead when it has finished, and this closes
+        it here when there is no run to wait for -- `start`'s own failure path
+        being the case that needs that.
+        """
         if self._stopping:
             return
         self._stopping = True
         if self._backend is not None:
             self._backend.stop()
+        if not self._consuming:
+            self._close_context()
+
+    def _close_context(self) -> None:
+        """Close the resolver and the pyguitest session behind it.
+
+        Split out of `stop` because two paths reach it: `stop` itself where no
+        run is in flight, and `run` once its last event has been consumed.
+        Idempotent, since both can happen for one recording.
+        """
         self._resolver.close()
         if self._session is not None:
             # Teardown is best effort: a backend that already lost its

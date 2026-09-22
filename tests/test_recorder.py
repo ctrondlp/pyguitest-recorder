@@ -339,6 +339,60 @@ def _run(backend: Any) -> Recording:
     return _start(backend).run()
 
 
+def test_a_stop_from_another_thread_keeps_the_context_until_run_has_drained() -> None:
+    """Resolution happens at consume time, so the session has to outlive `stop`.
+
+    `stop` is documented as the way to end a run from another thread -- a
+    watchdog, a timer, the check scripts -- and it used to close the resolver's
+    pyguitest session the moment it was called. A consumer that had fallen
+    behind then resolved every remaining event against a closed session and
+    kept only its coordinates: the recording came out as bare
+    `gui.move_mouse(...)`/`gui.click()` with no window and no element, validated
+    clean, and said nothing about what it had lost.
+
+    Reproduced live on GNOME Shell 51.rc against gedit, where the identical
+    interaction generated `gui.button("Open").click()` when the consumer was
+    given time to catch up and a bare coordinate when it was not. See
+    docs/developers/status.md.
+    """
+    session = FakeSession()
+    recorder = _recorder(session)
+    open_while_consuming = []
+
+    class StopMidBacklogBackend:
+        """Asks the recorder to stop while events are still being delivered."""
+
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def events(self):
+            yield RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a")
+            recorder.stop()
+            open_while_consuming.append(session.closed)
+            yield RawEvent(kind="key_press", timestamp=1.1, keysym="b", text="b")
+            open_while_consuming.append(session.closed)
+
+    backend = StopMidBacklogBackend()
+    with mock.patch("pyguitest_recorder.recorder.choose_backend", return_value=backend):
+        recorder.start()
+    recording = recorder.run()
+
+    assert backend.stopped, "capture itself must stop straight away"
+    assert open_while_consuming == [False, False], (
+        "the session was closed while events were still being consumed"
+    )
+    assert session.closed, "and must be closed once the run is finished with it"
+    assert [e.text for e in recording.events] == ["ab"]
+
+
 class TestTheCollectedTail:
     """What an interrupted run does with input capture already delivered."""
 
@@ -558,7 +612,9 @@ class TestWindowsEnvironmentSnapshot:
     XWayland" note into a recording made entirely of native Windows input.
     """
 
-    def _describe(self, backend, variables, platform="linux", detected=None):
+    def _describe(
+        self, backend, variables, platform="linux", detected=None, probed=None
+    ):
         """The environment a recording through `backend` would carry.
 
         The platform is the *machine's*, and it is deliberately no longer what
@@ -575,6 +631,14 @@ class TestWindowsEnvironmentSnapshot:
         what `describe_environment` does with the answer -- which is all this
         class is about. `detected` is the answer to give; left out, it is what
         a Linux classifier says for the variables in play.
+
+        `probed` stands in for the XWayland probe, which asks a real X server
+        whether it advertises the `XWAYLAND` extension. Left out it answers
+        None -- "could not be asked" -- which is what a host with no python-xlib
+        gives and which sends `describe_environment` back to the environment
+        heuristic these tests were written against. Stubbed rather than allowed
+        to run, because otherwise every assertion here would depend on whether
+        the machine running the suite happens to be on a Wayland desktop.
         """
         from types import SimpleNamespace
 
@@ -598,8 +662,42 @@ class TestWindowsEnvironmentSnapshot:
             mock.patch.object(recorder_module.sys, "platform", platform),
             mock.patch.dict(recorder_module.os.environ, variables, clear=False),
             mock.patch.object(pyguitest, "detect", fake_detect),
+            mock.patch.object(
+                recorder_module, "_is_xwayland_display", lambda display: probed
+            ),
         ):
             return recorder_module.describe_environment(None, backend)
+
+    def test_the_server_is_believed_over_the_variables(self):
+        """A private Xvfb on a Wayland desktop is not an XWayland recording.
+
+        Both variables are set either way, so the environment cannot tell the
+        two apart -- and `scoped_environment` has removed `WAYLAND_DISPLAY`
+        from what detection sees by then anyway, which is why every recording
+        made on a real Wayland desktop used to come back `x11` with no
+        XWayland note at all while `--doctor` said `xwayland` about the same
+        session. The server itself answers: XWayland advertises an `XWAYLAND`
+        extension and Xvfb does not.
+        """
+        variables = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}
+        xvfb = self._describe("xrecord", variables, probed=False)
+        assert xvfb.xwayland is False
+        assert not any("XWayland" in note for note in xvfb.notes)
+
+    def test_a_probed_xwayland_server_is_said_so_even_when_detection_says_x11(self):
+        # The live case: `scoped_environment` strips WAYLAND_DISPLAY before
+        # detection sees it, so the classifier can only answer X11 -- and the
+        # recording still has to say that native Wayland clients were invisible
+        # to it.
+        env = self._describe(
+            "xrecord",
+            {"DISPLAY": ":0"},
+            detected="SessionType.X11",
+            probed=True,
+        )
+        assert env.xwayland is True
+        assert env.session_type == "xwayland"
+        assert any("XWayland" in note for note in env.notes)
 
     def test_a_stray_display_is_not_recorded_on_windows(self):
         env = self._describe("win32", {"DISPLAY": ":0"})

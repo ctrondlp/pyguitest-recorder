@@ -1868,9 +1868,13 @@ class PythonGenerator:
 
         `wait_for_window` matches a plain-string title literally, as a
         substring -- see `_title_pattern`. `expect_window` raises
-        `WindowNotFound` in place of `wait_for_window`'s `None`, and settles
-        the window (focus, geometry) before handing it back -- see its
-        docstring in pyguitest.
+        `WindowNotFound` in place of `wait_for_window`'s `None`, and does
+        nothing else: it is "a lookup and nothing else" in its own words, and
+        deliberately does not raise, focus or settle the window it hands back.
+        (This docstring used to claim it settled focus and geometry; it does
+        not, and never has -- `focus_window` is the call that waits for a
+        window's geometry to stop moving, which is why the emitted script
+        pairs the two.)
 
         A title seen to drift during the recording is not used at all. Titles
         drift constantly, an editor appending its document name being the
@@ -1899,6 +1903,24 @@ class PythonGenerator:
                 state,
             )
         app_id = _literal(window.app_id)
+        # An app id is protocol-specific, and a recording made through XWayland
+        # has only ever seen the X11 half of it. pyguitest matches an app id
+        # exactly and takes several for this reason -- "neither is derivable
+        # from the other", as `_app_id_match` puts it -- but a recording can
+        # only ever know the one it saw, so the other has to be named by hand.
+        # Worth a comment rather than nothing: replayed against the same
+        # application running natively this raises WindowNotFound on its first
+        # line, which is loud but says nothing about why. Confirmed live on
+        # GNOME Shell 51.rc, recording gedit through XWayland (`Gedit`) and
+        # replaying against the native Wayland copy (`gedit`).
+        if "xwayland" in (state.session_type or "").lower():
+            self._comment(
+                f"recorded through XWayland, so {app_id} is the X11 WM_CLASS. The "
+                "same application run as a native Wayland client reports a "
+                "different app id, and this line will not find it. To replay on "
+                f'both, name both: app_id=({app_id}, "<the Wayland one>")',
+                state,
+            )
         return f"gui.expect_window(app_id={app_id}, timeout={wait:g})"
 
     # -- assembly ------------------------------------------------------------

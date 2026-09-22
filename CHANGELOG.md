@@ -5,7 +5,86 @@ was released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"It came from another session" was usually the wrong explanation on a
+  Wayland desktop.** An element belonging to a process that owns no window on
+  the recorded display is refused, correctly -- but the note saying why named
+  a cause it cannot actually distinguish. The commonest one by far under
+  XWayland is a *native Wayland window in the very same session*: invisible to
+  XRecord and to the X window list, while publishing to the same accessibility
+  bus. Recording gedit on GNOME Shell 51.rc raised it for GNOME Shell's own
+  widgets, from the session the recording was being made in. Both the focus
+  and the element wording now name both causes instead of asserting the
+  rarer one. (The separate "stacked underneath" case, which the window list
+  *can* tell apart, is unchanged.)
+
+- **A `stop()` from another thread no longer strips the window and the element
+  off every event still being consumed.** Resolution happens when an event is
+  consumed, not when it is captured, and `stop()` -- the documented way to end
+  a run from another thread, and what every watchdog and check script uses --
+  closed the resolver's pyguitest session the moment it was called, while
+  `run()` was still working through the backlog. Everything left in it kept its
+  coordinates and lost its names: a recording of a real application came out as
+  bare `gui.move_mouse(...)`/`gui.click()` with no `expect_window` in it at
+  all, validated clean, and said nothing about what it had lost. The lag note
+  it did carry describes a different problem -- events *missing* from the end,
+  not events present and unnamed. Proved by control on a live GNOME Shell 51.rc
+  session: the identical gedit interaction generated `gui.button("Open").click()`
+  when the consumer was allowed to catch up first and a bare coordinate when it
+  was not. Capture still stops immediately; `run()` now closes the context when
+  it has finished with it.
+
+- **A recording made on a Wayland desktop said it was made on X11**, so the
+  XWayland warning it exists to carry appeared in neither its header nor its
+  notes. `scoped_environment` removes `WAYLAND_DISPLAY` deliberately, so that a
+  recording of X clients is not described as a Wayland session -- and that same
+  stripped environment was handed to the detection whose answer set
+  `environment.xwayland`, which needs exactly that variable to say XWayland.
+  `--doctor` reported `xwayland` for the same session in the same minute,
+  detecting against the ambient environment instead: two paths disagreeing,
+  with the wrong one going into the file, and
+  `docs/developers/architecture.md`'s own claim that this "says so in the
+  recording and in the generated script's header" false in practice. Now asked
+  of the X server being recorded, which advertises an `XWAYLAND` extension --
+  the only thing that can tell a session's own XWayland from a private Xvfb
+  started on that same session, since both have the two variables set. Verified
+  both ways on one machine: `:0` lists it, an Xvfb on `:77` does not. The
+  environment heuristic remains the fallback where python-xlib is absent.
+
+- **A window's identity is fixed before recording starts, not the first time an
+  event resolves to it.** That first resolve happens at consume time, so a
+  consumer that had fallen behind met the window only after it had already
+  reacted to the input being consumed: gedit was first seen as `*Untitled
+  Document 1 - gedit`, the modified-marker title that does not exist until the
+  recorded typing has happened. Nothing had seen it drift, so the generator
+  judged the title stable, matched on it, and the replay raised `WindowNotFound`
+  on its first line against a freshly opened copy of the same application. The
+  resolver is now primed at `start()` with every window already open -- one
+  window list, 2ms measured -- so a title that moves during a recording is seen
+  to have moved and the generator reaches for the app id instead.
+
+- **`environment.display` recorded the ambient `DISPLAY` rather than the one
+  being recorded**, so a recording made with `--display :99` from a desktop
+  session put that session's own `:0` in its header -- the one fact the header
+  exists to carry. It reads the environment it was handed, which already has
+  the right display in it.
+
 ### Added
+
+- **A generated script says when its `app_id` match is protocol-specific.** An
+  app id recorded through XWayland is the class half of `WM_CLASS`, and the
+  same application running as a native Wayland client publishes a different one
+  -- gedit is `Gedit` and `gedit`, gnome-calculator is `gnome-calculator` and
+  `org.gnome.Calculator`, and neither is derivable from the other. The match is
+  exact, so such a script raises `WindowNotFound` on its first line when
+  replayed against the native copy: loud, which is the design, and silent about
+  why. pyguitest's `expect_window` has always accepted several ids for exactly
+  this case, so a recording made through XWayland now carries a comment saying
+  so and naming the fix. Confirmed live: editing the line to
+  `app_id=("Gedit", "gedit")` made the same recording replay into a native
+  Wayland gedit with the document reading back.
+
 
 - **`motion = "verbatim"`: every recorded position, each with the wait that
   preceded it.** The rest of the axis replays *where* the pointer went and

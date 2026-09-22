@@ -559,17 +559,27 @@ def test_an_element_from_a_window_stacked_underneath_is_not_blamed_on_a_session(
     assert "another session" not in warning
 
 
-def test_an_element_from_a_process_with_no_window_here_is_still_another_session(
+def test_an_element_from_a_process_with_no_window_here_names_both_causes(
     monkeypatch,
 ):
-    # The window list is what tells the two causes apart, so a process it does
-    # not list keeps the original explanation.
+    """The window list tells the stacking cause apart; it cannot tell these two.
+
+    A process the window list does not mention is off the recorded display,
+    and there are two ways to be: a native Wayland window in this same
+    session -- invisible to XRecord and to the X window list, while publishing
+    to the same accessibility bus -- or a genuinely separate login session.
+    Nothing available here distinguishes them, and the note used to assert the
+    second, which on a Wayland desktop is usually the wrong one. Recording
+    gedit on GNOME Shell 51.rc raised it for GNOME Shell's own widgets, from
+    the session the recording was being made in.
+    """
     import pyguitest_recorder.platforms as platforms
 
     monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = stacked_resolver([FakeWindow(title="Top", pid=77)], element_pid=4242)
     assert made.resolve(100, 100).element is None
     (warning,) = made.warnings
+    assert "native Wayland" in warning
     assert "another session" in warning
     assert "stacked underneath" not in warning
 

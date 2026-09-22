@@ -177,6 +177,110 @@ on the same tree. It belongs in pyguitest, so it is recorded here rather than
 worked around. **Not run:** the user's own live desktop, where the same fixes are
 unconfirmed.
 
+## Run live on the developer's own GNOME Shell 51.rc desktop (2026-09-21)
+
+The line the section above ended on — "**Not run:** the user's own live
+desktop" — closed. Fedora 45, GNOME Shell 51.rc, Wayland, recording through
+the session's own XWayland on `:0`, with `gedit` (GTK3) as an XWayland client
+and again as a native Wayland one. Recorded with the `Recorder` API, driven
+by pyguitest through in-process uinput, and each generated script replayed
+into a fresh copy of the application with the document read back through
+AT-SPI afterwards — because a script that runs clean and does the wrong thing
+is the failure this project keeps meeting.
+
+**Confirmed working:** typed text, a click on a named `Open` button, the file
+chooser it raised recorded as a second window, and the Escape that dismissed
+it — generated as `gui.expect_window(...)`, `gui.focus_window(...)`,
+`gui.type_text(...)`, `gui.button("Open").click()`,
+`gui.wait_for_idle(pid)`, and window-relative coordinates for the move. The
+script replayed into a fresh XWayland gedit with the document reading back
+`Ada Lovelace`, and into a *native Wayland* gedit after one edit described
+below.
+
+**Four bugs, each reproduced before it was fixed.**
+
+- **`stop()` from another thread silently stripped every window and element
+  off the backlog.** It closed the resolver's pyguitest session the moment it
+  was called, while `run()` was still consuming what capture had already
+  delivered — and resolution happens at consume time. The recording kept its
+  coordinates and lost its names: bare `gui.move_mouse(...)`/`gui.click()`
+  with no `expect_window` at all, validating clean, with nothing saying what
+  had been lost. Proved by control rather than by reading: the *identical*
+  interaction generated `gui.button("Open").click()` when the consumer was
+  given 20s to catch up first and a bare coordinate when it was not. `stop()`
+  now stops capture immediately and leaves the context to `run()`, which
+  closes it once it has finished with it. This is the documented way to end a
+  run from another thread, so every watchdog and check script was exposed to
+  it.
+
+- **A recording made on a Wayland desktop said it was made on X11.**
+  `scoped_environment` removes `WAYLAND_DISPLAY` on purpose, so that a
+  recording of X clients is not described as a Wayland session — and the same
+  stripped environment was then handed to the detection whose answer decides
+  `environment.xwayland`. `_classify` needs that variable to say XWayland at
+  all, so every recording ever made on a real Wayland session came back
+  `x11`: no note, no header block, a script indistinguishable from one
+  recorded on Xorg while native Wayland clients had been invisible to it
+  throughout. `--doctor` said `xwayland` about the same session in the same
+  minute, because it detects against the ambient environment — two paths
+  disagreeing, with the wrong one going into the file. It contradicted
+  [architecture.md](architecture.md#why-wayland-has-no-capture-backend)'s own
+  claim that this "says so in the recording and in the generated script's
+  header". Now asked of the server being recorded: XWayland advertises an
+  `XWAYLAND` X extension, which is the only thing that can tell a session's
+  own XWayland from a private Xvfb started on that same session — both have
+  the two variables set. Checked both ways on one machine: `:0` lists it and
+  an Xvfb on `:77` does not.
+
+- **Window identity was fixed from a window that had already reacted.** The
+  resolver establishes a window's identity the first time an event resolves
+  to it, which is consume time. With the consumer behind, gedit was first
+  seen as `*Untitled Document 1 - gedit` — the modified-marker title that
+  does not exist until the recorded typing has happened. Nothing had seen it
+  drift, so the generator judged it stable and matched on it, and the replay
+  raised `WindowNotFound` on its first line against a freshly opened copy.
+  The resolver is now primed at `start()` with every window already open —
+  one window list, 2ms measured — so a title that moves during a recording is
+  seen to have moved and the generator reaches for the app id instead.
+
+- **`environment.display` recorded the ambient `DISPLAY`,** not the one being
+  recorded, so a recording made with `--display :99` put the developer's own
+  `:0` in its header — the one fact that header exists to carry. It reads the
+  environment it is handed now, which is also what the XWayland probe above
+  asks about.
+
+**Found here, fixed upstream in pyguitest, and the reason this run was worth
+making:** `Session.focused()` cost **4.49s** a call on this desktop and
+returned the **wrong element** — GNOME Shell's own `Main stage` toplevel,
+because both the shell and the focused widget publish `FOCUSED` and a
+root-first walk reaches the shell's first. That single call is the whole of
+the "fell 6.2s behind live input" note in these recordings, and this tool's
+own rule (see
+[architecture.md](architecture.md#typing-goes-where-focus-is-not-where-the-pointer-is))
+treats a toplevel answer as "no answer" — so the recorder paid 4.5s per run
+of typed text to be told nothing. Scoped to the active window's application
+it is 0.33s and correct; the lag in a comparable recording fell from 6.2s to
+1.6s. See pyguitest's `docs/validation.md`.
+
+**A gap this run measured rather than closed:** an app id is
+protocol-specific, and a recording only ever sees the one it was made
+through. gedit is `Gedit` through XWayland (the `WM_CLASS` class) and `gedit`
+natively; gnome-calculator is `gnome-calculator` and `org.gnome.Calculator`.
+Replayed against the same application running natively, the generated script
+raised `WindowNotFound: no window matching app_id='Gedit'` on its first line
+— loud, which is the design, but silent about *why*. pyguitest's
+`expect_window` has always accepted several ids for exactly this, so the
+generator now writes that advice into the script whenever the recording was
+an XWayland one. Editing the line to `app_id=("Gedit", "gedit")` made the
+same recording replay into a native Wayland gedit, document reading back.
+
+**Not fixed, and known:** typed text still comes out as `gui.type_text(...)`
+rather than a named field here, and correctly so — gedit's document area
+publishes no accessible name, so there is nothing to address it by. Element
+*geometry* for native Wayland clients is wrong rather than withheld upstream;
+this tool is insulated from it by its own containment checks, which is why
+clicks there degrade to coordinates rather than to wrong elements.
+
 ## Known gaps
 
 - **The X11 live check records and regenerates but never replays**, where the

@@ -58,6 +58,23 @@ decided when it is recorded:
 | `gui.button("Save").click()` and other named elements | The portable case. AT-SPI answers the same under X11 and Wayland |
 | `gui.move_mouse(x, y)` and window-relative coordinates | Needs pointer and window-geometry capabilities the compositor may not grant |
 | `gui.activate_window(...)`, `wait_for_idle(win.pid)` | Compositor-tier: available on some desktops, absent on others |
+| `gui.expect_window(app_id=...)` | **Protocol-specific.** An id recorded through XWayland is the `WM_CLASS` class; the same application running natively publishes a different one, and the match is exact |
+
+That last row is the one that bites in practice, because it is the case where
+a script is *closest* to portable and still fails. gedit is `Gedit` through
+XWayland and `gedit` natively; gnome-calculator is `gnome-calculator` and
+`org.gnome.Calculator`; neither is derivable from the other. pyguitest's
+`expect_window` accepts several ids for exactly this reason, and a recording
+can only ever have seen the one it was made through — so the generator writes
+a comment saying so whenever the recording was an XWayland one, and naming
+both ids by hand is the fix:
+
+```python
+gui.expect_window(app_id=("Gedit", "gedit"), timeout=10)
+```
+
+Confirmed live on GNOME Shell 51.rc, both the failure and the fix: see
+[status.md](status.md).
 
 So a recording that resolved to elements is close to portable, and one that
 came out as coordinates is close to X11-only. That is the same reason element
@@ -125,8 +142,16 @@ accessible tree), and only believed when it survives the same scrutiny
 everything else here gets:
 
 - a *toplevel* holding focus means the desktop does not publish per-widget
-  focus at all — GNOME Shell carries it on its own window for the whole
-  session — so that reads as "no answer" rather than as the frame;
+  focus at all — so that reads as "no answer" rather than as the frame.
+  **GNOME used to be the standing example of such a desktop, and was not
+  one.** Both the shell's own window and the application's widget publish
+  `FOCUSED` there; `Session.focused()` returned whichever a walk from the
+  tree root reached first, which is always the shell's, so this rule fired on
+  every GNOME recording and typed text was never named. Fixed upstream in
+  pyguitest 2026-09-21 — it searches the active window's application first
+  and prefers a widget over a toplevel — which also took the call from 4.5s
+  to 0.3s here, the single largest cost in consuming a recording. The rule
+  itself stays, for the desktops that really are like that;
 - the focused element's process must own a window on the recorded display.
   Focus carries no coordinate to corroborate it against, so unlike a click
   there is no second opinion available, and an element from another session
@@ -138,7 +163,7 @@ everything else here gets:
   typing that went into the dialog.
 
 The last clicked text field remains the fallback wherever focus cannot be
-had, which is every desktop running a shell that holds FOCUSED itself.
+had — which, since the fix above, is fewer desktops than this used to say.
 
 ## Generated code is checked before it is offered
 
