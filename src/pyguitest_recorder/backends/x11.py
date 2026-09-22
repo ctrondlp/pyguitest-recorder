@@ -91,6 +91,43 @@ def unavailable_reason() -> str | None:
     return None
 
 
+def is_xwayland(display: str | None = None) -> bool | None:
+    """Whether the X server being recorded is XWayland. None if it cannot be asked.
+
+    Asked of the server rather than inferred from the environment, because the
+    environment cannot tell the two cases apart that matter here. `DISPLAY` and
+    `WAYLAND_DISPLAY` are both set for a recording of a Wayland session's own
+    XWayland *and* for a recording of a private Xvfb started from a Wayland
+    desktop -- the first is an XWayland recording and the second is not, and
+    guessing wrong either loses the warning a reader needs or attaches it to a
+    recording where it is false.
+
+    XWayland advertises itself as an X extension named `XWAYLAND`, which is
+    exactly the display-scoped question this needs to answer. Confirmed both
+    ways on one machine: a GNOME Shell 51.rc session's `:0` lists it, and an
+    Xvfb on `:77` does not.
+
+    None rather than False where python-xlib is missing or the display will not
+    open: "cannot tell" is not "no", and the caller falls back to the
+    environment for that case rather than asserting either way.
+    """
+    try:
+        from Xlib import display as _display
+    except ImportError:
+        return None
+    try:
+        connection = _display.Display(display) if display else _display.Display()
+    except Exception:  # noqa: BLE001 - an unopenable display answers nothing
+        return None
+    try:
+        return "XWAYLAND" in connection.list_extensions()
+    except Exception:  # noqa: BLE001 - same: no answer, not a negative one
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            connection.close()
+
+
 def available() -> bool:
     """Whether this machine can capture input."""
     return unavailable_reason() is None

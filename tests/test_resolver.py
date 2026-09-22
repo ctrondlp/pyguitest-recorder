@@ -559,17 +559,59 @@ def test_an_element_from_a_window_stacked_underneath_is_not_blamed_on_a_session(
     assert "another session" not in warning
 
 
-def test_an_element_from_a_process_with_no_window_here_is_still_another_session(
+def test_priming_takes_exactly_one_window_list(monkeypatch):
+    """Its docstring promises one, and the ambiguity check used to ask again.
+
+    `_identify` calls `_app_id_ambiguous`, which lists windows to see whether
+    anything else shares the app id -- so priming N windows cost N+1 lists,
+    not the one claimed, and on a desktop with many windows that is real
+    startup latency for an answer already in hand.
+    """
+    import pyguitest_recorder.platforms as platforms
+
+    monkeypatch.setattr(platforms.sys, "platform", "linux")
+    windows = [
+        FakeWindow(title="One", pid=11, app_id="shell"),
+        FakeWindow(title="Two", pid=12, app_id="shell"),
+        FakeWindow(title="Three", pid=13, app_id="editor"),
+    ]
+    made = stacked_resolver(windows, element_pid=11)
+    calls = []
+    original = made.session.windows
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    made.session.windows = counted
+    made.prime()
+    assert len(calls) == 1, f"one window list, not {len(calls)}"
+    # And the answer is still right: two windows share "shell", one does not.
+    assert made._identify(windows[0]).app_id_ambiguous is True
+    assert made._identify(windows[2]).app_id_ambiguous is False
+
+
+def test_an_element_from_a_process_with_no_window_here_names_both_causes(
     monkeypatch,
 ):
-    # The window list is what tells the two causes apart, so a process it does
-    # not list keeps the original explanation.
+    """The window list tells the stacking cause apart; it cannot tell these two.
+
+    A process the window list does not mention is off the recorded display,
+    and there are two ways to be: a native Wayland window in this same
+    session -- invisible to XRecord and to the X window list, while publishing
+    to the same accessibility bus -- or a genuinely separate login session.
+    Nothing available here distinguishes them, and the note used to assert the
+    second, which on a Wayland desktop is usually the wrong one. Recording
+    gedit on GNOME Shell 51.rc raised it for GNOME Shell's own widgets, from
+    the session the recording was being made in.
+    """
     import pyguitest_recorder.platforms as platforms
 
     monkeypatch.setattr(platforms.sys, "platform", "linux")
     made = stacked_resolver([FakeWindow(title="Top", pid=77)], element_pid=4242)
     assert made.resolve(100, 100).element is None
     (warning,) = made.warnings
+    assert "native Wayland" in warning
     assert "another session" in warning
     assert "stacked underneath" not in warning
 
