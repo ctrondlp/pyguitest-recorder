@@ -3,9 +3,45 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
-## [Unreleased]
+## [0.4.0] — 2026-09-23
 
 ### Fixed
+
+- **`scripts/live-capture-check.py`'s private bus was not private enough, and
+  evicted the developer's accessibility bus.** It re-execs on a session bus of
+  its own precisely so the recorded application does not land on the desktop's
+  accessibility bus -- but `at-spi-bus-launcher` derives its socket path from
+  `XDG_RUNTIME_DIR` rather than from the bus it was started on, so the launcher
+  it starts bound `$XDG_RUNTIME_DIR/at-spi/bus`, the path the real session keeps
+  its own accessibility socket at, and replaced it. Silently, for every GTK3 and
+  Qt application on that desktop, until the next login; and pyguitest processes
+  then aborted outright with SIGABRT, because the launcher outlives the bus it
+  launched and goes on handing out its address. Found on 2026-09-22 with four
+  dead sockets in that directory, one per session this and pyguitest's own
+  harness had run. It now creates a private `XDG_RUNTIME_DIR` before the
+  re-exec and removes it after the daemons that hold sockets in it are stopped.
+
+- **The pyguitest floor moved to 0.11.0, and the generated header moved with
+  it.** A script generated now says `Profile:     pyguitest-0.11`, because
+  `PROFILE` follows the API surface `validate()` checks the emitted calls
+  against rather than this package's own version — and the test holding the
+  two together failed the moment the floor moved ahead of it, which is what it
+  is for. An older script is unaffected: the profile is a claim in its own
+  header, not something a later run compares a recording against.
+
+- **The Windows install instructions carried a workaround for a pyguitest that
+  could not be imported there, and no longer need to.** This package's floor
+  was `pyguitest>=0.10.1`, and 0.10.1 predates Windows support: it imports
+  `grp` -- a Unix-only standard-library module -- at module scope, so `import
+  pyguitest` raised `ModuleNotFoundError` on Windows and every use of it from
+  here failed at that import. `--doctor` degraded honestly (`pyguitest: not
+  importable`), `docs/troubleshooting.md` carried the two-step install that
+  worked anyway (pyguitest from git, then this package), and the CI job here
+  installed pyguitest from git for the same reason. The floor is now
+  `pyguitest>=0.11.0`, the first release carrying `pyguitest.backends.win32`,
+  so the troubleshooting section is gone, the job installs from PyPI like
+  every other job, and a Windows install of either package is a plain
+  `pip install`.
 
 - **A `stop()` arriving before `run()` marked itself as consuming could still
   close the context out from under it.** The flag that fixed the larger version

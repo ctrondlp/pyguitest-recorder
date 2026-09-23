@@ -11,7 +11,12 @@ name = "pyguitest-recorder"
 # The version lives in src/pyguitest_recorder/__init__.py and is read from
 # there, so the wheel, `--version` and `__version__` cannot disagree.
 dynamic = ["version"]
-description = "Record desktop GUI activity and generate pyguitest scripts"
+# Names the platforms for the same reason pyguitest's does: PyPI searches this
+# field at the same x5 boost as `keywords`, and it is the one line a user reads
+# before deciding whether this runs on their machine. "X11" rather than "Linux
+# and BSD" alone because recording is X11/XWayland or native Windows and never
+# ordinary Wayland -- see docs/developers/architecture.md.
+description = "Record desktop GUI activity on X11, XWayland and Microsoft Windows, and generate pyguitest test scripts"
 readme = "README.md"
 requires-python = ">=3.10"
 # GPL-2.0-or-later, matching pyguitest. Not only for consistency: the
@@ -19,14 +24,24 @@ requires-python = ">=3.10"
 # source, so a permissive license here would be claiming more than it can.
 license = "GPL-2.0-or-later"
 authors = [{ name = "Dennis K. Paulsen" }]
+# Curated, not exhaustive, for the reasons set out beside pyguitest's own
+# list: PyPI searches this field at the same x5 boost as the summary and the
+# rendered README, snowball stems it and splits it on hyphens (so a bare
+# "automation" beside "test-automation" would add nothing), and BM25's length
+# normalisation means each keyword added costs the others a little.
+#
+# No "wayland", deliberately, and it is the one omission worth a line:
+# capture is XRecord or win32, so there is no Wayland session this can record
+# at all. A caller searching for a Wayland recorder would be answered by a
+# package that cannot be one. The README says why; the metadata does not
+# claim otherwise.
 keywords = [
-    "gui",
-    "testing",
-    "recorder",
-    "automation",
-    "x11",
-    "windows",
-    "pyguitest",
+    "gui-recorder", "record-and-replay", "gui-testing", "test-automation",
+    "desktop-automation", "ui-testing",
+    "code-generation", "test-generation", "pyguitest",
+    "linux", "freebsd", "windows", "win32",
+    "x11", "xrecord",
+    "accessibility", "atspi", "at-spi",
 ]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
@@ -45,6 +60,13 @@ classifiers = [
     # these say where you can *record*, not where the generated script
     # replays.
     "Environment :: X11 Applications",
+    # The Win32 half of that same statement, and the reason both are here:
+    # classifiers are what PyPI's sidebar filters on (they are not searched),
+    # so declaring the Windows *operating system* below without the Windows
+    # *environment* here left this package out of the one filter a Windows
+    # user browsing for a recorder would reach for. Paired with the X11 line
+    # above because recording has exactly these two mechanisms.
+    "Environment :: Win32 (MS Windows)",
     "Operating System :: POSIX :: Linux",
     # The suite and a live recording both pass on FreeBSD 15.
     "Operating System :: POSIX :: BSD :: FreeBSD",
@@ -63,6 +85,11 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Desktop Environment",
     "Topic :: Software Development :: Testing",
+    # Same two facets pyguitest carries, for the same reason: classifiers are
+    # not searched, they are the sidebar filters, and someone browsing for an
+    # acceptance-testing or user-interface tool should find this under both.
+    "Topic :: Software Development :: Testing :: Acceptance",
+    "Topic :: Software Development :: User Interfaces",
     "Topic :: Software Development :: Quality Assurance",
     # The whole output is Python source.
     "Topic :: Software Development :: Code Generators",
@@ -121,7 +148,18 @@ dependencies = [
     # generated here can name that method, and a floor still permitting 0.10.0
     # would let pip install a pair whose generated scripts the library cannot
     # answer.
-    "pyguitest>=0.10.1",
+    #
+    # 0.11.0 raises it once more, and for the reason the floor exists at all
+    # rather than for any one method: it is the first release that imports on
+    # Windows. Everything before it carried `import grp` -- a Unix-only
+    # standard-library module -- at module scope, so this package could not be
+    # used there at all, and the documented Windows install was pyguitest from
+    # git followed by this package. It is also the release whose
+    # `backends.win32` carries the key vocabulary the win32 capture backend
+    # reads, which is the same floor seen from the other side: an older
+    # pyguitest leaves that backend with nothing to report a virtual key in,
+    # and `win32.unavailable_reason` says as much rather than raising.
+    "pyguitest>=0.11.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

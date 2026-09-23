@@ -82,6 +82,10 @@ def a11y_daemon(name: str) -> str | None:
 INNER = "PYGUITEST_RECORDER_CHECK_INNER"
 """Set on the re-exec, so the private bus is only established once."""
 
+OWN_RUNTIME = "PYGUITEST_RECORDER_CHECK_OWN_RUNTIME"
+"""Carries the private XDG_RUNTIME_DIR across the re-exec, so the inner run
+removes what the outer one made -- the outer process is gone by then."""
+
 
 def reexec_on_a_private_bus() -> None:
     """Re-run this script on a session bus of its own, if one can be had.
@@ -98,8 +102,30 @@ def reexec_on_a_private_bus() -> None:
     runner = shutil.which("dbus-run-session")
     if runner is None:
         return
+    # A private session bus is not enough on its own, and this is the half
+    # that was missing. at-spi-bus-launcher derives its socket path from
+    # XDG_RUNTIME_DIR rather than from the bus it was started on, so the one
+    # started below binds $XDG_RUNTIME_DIR/at-spi/bus -- the very path the
+    # developer's own session keeps its accessibility socket at -- and evicts
+    # it. Silently, for every GTK3 and Qt application on that desktop, until
+    # the next login; and pyguitest processes then abort outright, because
+    # at-spi-bus-launcher outlives the bus it launched and keeps handing out
+    # its address. Measured on 2026-09-22 with four dead sockets in that
+    # directory, one per session this and pyguitest's own harness had run.
+    runtime = tempfile.mkdtemp(prefix="pyguitest-recorder-runtime.")
+    os.chmod(runtime, 0o700)
+    os.environ["XDG_RUNTIME_DIR"] = runtime
+    os.environ[OWN_RUNTIME] = runtime
     os.environ[INNER] = "1"
-    os.execvp(runner, [runner, "--", sys.executable, *sys.argv])
+    try:
+        os.execvp(runner, [runner, "--", sys.executable, *sys.argv])
+    except OSError:
+        # execvp returns only by failing. The re-exec is what hands ownership
+        # of this directory to the inner run, and main()'s finally -- which
+        # removes it -- belongs to that run, so a failure here is the one path
+        # where nothing else will ever clean it up.
+        shutil.rmtree(runtime, ignore_errors=True)
+        raise
 
 
 def start_a11y_bus() -> list[subprocess.Popen[bytes]]:
@@ -658,6 +684,10 @@ def main() -> int:
         for process in (*reversed(a11y), server):
             if process is not None:
                 stop(process)
+        # After the daemons that hold sockets in it, never before.
+        own_runtime = os.environ.get(OWN_RUNTIME)
+        if own_runtime:
+            shutil.rmtree(own_runtime, ignore_errors=True)
 
 
 if __name__ == "__main__":

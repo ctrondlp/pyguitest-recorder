@@ -59,7 +59,7 @@ developers.
 
 `dogtail`, which element resolution goes through, **declares no dependencies
 of its own** — PyGObject and pyatspi have to come from your distribution, and
-`pip install '.[atspi]'` cannot supply them. Miss them and nothing errors;
+`pip install 'pyguitest-recorder[atspi]'` cannot supply them. Miss them and nothing errors;
 every click just comes out as a coordinate.
 
 ```sh
@@ -94,7 +94,7 @@ session, some applications are native Wayland and some are XWayland, and they
 look identical on screen.
 
 **Is `python-xlib` installed?** On Linux and the BSDs, capture needs the `x11`
-extra: `pip install '.[x11]'`.
+extra: `pip install 'pyguitest-recorder[x11]'`.
 
 **Is this a rootless XWayland?** A private headless GNOME session is not a
 substitute for Xvfb — the RECORD context comes up cleanly, but the compositor
@@ -203,12 +203,14 @@ appeared yet. Adding a wait is usually the fix, and the recorder's inference
 did not add one because nothing observable changed at that moment.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.10.1 or newer is required
-outright** — generated scripts call the `expect_` family as `Session` methods
-(0.9.0 and later), double-click named elements with `Element.double_click`
-(0.10.0), and under `motion = "natural"` or `"recorded"` move the pointer with
-`Session.move_mouse_naturally` (0.10.1). Older floors matter as well:
-`gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
+older than the recording expects. **pyguitest 0.11.0 or newer is required
+outright** — the floor the generated code is verified against, and the first
+release that imports on Windows at all. Generated scripts call the `expect_`
+family as `Session` methods (0.9.0 and later), double-click named elements with
+`Element.double_click` (0.10.0), and under `motion = "natural"` or `"recorded"`
+move the pointer with `Session.move_mouse_naturally` (0.10.1). Older floors
+matter as well: `gui.button(...)` finds nothing on a current at-spi2 before
+0.5.0.
 
 ## The script waits too long, or not long enough
 

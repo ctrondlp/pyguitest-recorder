@@ -303,7 +303,7 @@ clicks there degrade to coordinates rather than to wrong elements.
   daemon paths are observed rather than reasoned.
 - ~~**A double click on a named element is emitted on the element itself only
   where the installed pyguitest has `Element.double_click`.**~~ **Closed:** the
-  floor is 0.10.1, and `Element.double_click` has been in since 0.10.0, so the
+  floor is 0.11.0, and `Element.double_click` has been in since 0.10.0, so the
   `double_click_element` fallback and the probe that chose between the two
   spellings are gone. The element is looked
   up, its rectangle read *at replay*, and `element.double_click()` called
