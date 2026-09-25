@@ -62,6 +62,99 @@ def render(*events, **options):
     return generate(recording, GeneratorOptions(include_header=False, **options))
 
 
+def _is_private(name: str) -> bool:
+    """Whether a name is private: a leading underscore, not a dunder or `_`.
+
+    `_` on its own is the throwaway convention -- the generated scripts unpack
+    `gui.geometry(...)`'s unused width and height into it -- and a dunder is
+    the language's own (`__main__`). Neither says anything about what the
+    script is allowed to touch, which is what this is asking.
+    """
+    if name == "_" or (name.startswith("__") and name.endswith("__")):
+        return False
+    return name.startswith("_")
+
+
+def _private_references(source: str) -> list[str]:
+    """Every private name the generated source refers to.
+
+    The output is meant to be a script someone could have written by hand
+    against pyguitest's *public* API. A private attribute in it is a
+    dependency on an implementation detail, and a function of its own is
+    extensibility that belongs upstream: the generator once wrote private
+    helpers into every script that needed one (`_HELPER_SOURCE`, removed in
+    0.2.0), and the test below is what stops that coming back.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and _is_private(node.attr):
+            found.append(f".{node.attr}")
+        elif isinstance(node, ast.Name) and _is_private(node.id):
+            found.append(node.id)
+        elif isinstance(node, ast.alias) and _is_private(node.name):
+            found.append(node.name)
+    return sorted(set(found))
+
+
+def test_the_generated_script_names_nothing_private(window):
+    """Public API only, and no helper function of its own.
+
+    Every shape that once needed a private helper written into the output is
+    in here -- a named click, a selection, a double click, an expand, typed
+    text, a redacted secret, a chord, a drag, a scroll, an inferred wait, a
+    waited-for element and an assertion -- so a regression has nowhere to
+    hide.
+    """
+    button = ElementRef(
+        role="push button", name="Save", extents=(180, 80, 80, 30), actions=("click",)
+    )
+    radio = ElementRef(
+        role="radio button",
+        name="High",
+        extents=(20, 60, 120, 22),
+        actions=(),
+        selectable=True,
+    )
+    tree_row = ElementRef(
+        role="tree item",
+        name="Documents",
+        extents=(20, 140, 200, 20),
+        expanded=False,
+    )
+    label = ElementRef(role="label", name="Status", extents=(30, 300, 200, 20))
+    source = render(
+        WindowActivate(window=window),
+        Click(target=Target(x=220, y=95, window=window, element=button)),
+        Click(target=Target(x=80, y=70, window=window, element=radio)),
+        Click(target=Target(x=220, y=95, window=window, element=button), count=2),
+        Click(target=Target(x=30, y=150, window=window, element=tree_row), count=2),
+        TextInput(text="Ada"),
+        TextInput(text="hunter2", sensitive=True),
+        HotKey(keys=("ctrl", "s")),
+        Drag(
+            start=Target(x=40, y=40, window=window),
+            end=Target(x=90, y=120, window=window),
+        ),
+        Scroll(target=Target(x=50, y=50, window=window), dy=-1),
+        Pause(seconds=1.25),
+        WaitForElement(element=ElementRef(role="dialog", name="Save As")),
+        WaitForIdle(window=window, pid=99, timeout=30),
+        Assertion(
+            check="text",
+            target=Target(x=60, y=310, window=window, element=label),
+            expected="ready",
+        ),
+    )
+    assert validate(source) == []
+    assert _private_references(source) == []
+    definitions = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    ]
+    assert definitions == ["main"], "the script defines something of its own"
+
+
 def test_generated_source_is_valid_and_uses_the_real_api(window, save_button):
     source = render(
         WindowActivate(window=window),
@@ -98,6 +191,94 @@ def test_unsugared_role_uses_the_element_form(window):
     source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
     assert 'gui.element(role=Role.LIST_ITEM, name="Inbox").click()' in source
     assert "from pyguitest import Capability, Role" in source
+
+
+@pytest.mark.needs_ruff
+def test_a_click_on_a_tree_item_is_emitted_as_a_select(window):
+    # A tree item answers a click with a *selection*, not an activation.
+    # `selectable` comes from pyguitest's own Element.selectable, not from
+    # `actions` -- GTK measured live publishes no `select` action at all for
+    # a selectable row, so `actions` alone would miss this on that platform.
+    item = ElementRef(role="tree item", name="Q1", actions=(), selectable=True)
+    source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
+    assert 'gui.element(role=Role.TREE_ITEM, name="Q1").select()' in source
+    assert "gui.click(" not in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_click_on_a_radio_is_emitted_as_a_select(window):
+    # Measured on Windows 11: a coordinate click on this radio did nothing at
+    # all, while `select()` moved it and left the other radio group alone.
+    radio = ElementRef(role="radio button", name="High", actions=(), selectable=True)
+    source = render(Click(target=Target(x=1, y=2, window=window, element=radio)))
+    assert 'gui.element(role=Role.RADIO_BUTTON, name="High").select()' in source
+    assert validate(source) == []
+
+
+@pytest.mark.parametrize("role", ["radio button", "tree item"])
+def test_select_wins_over_a_click_action_where_selecting_is_the_act(window, role):
+    # UIA publishes `do default action` on these too, and a tree row's
+    # default action there is a double click -- `click()` would toggle the
+    # row, not select it.
+    element = ElementRef(
+        role=role, name="Q1", actions=("do default action",), selectable=True
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+    assert ".select()" in source
+    assert ".click()" not in source
+
+
+def test_a_selectable_menu_item_still_clicks(window):
+    # AT-SPI marks menu items SELECTABLE; selecting one only highlights it.
+    item = ElementRef(
+        role="menu item", name="Open", actions=("click",), selectable=True
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
+    assert 'gui.menu_item("Open").click()' in source
+    assert ".select()" not in source
+
+
+def test_an_element_offering_nothing_still_falls_to_a_coordinate(window):
+    # A recorded empty tuple is "confirmed: nothing to act through", so the
+    # coordinate stays -- and the comment says which element it meant.
+    item = ElementRef(role="tree item", name="Q1", actions=())
+    source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
+    assert "gui.move_mouse(" in source
+    assert ".select()" not in source
+
+
+def test_unknown_actions_do_not_become_a_select(window):
+    # `actions is None` is "not captured", not "offered nothing", and guessing
+    # a select from it would change what --regenerate writes for recordings
+    # made before the field existed.
+    item = ElementRef(role="tree item", name="Q1", actions=None)
+    source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
+    assert ".click()" in source
+    assert ".select()" not in source
+
+
+def test_locators_absolute_keeps_the_coordinate_for_a_selectable_element(window):
+    # The setting that says to favour coordinates wins over the name, however
+    # the element could have been acted on.
+    item = ElementRef(role="tree item", name="Q1", actions=(), selectable=True)
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=item)),
+        locators="absolute",
+    )
+    assert "gui.move_mouse(" in source
+    assert ".select()" not in source
+
+
+def test_a_repeated_click_keeps_its_coordinates(window):
+    # `select()` is idempotent, so there is no rendering of a triple click as
+    # one: those stay coordinates rather than silently becoming a single act.
+    item = ElementRef(role="tree item", name="Q1", actions=(), selectable=True)
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=item), count=3)
+    )
+    assert ".select()" not in source
+    assert "gui.click(" in source
 
 
 def test_unnamed_element_falls_back_to_coordinates(window):
@@ -1274,7 +1455,67 @@ def test_a_three_key_combination_keeps_every_modifier():
     assert 'gui.send_keys("^(+(S))")' in render(HotKey(keys=("ctrl", "shift", "S")))
 
 
+_ROW = 'gui.element(role=Role.TREE_ITEM, name="Documents")'
+_TOGGLE = (
+    f"if {_ROW}.expanded:\n"
+    f"            {_ROW}.collapse()\n"
+    "        else:\n"
+    f"            {_ROW}.expand()\n"
+)
+
+
 @pytest.mark.needs_ruff
+@pytest.mark.parametrize("expanded", [False, True])
+def test_a_double_click_on_a_tree_row_replays_as_the_toggle_it_was(window, expanded):
+    # Measured live on a GTK3 GtkTreeView: double_click() activates a row
+    # rather than opening it, so the row is named and toggled through
+    # expand()/collapse() instead. Which one is decided at replay, not from
+    # the recorded `expanded`: on Windows that read lands after the native
+    # tree view has already toggled the row whenever the consumer runs
+    # behind the second press -- a collapsed row recorded True, rendered
+    # collapse(), and the replay never opened it. Both recorded states have
+    # to render the same toggle for that reason.
+    row = ElementRef(role="tree item", name="Documents", expanded=expanded)
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=row), count=2)
+    )
+    assert _TOGGLE in source
+    assert ".double_click()" not in source
+    assert validate(source) == []
+
+
+def test_a_double_click_on_a_non_expandable_element_still_double_clicks(window):
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2)
+    )
+    assert ".double_click()" in source
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
+def test_unknown_expanded_state_does_not_become_an_expand(window):
+    # expanded is None both for "not expandable" and "recorded before this
+    # field existed" -- a recording made before this shipped keeps whatever
+    # it rendered as, rather than being guessed into an expand it never saw.
+    row = ElementRef(role="tree item", name="Documents", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=row), count=2)
+    )
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
+def test_locators_absolute_keeps_the_coordinate_for_an_expandable_row(window):
+    row = ElementRef(role="tree item", name="Documents", expanded=False)
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=row), count=2),
+        locators="absolute",
+    )
+    assert ".expand()" not in source
+    assert "gui.double_click()" in source
+
+
 def test_a_double_click_on_a_named_element_stays_one_gesture(window):
     # Two Element.click() calls are not a double click: each is a separate
     # round trip over the accessibility bus, slower than any toolkit's

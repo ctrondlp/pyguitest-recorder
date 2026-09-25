@@ -755,6 +755,17 @@ def _verdict(capture_ok: bool, context: ContextReport) -> str:
     """
     if not capture_ok:
         return "cannot record -- see the capture line above"
+    if context.elements and context.bridge_disabled:
+        # Element resolution is genuinely available -- and the application
+        # about to be recorded will still be absent from the tree, because
+        # NO_AT_BRIDGE is set here and it will inherit it. Saying "clicks
+        # will be named" was the one answer this reader most needed not to
+        # be given: found live on a MATE session, where that verdict sat
+        # three lines under the note contradicting it.
+        return (
+            "can record, but a GTK3 or Qt application that inherits "
+            "NO_AT_BRIDGE will have no click named -- see the note above"
+        )
     if context.elements:
         return "ready to record, and clicks will be named"
     if context.windows:

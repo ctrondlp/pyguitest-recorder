@@ -552,6 +552,44 @@ def test_a_malformed_drop_list_is_rejected_by_the_parser(capsys):
         build_parser().parse_args(["--drop", "not-a-number"])
 
 
+class TestTheDoctorVerdict:
+    """The one line `--doctor` exists to print, so it must not overstate."""
+
+    def _verdict(self, **fields):
+        from pyguitest_recorder.cli import _verdict
+        from pyguitest_recorder.recorder import ContextReport
+
+        return _verdict(True, ContextReport(**fields))
+
+    def test_elements_available_reads_as_ready(self):
+        assert "clicks will be named" in self._verdict(windows=True, elements=True)
+
+    def test_no_at_bridge_qualifies_the_verdict_rather_than_contradicting_it(self):
+        """Found live: this verdict sat three lines under its own refutation.
+
+        `NO_AT_BRIDGE` was set on a MATE session, the note above said GTK3 and
+        Qt would publish nothing, and the verdict still read "ready to record,
+        and clicks will be named" -- which a reader who trusts the one summary
+        line, as this line exists to be trusted, would have acted on. A
+        mate-calc launched from that environment resolved to no element at all.
+        """
+        verdict = self._verdict(windows=True, elements=True, bridge_disabled=True)
+        assert "no click named" in verdict
+        assert "NO_AT_BRIDGE" in verdict
+        # Precisely true either way: the recorder reads its *own* environment
+        # as a proxy for the one the application was launched in, and a real
+        # run on this desktop launched mate-calc without the variable and did
+        # name every click. Claiming the outcome rather than the risk would
+        # have made that recording's own notes contradict what it did.
+        assert "inherits" in verdict
+
+    def test_no_elements_still_reads_as_window_relative(self):
+        assert "window-relative" in self._verdict(windows=True, elements=False)
+
+    def test_nothing_at_all_still_reads_as_bare_coordinates(self):
+        assert "bare screen coordinate" in self._verdict(windows=False, elements=False)
+
+
 class TestDoctorOnWindows:
     """What `--doctor` says that only a Windows session can get wrong."""
 

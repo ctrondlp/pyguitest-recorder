@@ -62,6 +62,13 @@ POPUP_ITEM_ROLES = frozenset(
 """What a popup is made of. `menu` is here because an entry that opens a submenu
 is one -- and it is the popup's own container for a combo box."""
 
+_MAX_POPUP_ANCESTRY = 8
+"""How far `_revealed_popup_owner` walks up out of a popup before giving up.
+
+A drop-down's item is two levels below the control that owns it and a submenu
+item a few more; a walk longer than this is not a popup, and a tree that
+somehow loops must not hang a recording."""
+
 POPUP_WAIT_SECONDS = 0.3
 """How long a click on a menu waits for its popup to appear before giving up on
 seeing it. A popup is opened by the application, after the click, so a recorder
@@ -362,12 +369,18 @@ class DesktopResolver:
     """Whether the resolve in progress is a press -- see `resolve_hover`. Carried
     here rather than passed down because `_element` is a seam callers replace,
     and its two-argument shape is part of that."""
+    _from_popup: bool = field(default=False, init=False)
+    """Whether the element the resolve in progress found came out of an open
+    popup. Carried the same way, and for the same reason, as `_spending`; read
+    by `_other_toplevel_of`, which must not treat a popup item as belonging to
+    the wrong window."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
         self.ignore_pids.add(os.getpid())
         self.ignore_pids.update(self._own_terminal_pids())
         self._scaled = self._any_screen_scaled()
+        self._bridge_disabled = False
         self._resolves_elements = self.elements and self._can_resolve_elements()
 
     def _on_windows(self) -> bool:
@@ -470,6 +483,7 @@ class DesktopResolver:
             self._warn(f"element resolution off: the accessible tree ({exc})")
             return False
         self._warn_if_chromium_invisible()
+        self._warn_if_bridge_disabled()
         return True
 
     def _warn_if_chromium_invisible(self) -> None:
@@ -498,6 +512,43 @@ class DesktopResolver:
                 "at all, even though other windows resolve normally"
             )
 
+    def _warn_if_bridge_disabled(self) -> None:
+        """Note that GTK3 and Qt will publish nothing, whatever the bus says.
+
+        `NO_AT_BRIDGE=1` stops GTK3 and Qt registering with the accessibility
+        bus at startup, so every window of such an application is absent from
+        the tree -- with no error, and with the bus and the tree both
+        perfectly healthy. Shells, containers, IDE terminals and tool runners
+        export it to silence GTK's "couldn't connect to accessibility bus"
+        warning, and an application launched from such a shell to be recorded
+        inherits it.
+
+        Worth a note of its own rather than leaving it to
+        `_can_resolve_elements`, because that probe cannot see it: the
+        desktop's own components registered when the session started, long
+        before any of this was in anyone's environment, so the tree has
+        children and the probe passes -- while the one application the
+        recording is *of* publishes nothing. Found live on a MATE session
+        where `--doctor` answered "ready to record, and clicks will be named"
+        and a mate-calc launched from that same environment never appeared in
+        the tree at all. pyguitest's own `doctor` reports this; this is the
+        matching note on the recorder's side, and on every recording made in
+        such a session.
+
+        GTK4 ignores the variable, which is what makes the failure look
+        selective rather than total, and so harder to recognise.
+        """
+        if os.environ.get("NO_AT_BRIDGE", "") not in ("", "0"):
+            self._bridge_disabled = True
+            self._warn(
+                "NO_AT_BRIDGE is set in this environment: any GTK3 or Qt "
+                "application that inherits it never registers with the "
+                "accessibility bus, so its clicks resolve to coordinates and "
+                "no element however healthy the bus looks -- unset it for the "
+                "process that launches the application being recorded (GTK4 "
+                "ignores it, so the gap looks selective)"
+            )
+
     def _any_screen_scaled(self) -> bool:
         """Whether any screen is scaled, which makes extents incomparable."""
         if self.session is None:
@@ -516,6 +567,18 @@ class DesktopResolver:
     def resolves_elements(self) -> bool:
         """Whether clicks will carry a named element rather than a coordinate."""
         return self._resolves_elements
+
+    @property
+    def bridge_disabled(self) -> bool:
+        """Whether element resolution works but GTK3 and Qt will publish nothing.
+
+        Not the same question as `resolves_elements`, and the reason both
+        exist: the tree is reachable and has the desktop's own components in
+        it, so resolution genuinely is available -- while the application
+        about to be recorded, launched from this same environment, will not
+        be in it. See `_warn_if_bridge_disabled`.
+        """
+        return self._bridge_disabled
 
     def resolve(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the window and element under this point.
@@ -544,6 +607,7 @@ class DesktopResolver:
     def _resolve(self, x: int, y: int, screen: int, *, spend: bool) -> Target:
         """The window and element under a point; see `resolve`."""
         self._spending = spend
+        self._from_popup = False
         window = self._window(x, y, screen)
         element = self._element(x, y) if self._resolves_elements else None
         if element is not None and not self._is_widget(element):
@@ -908,6 +972,15 @@ class DesktopResolver:
         process on the machine.
         """
         if element.pid == window.pid:
+            other = self._other_toplevel_of(element, window)
+            if other is not None:
+                self._warn(
+                    f"ignored an accessible element whose own path names "
+                    f"toplevel {other!r}, not {window.title!r}: the same "
+                    "process owns both, and the accessible tree has no "
+                    "stacking order between a process's own windows either"
+                )
+                return False
             return True
         if self._on_windows():
             return self._windows_mismatch(element, window)
@@ -917,6 +990,73 @@ class DesktopResolver:
             f"{self._mismatch_reason(element)}"
         )
         return False
+
+    _TOPLEVEL_ROLES = ("frame", "dialog", "window")
+    """Roles `path` uses for a toplevel ancestor -- see `_other_toplevel_of`."""
+
+    def _other_toplevel_of(self, element: ElementRef, window: WindowRef) -> str | None:
+        """The differently-titled toplevel `element`'s own ancestry names, if any.
+
+        A pid match is not a window match: one process routinely owns several
+        toplevels at once (a dialog and its parent, most commonly), and the
+        accessible tree has no more stacking order *between two windows of the
+        same application* than it does between two different ones -- so
+        `element_at` can answer for a widget in the wrong one of a process's own
+        windows exactly as it can for the wrong process's window, and pid
+        equality alone cannot catch it, being true either way.
+
+        Found live: mate-calc's Help > About opens a second toplevel
+        ('About MATE Calculator') that the window list correctly told apart
+        from 'Calculator' -- almost the same size, at the same origin, both
+        pid 6700. The click landed on the About dialog by every window-level
+        signal, and still resolved to the Calculator's own '=' button,
+        because AT-SPI's hit test does not know a dialog is stacked above its
+        parent -- only that a point falls inside a rectangle published by
+        either one. `path` is the one thing already captured that distinguishes
+        them: it carries the (role, name) of the toplevel the element is
+        actually nested under, from `_ancestry`, independent of any hit test.
+
+        **An open popup is exempt, and has to be.** A GTK menu is a window of
+        its own -- an override-redirect toplevel, which the window list names
+        after the process rather than the frame -- while its items stay
+        published as descendants of the frame that owns the menu bar. So for
+        every item in an open menu the element's path names the parent frame
+        and the window under the point names the popup, which is a
+        disagreement in form only: they are the same application's menu, seen
+        through the two mechanisms that each answer differently about it.
+        Rejecting those is a regression this check caused when first written,
+        caught the same afternoon -- `gui.menu_item("Open").click()` degraded
+        to a bare coordinate, undoing the popup resolution `_popup_at` exists
+        to provide.
+
+        Only a real disagreement rejects otherwise, matching every other check
+        here: an empty window title, an unstable one, an element with no
+        toplevel entry in its path, or a path entry with no name of its own
+        answers `None` rather than assuming a mismatch a genuinely quiet
+        signal cannot support. `window.title` is anchored to the *first*
+        title this window was ever seen with (see `_identify`), while a path
+        entry is read live -- so once a window's title has drifted
+        (`title_stable` False), the two are no longer comparable at all: a
+        click on a GNOME Text Editor button after typing a single character
+        would otherwise read the live, marker-bearing path name against the
+        anchored one and reject a click that never left its own window.
+
+        Ancestry is walked nearest-to-element first, the same order
+        `_best_owner` reads `path` in and for the same reason: a toplevel
+        nested under another toplevel (plausible on Qt/KDE, where a dialog
+        need not be a sibling the way GTK's are) must be judged by the one
+        the element is actually inside, not by whichever one sits closer to
+        the application root.
+        """
+        if self._from_popup or not window.title or not window.title_stable:
+            return None
+        for role, name in reversed(element.path):
+            # Stripped the way `_identify` strips `window.title`: the same
+            # trailing-whitespace disagreement between backends applies here.
+            name = (name or "").strip()
+            if role in self._TOPLEVEL_ROLES and name and name != window.title:
+                return name
+        return None
 
     def _mismatch_reason(self, element: ElementRef) -> str:
         """Why an element's process is not the one that owns the window under it.
@@ -1355,6 +1495,12 @@ class DesktopResolver:
                 return None
             element, rect = found
             described = self._describe_element(element)
+            # A rectangle here means `_popup_at` answered, which is also what
+            # tells `_other_toplevel_of` to leave this element alone. So does
+            # an owner `_live_at` recovered from a popup it had not seen open,
+            # which has no rectangle to give but set the flag itself.
+            if rect is not None:
+                self._from_popup = True
             # A popup's item read after the popup closed reports a rectangle at
             # the far corner of the screen, which no point is inside; the one it
             # had while it was open is what the press landed in.
@@ -1399,7 +1545,66 @@ class DesktopResolver:
                 if shown:
                     self._menu_owner = element
                     self._popup_layout, self._popup_seen = shown, _now()
+        elif spend and element.role in POPUP_ITEM_ROLES and not self._on_windows():
+            owner = self._revealed_popup_owner(element)
+            if owner is not None:
+                # The popup it opened is still over the point, so the window
+                # under it can be that popup rather than the owner's frame --
+                # the same disagreement in form `_other_toplevel_of` exempts.
+                self._from_popup = True
+                return owner, None
         return element, None
+
+    def _revealed_popup_owner(self, item: Any) -> Any | None:
+        """The control a press landed on, where the popup it opened answered.
+
+        A press is resolved when it is *consumed*, which is after the
+        application has reacted to it -- so a click that opens a drop-down is
+        asked about at a moment when the drop-down is already on screen and
+        over the very point that was clicked. GTK positions a combo box's
+        popup so that the selected item sits on top of the combo, and
+        publishes those items as children of the combo itself, so
+        `element_at` answers with the item: smaller than the combo, equally
+        covering the point, and no stacking order to tell it apart.
+
+        Found live driving a GTK combo box: the press that opened it recorded
+        as `gui.menu_item("Alpha").click()` -- an item nothing had chosen --
+        and the replay raised `ValueError: negative coordinates
+        (-2147483647, -2147483647)`, because a closed popup's items report the
+        unplaced sentinel. Worse, the press that *did* choose an item was
+        unnamed too: `_popup_at` only recognises a popup it saw opened, and
+        this one never registered an owner, so the whole interaction came out
+        wrong.
+
+        Only reached where `_popup_at` had no popup to offer, which is what
+        makes this the opening press rather than a choice from a popup already
+        known to be open. The owner is the nearest ancestor that is not itself
+        part of a popup -- the combo box, for a drop-down -- and naming it is
+        both truthful about what was pressed and replayable, where naming the
+        item is neither. Remembering the popup on the way past is what lets
+        the *next* press be named from it.
+        """
+        owner = item
+        for _ in range(_MAX_POPUP_ANCESTRY):
+            try:
+                owner = owner.parent
+            except Exception:  # noqa: BLE001 - a popup closing mid-walk is ordinary
+                return None
+            if owner is None:
+                return None
+            if owner.role not in POPUP_ITEM_ROLES:
+                break
+        else:
+            return None
+        if owner.role not in MENU_OWNER_ROLES:
+            # A menu bar or a window: the item was chosen from a popup this
+            # resolver never saw open, not pressed to open one, so it is the
+            # item that names the click.
+            return None
+        self._menu_owner = owner
+        self._popup_layout = self._visible_items(owner)
+        self._popup_seen = _now()
+        return owner
 
     def _popup_at(
         self, x: int, y: int, *, spend: bool
@@ -1539,6 +1744,8 @@ class DesktopResolver:
             extents=self._extents(element),
             pid=element.pid,
             actions=tuple(element.actions or ()),
+            expanded=element.expanded,
+            selectable=element.selectable,
         )
 
     def _extents(self, element: Any) -> tuple[int, int, int, int] | None:

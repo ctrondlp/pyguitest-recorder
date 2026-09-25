@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import queue
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -42,6 +43,18 @@ _KEY_RELEASE = 3
 _BUTTON_PRESS = 4
 _BUTTON_RELEASE = 5
 _MOTION = 6
+_MAPPING_NOTIFY = 34
+_MAPPING_MODIFIER = 0
+_MAPPING_KEYBOARD = 1
+
+# Core request opcodes this backend records, so a remap is seen in the same
+# ordered stream as the key events around it -- see `_Keymap`.
+_CHANGE_KEYBOARD_MAPPING = 100
+_SET_MODIFIER_MAPPING = 118
+
+# `reply.category` for record data: what the server sent, and what a client did.
+_FROM_SERVER = 0
+_FROM_CLIENT = 1
 
 _SHIFT_MASK = 1 << 0
 _LOCK_MASK = 1 << 1
@@ -162,7 +175,13 @@ class X11CaptureBackend:
         self._thread: threading.Thread | None = None
         self._queue: queue.Queue[Any] = queue.Queue()
         self._keysyms: dict[int, str] = {}
+        self._keymap = _Keymap()
         self._group_mask: int | None = None
+        # A remap a client requested, held until the server's MappingNotify
+        # says it took effect; and the notify just applied, whose copies to
+        # every other client follow it and must not be applied again.
+        self._staged: tuple[Any, ...] | None = None
+        self._applied: tuple[int, int, int] | None = None
 
     def start(self) -> None:
         """Open both connections, create the record context and begin pumping.
@@ -185,24 +204,27 @@ class X11CaptureBackend:
                     "x11-xserver-utils / xorg-x11-server-extra package"
                 )
             self._keysyms = _keysym_names(xlib)
-            self._group_mask = _group_switch_mask(self._control, xlib)
+            self._keymap.load(self._control)
+            self._group_mask = _group_switch_mask(self._keymap, xlib)
             # Created on the pump connection because that is the one that will
             # enable it; see the module docstring.
             self._context = self._pump.record_create_context(
                 0,
                 [xlib["record"].AllClients],
                 [
-                    {
-                        "core_requests": (0, 0),
-                        "core_replies": (0, 0),
-                        "ext_requests": (0, 0, 0, 0),
-                        "ext_replies": (0, 0, 0, 0),
-                        "delivered_events": (0, 0),
-                        "device_events": (_KEY_PRESS, _MOTION),
-                        "errors": (0, 0),
-                        "client_started": False,
-                        "client_died": False,
-                    }
+                    _record_range(
+                        device_events=(_KEY_PRESS, _MOTION),
+                        delivered_events=(_MAPPING_NOTIFY, _MAPPING_NOTIFY),
+                    ),
+                    _record_range(
+                        core_requests=(
+                            _CHANGE_KEYBOARD_MAPPING,
+                            _CHANGE_KEYBOARD_MAPPING,
+                        )
+                    ),
+                    _record_range(
+                        core_requests=(_SET_MODIFIER_MAPPING, _SET_MODIFIER_MAPPING)
+                    ),
                 ],
             )
             self._thread = threading.Thread(
@@ -236,9 +258,18 @@ class X11CaptureBackend:
         """
         if self._finished:
             return
-        if reply.category != 0 or reply.client_swapped:
+        if not isinstance(reply.data, bytes) or not reply.data:
             return
-        if not isinstance(reply.data, bytes) or reply.data[0] < 2:
+        if reply.category == _FROM_CLIENT:
+            # A byte-swapped client's remap is not decoded here: its
+            # MappingNotify then finds nothing staged and is read back from
+            # the server instead -- see `_mapping_notified`.
+            if not reply.client_swapped:
+                self._requested(reply.data)
+            return
+        if reply.category != _FROM_SERVER or reply.client_swapped:
+            return
+        if reply.data[0] < 2:
             return
         xlib = _import_xlib()
         data = reply.data
@@ -248,6 +279,11 @@ class X11CaptureBackend:
                 .EventField(None)
                 .parse_binary_value(data, self._pump.display, None, None)
             )
+            if event.type == _MAPPING_NOTIFY:
+                self._mapping_notified(event)
+                continue
+            # Anything else ends the run of copies one remap's notify came in.
+            self._staged = self._applied = None
             raw = self._translate(event)
             if raw is None:
                 continue
@@ -324,6 +360,88 @@ class X11CaptureBackend:
             text=_printable(keysym),
         )
 
+    def _requested(self, data: bytes) -> None:
+        """Stage a remap a client asked for, in stream order.
+
+        Why the mapping is mirrored here rather than read from the server:
+        a key event is decoded when the pump reaches it, which can be after
+        the keycode it names has been remapped *again*. `xdotool type` does
+        exactly that for text outside the base layout -- one spare keycode,
+        remapped to each character in turn -- so a pump running behind
+        would read every character through whichever mapping came last.
+        The request carries the new keysyms and is recorded in the same
+        ordered stream as the key events around it, so applying it here
+        decodes each press through the mapping in force when it was made.
+
+        Staged rather than applied: a request can fail (a bad value, a
+        modifier change refused while a key is down), and only the
+        MappingNotify the server broadcasts on success says it took effect.
+        """
+        self._staged = self._applied = None
+        order: Any = sys.byteorder
+        while len(data) >= 4:
+            opcode = data[0]
+            size = int.from_bytes(data[2:4], order) * 4
+            if size < 4 or size > len(data):
+                return  # a BIG-REQUESTS length or a torn record: not ours
+            body, data = data[:size], data[size:]
+            if opcode == _CHANGE_KEYBOARD_MAPPING and size >= 8:
+                count, first, per = body[1], body[4], body[5]
+                values = [
+                    int.from_bytes(body[i : i + 4], order)
+                    for i in range(8, 8 + count * per * 4, 4)
+                ]
+                rows = [values[i * per : (i + 1) * per] for i in range(count)]
+                self._staged = (_MAPPING_KEYBOARD, first, count, rows)
+            elif opcode == _SET_MODIFIER_MAPPING:
+                per = body[1]
+                codes = list(body[4 : 4 + 8 * per])
+                modifiers = [codes[i * per : (i + 1) * per] for i in range(8)]
+                self._staged = (_MAPPING_MODIFIER, 0, 0, modifiers)
+
+    def _mapping_notified(self, event: Any) -> None:
+        """Bring the mirrored mapping up to date with a MappingNotify.
+
+        The notify is recorded as it is delivered, once per connected
+        client, right after the request that caused it. A staged request it
+        answers is applied from its own data; the copies after it are
+        skipped. One with nothing staged came from somewhere the core
+        requests do not show -- XKB, which is how `setxkbmap` and a desktop's
+        layout switch remap -- and is read back from the server, which is
+        the one case still exposed to a later remap overtaking it.
+        """
+        request = event.request
+        if request not in (_MAPPING_KEYBOARD, _MAPPING_MODIFIER):
+            return
+        key = (
+            (request, event.first_keycode, event.count)
+            if request == _MAPPING_KEYBOARD
+            else (request, 0, 0)
+        )
+        if key == self._applied:
+            return
+        staged, self._staged = self._staged, None
+        if staged is not None and staged[:3] == key:
+            if request == _MAPPING_KEYBOARD:
+                self._keymap.apply_keyboard(staged[1], staged[3])
+            else:
+                self._keymap.apply_modifiers(staged[3])
+            self._applied = key
+        else:
+            self._applied = None
+            with contextlib.suppress(Exception):
+                if request == _MAPPING_KEYBOARD:
+                    self._keymap.load_keyboard(
+                        self._control, event.first_keycode, event.count
+                    )
+                else:
+                    self._keymap.load_modifiers(self._control)
+        # Both mappings decide which modifier bit is AltGr: which modifier
+        # Mode_switch/ISO_Level3_Shift is bound to, and which keycodes carry
+        # those keysyms. Found once at start, it would otherwise go on
+        # reading AltGr presses after such a remap as group 1.
+        self._group_mask = _group_switch_mask(self._keymap, _import_xlib())
+
     def _resolve_keysym(self, keycode: int, state: int) -> int:
         """Pick the one keysym this keycode+modifier state actually produces.
 
@@ -349,15 +467,15 @@ class X11CaptureBackend:
           why Shift+CapsLock on a letter types lowercase.
         """
         base_index = 2 if self._group_mask and (state & self._group_mask) else 0
-        unshifted = self._control.keycode_to_keysym(keycode, base_index)
-        shifted = self._control.keycode_to_keysym(keycode, base_index + 1)
+        unshifted = self._keymap.keycode_to_keysym(keycode, base_index)
+        shifted = self._keymap.keycode_to_keysym(keycode, base_index + 1)
         if shifted == 0:
             shifted = unshifted
         lock_shifts = bool(state & _LOCK_MASK) and _is_case_pair(unshifted, shifted)
         effective_shift = bool(state & _SHIFT_MASK) ^ lock_shifts
         keysym = shifted if effective_shift else unshifted
         if keysym == 0:
-            keysym = self._control.keycode_to_keysym(keycode, 0)
+            keysym = self._keymap.keycode_to_keysym(keycode, 0)
         return int(keysym)
 
     def events(self) -> Iterator[RawEvent]:
@@ -427,6 +545,81 @@ class X11CaptureBackend:
                     connection.close()
         self._pump = self._control = self._context = None
         self._queue.put(_SENTINEL)
+
+
+class _Keymap:
+    """The keyboard and modifier mappings, as this recording has seen them.
+
+    Kept here rather than read from a display connection's own cache: that
+    cache is refreshed from the server *now*, and a key event has to be
+    decoded by the mapping that was in force when it happened -- see
+    `X11CaptureBackend._requested`. Answers the same two questions a display
+    does, so `_group_switch_mask` reads either.
+    """
+
+    def __init__(
+        self,
+        keys: dict[int, list[int]] | None = None,
+        modifiers: list[list[int]] | None = None,
+    ) -> None:
+        self.keys: dict[int, list[int]] = dict(keys or {})
+        self.modifiers: list[list[int]] = modifiers or [[] for _ in range(8)]
+
+    def keycode_to_keysym(self, keycode: int, index: int) -> int:
+        row = self.keys.get(keycode, ())
+        return row[index] if index < len(row) else 0
+
+    def get_modifier_mapping(self) -> list[list[int]]:
+        return self.modifiers
+
+    def apply_keyboard(self, first: int, rows: list[list[int]]) -> None:
+        for offset, row in enumerate(rows):
+            self.keys[first + offset] = list(row)
+
+    def apply_modifiers(self, modifiers: list[list[int]]) -> None:
+        self.modifiers = [list(codes) for codes in modifiers]
+
+    def load(self, display: Any) -> None:
+        """Read both mappings from the server, whole, as capture starts."""
+        info = display.display.info
+        first = info.min_keycode
+        self.load_keyboard(display, first, info.max_keycode - first + 1)
+        self.load_modifiers(display)
+
+    def load_keyboard(self, display: Any, first: int, count: int) -> None:
+        self.apply_keyboard(first, display.get_keyboard_mapping(first, count))
+        _discard_events(display)
+
+    def load_modifiers(self, display: Any) -> None:
+        self.apply_modifiers(display.get_modifier_mapping())
+        _discard_events(display)
+
+
+def _discard_events(display: Any) -> None:
+    """Drop the events a round trip left queued on a connection nobody reads.
+
+    Only the MappingNotify broadcast ever arrives there, and the record
+    stream already carries it, in order; unread, the queue would only grow.
+    """
+    with contextlib.suppress(Exception):
+        for _ in range(display.pending_events()):
+            display.next_event()
+
+
+def _record_range(**selected: Any) -> dict[str, Any]:
+    """One XRecord range: nothing, except what `selected` names."""
+    return {
+        "core_requests": (0, 0),
+        "core_replies": (0, 0),
+        "ext_requests": (0, 0, 0, 0),
+        "ext_replies": (0, 0, 0, 0),
+        "delivered_events": (0, 0),
+        "device_events": (0, 0),
+        "errors": (0, 0),
+        "client_started": False,
+        "client_died": False,
+        **selected,
+    }
 
 
 def _import_xlib() -> dict[str, Any]:
@@ -525,8 +718,36 @@ def _is_case_pair(unshifted: int, shifted: int) -> bool:
     return bool(lower and upper and lower != upper and lower.lower() == upper.lower())
 
 
+_UNICODE_KEYSYM_BASE = 0x01000000
+"""ICCCM's direct-Unicode keysym block: `keysym - this` is the codepoint.
+
+`Xlib.XK.keysym_to_string` only ever covers Latin-1 (`keysym & 0xff00 == 0`)
+plus a handful of named control keys -- nothing in this block, which is
+exactly where a codepoint with no legacy X keysym of its own (all of CJK,
+among others) is placed. Confirmed live: `xdotool type` of Chinese text
+remaps an unused keycode to a keysym in this block for each character, and
+without this branch every one of them fell through to `""`, so the
+characters were captured as bare `key_press`/`key_release` events with no
+text at all -- silently, the same shape of loss as the Windows `VK_PACKET`
+bug this project already fixed (see status.md), on X11 instead.
+"""
+
+
 def _printable(keysym: int) -> str:
     """The character a keysym produces, or empty for a non-printing key."""
+    if keysym >= _UNICODE_KEYSYM_BASE:
+        codepoint = keysym - _UNICODE_KEYSYM_BASE
+        # A lone UTF-16 surrogate (0xD800-0xDFFF) is a valid `chr()` argument
+        # -- it does not raise -- but the string it produces cannot be
+        # encoded as UTF-8, so it would otherwise crash a later write of the
+        # recording rather than degrading to "" the way an out-of-range
+        # codepoint already does below.
+        if 0xD800 <= codepoint <= 0xDFFF:
+            return ""
+        try:
+            return chr(codepoint)
+        except ValueError:
+            return ""
     try:
         from Xlib import XK
     except ImportError:  # pragma: no cover - reached only without python-xlib
