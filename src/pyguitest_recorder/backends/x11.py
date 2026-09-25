@@ -43,6 +43,8 @@ _BUTTON_PRESS = 4
 _BUTTON_RELEASE = 5
 _MOTION = 6
 _MAPPING_NOTIFY = 34
+_MAPPING_MODIFIER = 0
+_MAPPING_KEYBOARD = 1
 
 _SHIFT_MASK = 1 << 0
 _LOCK_MASK = 1 << 1
@@ -345,10 +347,22 @@ class X11CaptureBackend:
         event) does as a side effect of waiting for its own reply.
         """
         self._control.sync()
+        remapped = False
         for _ in range(self._control.pending_events()):
             event = self._control.next_event()
             if getattr(event, "type", None) == _MAPPING_NOTIFY:
                 self._control.refresh_keyboard_mapping(event)
+                remapped |= getattr(event, "request", None) in (
+                    _MAPPING_MODIFIER,
+                    _MAPPING_KEYBOARD,
+                )
+        if remapped:
+            # The group-switch bit is a function of both mappings: which
+            # modifier Mode_switch/ISO_Level3_Shift is bound to, and which
+            # keycodes carry those keysyms. python-xlib refreshes neither for
+            # it -- a modifier remap is not even cached -- so the mask found in
+            # `start()` would keep reading AltGr presses as group 1.
+            self._group_mask = _group_switch_mask(self._control, _import_xlib())
 
     def _resolve_keysym(self, keycode: int, state: int) -> int:
         """Pick the one keysym this keycode+modifier state actually produces.

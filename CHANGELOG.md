@@ -25,6 +25,116 @@ was released.
   window and read the script it generated. `clickable` now recognises both
   vocabularies.
 
+- **The press that opened a drop-down was recorded as a click on an item
+  inside it, and the replay crashed.** A press is resolved when it is
+  *consumed*, which is after the application has reacted to it -- so a click
+  that opens a combo box is asked about at a moment when the popup is already
+  on screen and over the point that was clicked. GTK positions a combo's popup
+  so the selected item sits on top of the combo and publishes those items as
+  children of the combo itself, so `element_at` answers with the item: smaller
+  than the combo, equally covering the point, and with no stacking order to
+  tell them apart. Found driving a real GTK combo box: the opening press
+  recorded as `gui.menu_item("Alpha").click()` -- an item nothing had chosen --
+  and the replay raised `ValueError: Attempting to generate a mouse event at
+  negative coordinates: (-2147483647, -2147483647)`, because a closed popup's
+  items report AT-SPI's unplaced sentinel. It cascaded, too: `_popup_at` only
+  recognises a popup whose opening it saw, and this one registered no owner,
+  so the press that *did* choose an item went unnamed as well. The press is
+  now attributed to the nearest ancestor that is not itself part of a popup --
+  the combo box -- and the popup is remembered on the way past, so the choice
+  after it resolves normally. The same interaction now records as
+  `gui.dropdown("Size").click()` then `gui.menu_item("Gamma").click()`, and
+  replays clean.
+
+  Two limits on that, from review of this change rather than a live run: the
+  recovered owner has to be a control that opens a popup (a combo box or a
+  menu) -- walking up from a menu item the resolver never saw open could
+  otherwise land on the menu bar and name *that* for the click -- and it is
+  treated as coming from the popup still on screen over it, so the
+  same-process toplevel check below does not reject it because the window
+  under the point is that popup rather than the combo's frame.
+
+- **`--doctor` said "ready to record, and clicks will be named" on a session
+  where no GTK3 or Qt application could be named at all.** `NO_AT_BRIDGE` --
+  exported by plenty of shells, containers and IDE terminals to silence GTK's
+  "couldn't connect to accessibility bus" warning -- stops GTK3 and Qt
+  registering with the bus at startup, so an application launched from such a
+  shell to be recorded publishes nothing. The element probe cannot see it: the
+  desktop's own components registered when the session started, long before
+  the variable was in anyone's environment, so the tree has children and the
+  probe passes. Found on a MATE session where `--doctor` gave that verdict and
+  a `mate-calc` launched from the same environment never appeared in the tree,
+  while pyguitest's own `doctor` named the variable in the same minute. The
+  recorder now reports it too -- in `--doctor` and in every recording's notes --
+  and the verdict says "a GTK3 or Qt application that inherits NO_AT_BRIDGE
+  will have no click named" rather than contradicting the note three lines
+  above it. Stated as the risk rather than the outcome, deliberately: the
+  recorder reads its own environment as a proxy for the one the application
+  was launched in, and a real run that launched the application without the
+  variable did name every click.
+
+- **A click resolved to the wrong toplevel's element whenever a process owned
+  two overlapping windows.** `_belongs`'s process check treats a matching pid
+  as proof an element belongs to the window resolved under the same point --
+  true for a single-window application, but one process routinely owns
+  several toplevels at once, most commonly a dialog and its parent. Found
+  live: mate-calc's Help > About opens a second window almost the same size
+  as `Calculator` and at the same origin, both pid-identical, and a click on
+  the About dialog's Close button resolved to `Calculator`'s own `=` button
+  instead -- the window was named correctly (window lookup uses real X
+  stacking order), but AT-SPI's hit test has no concept of one window being
+  stacked above another window of the *same* process, so it answered from
+  whichever toplevel's tree it reached first. `path` -- the element's own
+  ancestry, already captured for locator disambiguation -- carries the
+  (role, name) of the toplevel the element is actually nested under, and now
+  settles it: a same-pid element whose own path names a different toplevel
+  than the one resolved is refused, the same way an element from a different
+  process stacked underneath already was, with a note explaining why.
+  The toplevel name read from `path` is stripped before it is compared, the
+  same way the window title it is compared against already was: backends
+  disagree on trailing whitespace, and a trailing space was enough to refuse
+  an element from the very window clicked.
+
+- **Typing anything outside the base X keyboard layout was captured as
+  nothing at all.** `xdotool type` (and several input methods) type such a
+  character by remapping an unused keycode to it via `XChangeKeyboardMapping`
+  and pressing that keycode -- and this backend's keysym lookups run against
+  a connection whose local keymap cache is built once and never refreshed,
+  because nothing here ever read that connection's own event queue for the
+  `MappingNotify` the server broadcasts on every remap. Confirmed live:
+  recording real Chinese text typed into gedit captured every keystroke as
+  keysym `0x0` with no text, and the generated script called
+  `gui.tap_key("0x0")` four times instead of typing anything. Two fixes,
+  found together: `_resolve_keysym` now drains and applies any pending
+  `MappingNotify` before every lookup, and `_printable` now decodes ICCCM's
+  direct-Unicode keysym block (`0x01000000 + codepoint`), which
+  `Xlib.XK.keysym_to_string` never covered and which is exactly where a
+  character with no legacy X keysym of its own -- all of CJK, among others --
+  lands. Re-run after both fixes: the same recording produced
+  `gui.type_text("你好世界")`, and replaying it into a fresh gedit read back
+  the same text through AT-SPI. The same shape of bug as the Windows
+  `VK_PACKET` fix below, on X11 instead.
+  A remap that moves AltGr itself -- which modifier bit `Mode_switch` or
+  `ISO_Level3_Shift` is bound to, or which keycode carries it -- now also
+  re-reads the group-switch mask, which was found once at start and would
+  otherwise keep reading every AltGr press after such a remap as group 1.
+
+- **A recording made on a private Xvfb reported the developer's own desktop
+  environment.** `scoped_environment` strips `WAYLAND_DISPLAY` so a recording
+  of X clients is not described as a Wayland session, but never stripped
+  `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`/`DESKTOP_SESSION` -- variables
+  scoped to the *login session*, not to any one X display. Found live:
+  recording through `--display :99` from a MATE session put
+  `XDG_CURRENT_DESKTOP=MATE` into the scoped environment unchanged, and the
+  generated script's header read `Recorded on: x11 (other, MATE)` for a bare
+  Xvfb with no window manager and nothing resembling MATE running on it.
+  Those three variables are now dropped whenever `display` names a server
+  other than the ambient one, since unlike `DISPLAY` there is no override to
+  put a correct value in their place -- a private Xvfb cannot be asked which
+  desktop environment it belongs to, because it does not belong to one. Left
+  alone recording the desktop you are sitting in front of, where the
+  variables are exactly what they claim to be.
+
 ### Changed
 
 - **A recorded double click that opened or closed a tree row, a notebook
@@ -73,6 +183,14 @@ was released.
   name="Tree").select()`, which switched the tab on replay against a fresh
   window -- where it had rendered as a bare `gui.click()` before this.
 
+  Where one of these roles offers both a selection and a click action,
+  `select()` now wins. UIA publishes `do default action` on nearly every
+  control, so on Windows the radio and the tree item named `click()` instead
+  -- and a tree row's default action there is a double click, which toggles
+  the row rather than selecting it. Limited to these roles on purpose: an
+  AT-SPI menu item is SELECTABLE too, and selecting one would only highlight
+  what the recording chose.
+
 - **The pyguitest floor moved to 0.12.0, and the generated header moved with
   it.** A script generated now says `Profile:     pyguitest-0.12`, because
   `PROFILE` follows the API surface `validate()` checks the emitted calls
@@ -81,103 +199,25 @@ was released.
   additions -- a floor left at 0.11.0 would let a recording generate calls an
   installed pyguitest does not actually have.
 
+### Added
+
+- **`scripts/gtk_probe_window.py`, a GTK window with a real control set, for
+  the X11 live checks.** The X11 counterpart of `win32_probe_window.py`, and
+  the answer to this file's own long-standing note that the routine live check
+  drove two bare GTK windows -- an entry and a label -- so every control a real
+  application is mostly *made of* went unexercised on this platform while the
+  Windows side had a tab control, a combo box, a list view and a real menu bar
+  to aim at. It publishes an entry, a password entry, a button, a check box, a
+  radio pair, a combo box, a spin button, a notebook with two pages, a tree
+  view, a two-menu menu bar and a button raising a real modal dialog, each
+  with an explicit accessible name. It earned its place immediately:
+  recording against it found the notebook hit-test bug fixed upstream in
+  pyguitest (see that repository's changelog), the drop-down misattribution
+  above, and the `NO_AT_BRIDGE` gap in `--doctor`.
+
 ## [0.4.0] — 2026-09-23
 
 ### Fixed
-
-- **The press that opened a drop-down was recorded as a click on an item
-  inside it, and the replay crashed.** A press is resolved when it is
-  *consumed*, which is after the application has reacted to it -- so a click
-  that opens a combo box is asked about at a moment when the popup is already
-  on screen and over the point that was clicked. GTK positions a combo's popup
-  so the selected item sits on top of the combo and publishes those items as
-  children of the combo itself, so `element_at` answers with the item: smaller
-  than the combo, equally covering the point, and with no stacking order to
-  tell them apart. Found driving a real GTK combo box: the opening press
-  recorded as `gui.menu_item("Alpha").click()` -- an item nothing had chosen --
-  and the replay raised `ValueError: Attempting to generate a mouse event at
-  negative coordinates: (-2147483647, -2147483647)`, because a closed popup's
-  items report AT-SPI's unplaced sentinel. It cascaded, too: `_popup_at` only
-  recognises a popup whose opening it saw, and this one registered no owner,
-  so the press that *did* choose an item went unnamed as well. The press is
-  now attributed to the nearest ancestor that is not itself part of a popup --
-  the combo box -- and the popup is remembered on the way past, so the choice
-  after it resolves normally. The same interaction now records as
-  `gui.dropdown("Size").click()` then `gui.menu_item("Gamma").click()`, and
-  replays clean.
-
-- **`--doctor` said "ready to record, and clicks will be named" on a session
-  where no GTK3 or Qt application could be named at all.** `NO_AT_BRIDGE` --
-  exported by plenty of shells, containers and IDE terminals to silence GTK's
-  "couldn't connect to accessibility bus" warning -- stops GTK3 and Qt
-  registering with the bus at startup, so an application launched from such a
-  shell to be recorded publishes nothing. The element probe cannot see it: the
-  desktop's own components registered when the session started, long before
-  the variable was in anyone's environment, so the tree has children and the
-  probe passes. Found on a MATE session where `--doctor` gave that verdict and
-  a `mate-calc` launched from the same environment never appeared in the tree,
-  while pyguitest's own `doctor` named the variable in the same minute. The
-  recorder now reports it too -- in `--doctor` and in every recording's notes --
-  and the verdict says "a GTK3 or Qt application that inherits NO_AT_BRIDGE
-  will have no click named" rather than contradicting the note three lines
-  above it. Stated as the risk rather than the outcome, deliberately: the
-  recorder reads its own environment as a proxy for the one the application
-  was launched in, and a real run that launched the application without the
-  variable did name every click.
-
-- **A click resolved to the wrong toplevel's element whenever a process owned
-  two overlapping windows.** `_belongs`'s process check treats a matching pid
-  as proof an element belongs to the window resolved under the same point --
-  true for a single-window application, but one process routinely owns
-  several toplevels at once, most commonly a dialog and its parent. Found
-  live: mate-calc's Help > About opens a second window almost the same size
-  as `Calculator` and at the same origin, both pid-identical, and a click on
-  the About dialog's Close button resolved to `Calculator`'s own `=` button
-  instead -- the window was named correctly (window lookup uses real X
-  stacking order), but AT-SPI's hit test has no concept of one window being
-  stacked above another window of the *same* process, so it answered from
-  whichever toplevel's tree it reached first. `path` -- the element's own
-  ancestry, already captured for locator disambiguation -- carries the
-  (role, name) of the toplevel the element is actually nested under, and now
-  settles it: a same-pid element whose own path names a different toplevel
-  than the one resolved is refused, the same way an element from a different
-  process stacked underneath already was, with a note explaining why.
-
-- **Typing anything outside the base X keyboard layout was captured as
-  nothing at all.** `xdotool type` (and several input methods) type such a
-  character by remapping an unused keycode to it via `XChangeKeyboardMapping`
-  and pressing that keycode -- and this backend's keysym lookups run against
-  a connection whose local keymap cache is built once and never refreshed,
-  because nothing here ever read that connection's own event queue for the
-  `MappingNotify` the server broadcasts on every remap. Confirmed live:
-  recording real Chinese text typed into gedit captured every keystroke as
-  keysym `0x0` with no text, and the generated script called
-  `gui.tap_key("0x0")` four times instead of typing anything. Two fixes,
-  found together: `_resolve_keysym` now drains and applies any pending
-  `MappingNotify` before every lookup, and `_printable` now decodes ICCCM's
-  direct-Unicode keysym block (`0x01000000 + codepoint`), which
-  `Xlib.XK.keysym_to_string` never covered and which is exactly where a
-  character with no legacy X keysym of its own -- all of CJK, among others --
-  lands. Re-run after both fixes: the same recording produced
-  `gui.type_text("你好世界")`, and replaying it into a fresh gedit read back
-  the same text through AT-SPI. The same shape of bug as the Windows
-  `VK_PACKET` fix below, on X11 instead.
-
-- **A recording made on a private Xvfb reported the developer's own desktop
-  environment.** `scoped_environment` strips `WAYLAND_DISPLAY` so a recording
-  of X clients is not described as a Wayland session, but never stripped
-  `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`/`DESKTOP_SESSION` -- variables
-  scoped to the *login session*, not to any one X display. Found live:
-  recording through `--display :99` from a MATE session put
-  `XDG_CURRENT_DESKTOP=MATE` into the scoped environment unchanged, and the
-  generated script's header read `Recorded on: x11 (other, MATE)` for a bare
-  Xvfb with no window manager and nothing resembling MATE running on it.
-  Those three variables are now dropped whenever `display` names a server
-  other than the ambient one, since unlike `DISPLAY` there is no override to
-  put a correct value in their place -- a private Xvfb cannot be asked which
-  desktop environment it belongs to, because it does not belong to one. Left
-  alone recording the desktop you are sitting in front of, where the
-  variables are exactly what they claim to be.
 
 - **`scripts/live-capture-check.py`'s private bus was not private enough, and
   evicted the developer's accessibility bus.** It re-execs on a session bus of
@@ -296,20 +336,6 @@ was released.
   the right display in it.
 
 ### Added
-
-- **`scripts/gtk_probe_window.py`, a GTK window with a real control set, for
-  the X11 live checks.** The X11 counterpart of `win32_probe_window.py`, and
-  the answer to this file's own long-standing note that the routine live check
-  drove two bare GTK windows -- an entry and a label -- so every control a real
-  application is mostly *made of* went unexercised on this platform while the
-  Windows side had a tab control, a combo box, a list view and a real menu bar
-  to aim at. It publishes an entry, a password entry, a button, a check box, a
-  radio pair, a combo box, a spin button, a notebook with two pages, a tree
-  view, a two-menu menu bar and a button raising a real modal dialog, each
-  with an explicit accessible name. It earned its place immediately:
-  recording against it found the notebook hit-test bug fixed upstream in
-  pyguitest (see that repository's changelog), the drop-down misattribution
-  above, and the `NO_AT_BRIDGE` gap in `--doctor`.
 
 - **A generated script says when its `app_id` match is protocol-specific.** An
   app id recorded through XWayland is the class half of `WM_CLASS`, and the

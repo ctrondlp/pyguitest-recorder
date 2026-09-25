@@ -216,6 +216,29 @@ def test_a_click_on_a_radio_is_emitted_as_a_select(window):
     assert validate(source) == []
 
 
+@pytest.mark.parametrize("role", ["radio button", "tree item"])
+def test_select_wins_over_a_click_action_where_selecting_is_the_act(window, role):
+    # UIA publishes `do default action` on these too, and a tree row's
+    # default action there is a double click -- `click()` would toggle the
+    # row, not select it.
+    element = ElementRef(
+        role=role, name="Q1", actions=("do default action",), selectable=True
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+    assert ".select()" in source
+    assert ".click()" not in source
+
+
+def test_a_selectable_menu_item_still_clicks(window):
+    # AT-SPI marks menu items SELECTABLE; selecting one only highlights it.
+    item = ElementRef(
+        role="menu item", name="Open", actions=("click",), selectable=True
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=item)))
+    assert 'gui.menu_item("Open").click()' in source
+    assert ".select()" not in source
+
+
 def test_an_element_offering_nothing_still_falls_to_a_coordinate(window):
     # A recorded empty tuple is "confirmed: nothing to act through", so the
     # coordinate stays -- and the comment says which element it meant.

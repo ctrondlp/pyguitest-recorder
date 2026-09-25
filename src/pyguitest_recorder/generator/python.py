@@ -128,6 +128,16 @@ _ELEMENT_FACTORIES = frozenset(_SUGAR.values()) | {
 
 _TEXT_ROLES = frozenset({"entry", "text", "password text"})
 
+# Roles whose click *is* a selection, so `select()` is tried ahead of
+# `click()` where the element offers both. Windows publishes `do default
+# action` on nearly everything, and a tree row's default action there is a
+# double click -- it toggles the row rather than selecting it. Not every
+# selectable role: an AT-SPI menu item carries SELECTABLE too, and selecting
+# one only highlights it where the recording chose it.
+_SELECT_ROLES = frozenset(
+    {"radio button", "page tab", "tree item", "list item", "table row", "table cell"}
+)
+
 # Role value -> the Role enum member name, for readable output.
 _ROLE_CONSTANTS = {
     "push button": "PUSH_BUTTON",
@@ -1155,7 +1165,14 @@ class PythonGenerator:
             state.bare_click_pending = False
             return
         if event.button == 1:
-            call = self._element_call(event.target.element, state, "click()")
+            element = event.target.element
+            if (
+                element is not None
+                and element.role in _SELECT_ROLES
+                and self._select_click(event, state)
+            ):
+                return
+            call = self._element_call(element, state, "click()")
             if call is not None:
                 state.lines.extend([call] * event.count)
                 state.pointer = None

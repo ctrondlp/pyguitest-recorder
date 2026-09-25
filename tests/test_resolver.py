@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from pyguitest_recorder.model import ElementRef
+from pyguitest_recorder.model import ElementRef, WindowRef
 from pyguitest_recorder.platforms import (
     foreign_element_reason,
     foreign_focus_reason,
@@ -2143,3 +2143,33 @@ class TestProcessAncestry:
             resolver_module, "_parent_pids_windows", lambda: {os.getpid(): 4242}
         )
         assert resolver_module._ancestor_pids() == [4242]
+
+
+def test_a_recovered_popup_owner_has_to_be_a_control_that_opens_one():
+    # Walking up from an item in a menu the resolver never saw open passes the
+    # `menu` and stops at the menu bar -- which names nothing the user pressed.
+    # The item stays the answer, rather than the bar being made its owner.
+    bar = FakeElement("menu bar", "")
+    menu = FakeElement("menu", "File", parent=bar)
+    item = FakeElement("menu item", "New", parent=menu)
+    made = popup_resolver()
+    assert made._revealed_popup_owner(item) is None
+    assert made._menu_owner is None
+
+
+def test_a_combo_box_is_recovered_as_its_popups_owner():
+    combo = FakeElement("combo box", "Size")
+    popup = FakeElement("menu", "", parent=combo)
+    item = FakeElement("menu item", "Alpha", parent=popup)
+    made = popup_resolver()
+    assert made._revealed_popup_owner(item) is combo
+    assert made._menu_owner is combo
+
+
+def test_a_toplevel_name_with_trailing_whitespace_is_not_another_toplevel():
+    # `_identify` strips the window's title; the path entry it is compared
+    # against has to be stripped the same way, or a trailing space refuses an
+    # element from the very window that was clicked.
+    made = popup_resolver()
+    element = ElementRef(role="button", name="Save", path=(("frame", "Target "),))
+    assert made._other_toplevel_of(element, WindowRef(title="Target")) is None

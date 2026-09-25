@@ -583,8 +583,12 @@ def _check_the_script_names_its_controls(source: str) -> list[str]:
     script has to reach for them by name, through `select()`, because a
     coordinate is the one locator that breaks the moment the window moves.
     Asserted rather than assumed: a recording is only as good as what it
-    renders, and both of these controls publish `select` and no `click`, which
-    is exactly the shape that used to fall to a coordinate.
+    renders, and both of these controls offer a selection alongside UIA's
+    `do default action` -- which, on a tree row, is a double click that
+    toggles it rather than selecting it.
+
+    Per control, not "a select() somewhere": the ListView row renders as one
+    too, and would satisfy a check that only looked for the method.
     """
     problems = []
     for wanted in (
@@ -593,8 +597,8 @@ def _check_the_script_names_its_controls(source: str) -> list[str]:
     ):
         if wanted not in source:
             problems.append(f"the generated script does not name {wanted}")
-    if ".select()" not in source:
-        problems.append("nothing came out as select() -- see the radio and the tree")
+        elif not re.search(re.escape(wanted) + r"[^\n]*\)\.select\(\)", source):
+            problems.append(f"{wanted} is named, but not through select()")
     return problems
 
 

@@ -1051,6 +1051,9 @@ class DesktopResolver:
         if self._from_popup or not window.title or not window.title_stable:
             return None
         for role, name in reversed(element.path):
+            # Stripped the way `_identify` strips `window.title`: the same
+            # trailing-whitespace disagreement between backends applies here.
+            name = (name or "").strip()
             if role in self._TOPLEVEL_ROLES and name and name != window.title:
                 return name
         return None
@@ -1493,8 +1496,11 @@ class DesktopResolver:
             element, rect = found
             described = self._describe_element(element)
             # A rectangle here means `_popup_at` answered, which is also what
-            # tells `_other_toplevel_of` to leave this element alone.
-            self._from_popup = rect is not None
+            # tells `_other_toplevel_of` to leave this element alone. So does
+            # an owner `_live_at` recovered from a popup it had not seen open,
+            # which has no rectangle to give but set the flag itself.
+            if rect is not None:
+                self._from_popup = True
             # A popup's item read after the popup closed reports a rectangle at
             # the far corner of the screen, which no point is inside; the one it
             # had while it was open is what the press landed in.
@@ -1542,6 +1548,10 @@ class DesktopResolver:
         elif spend and element.role in POPUP_ITEM_ROLES and not self._on_windows():
             owner = self._revealed_popup_owner(element)
             if owner is not None:
+                # The popup it opened is still over the point, so the window
+                # under it can be that popup rather than the owner's frame --
+                # the same disagreement in form `_other_toplevel_of` exempts.
+                self._from_popup = True
                 return owner, None
         return element, None
 
@@ -1585,6 +1595,11 @@ class DesktopResolver:
             if owner.role not in POPUP_ITEM_ROLES:
                 break
         else:
+            return None
+        if owner.role not in MENU_OWNER_ROLES:
+            # A menu bar or a window: the item was chosen from a popup this
+            # resolver never saw open, not pressed to open one, so it is the
+            # item that names the click.
             return None
         self._menu_owner = owner
         self._popup_layout = self._visible_items(owner)
