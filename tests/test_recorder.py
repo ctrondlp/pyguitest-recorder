@@ -776,6 +776,80 @@ class TestWindowsEnvironmentSnapshot:
         assert env.xwayland is True
 
 
+class TestScopedEnvironmentDropsForeignDesktopNames:
+    """A private Xvfb does not belong to the ambient login session's desktop.
+
+    Found live: recording through `--display :99` from a MATE session put
+    `XDG_CURRENT_DESKTOP=MATE` into the scoped environment unchanged, and
+    `describe_environment` reported "Recorded on: x11 (other, MATE)" for a
+    bare Xvfb with no window manager and nothing resembling MATE running on
+    it. `DISPLAY` and `WAYLAND_DISPLAY` are display-scoped and this function
+    already corrects for both; the desktop-name variables are scoped to the
+    login session instead, so the only correct move for a foreign display is
+    to drop them rather than guess at a replacement.
+    """
+
+    def test_a_foreign_display_loses_the_ambient_desktop_name(self):
+        from pyguitest_recorder import recorder as recorder_module
+
+        variables = {
+            "DISPLAY": ":0",
+            "XDG_CURRENT_DESKTOP": "MATE",
+            "XDG_SESSION_DESKTOP": "mate",
+            "DESKTOP_SESSION": "mate",
+        }
+        with mock.patch.dict(recorder_module.os.environ, variables, clear=False):
+            scoped = recorder_module.scoped_environment(":99")
+        assert scoped["DISPLAY"] == ":99"
+        assert "XDG_CURRENT_DESKTOP" not in scoped
+        assert "XDG_SESSION_DESKTOP" not in scoped
+        assert "DESKTOP_SESSION" not in scoped
+
+    def test_the_ambient_display_keeps_its_own_desktop_name(self):
+        # The ordinary case: recording the desktop you are sitting in front
+        # of, where no `--display` was given and the variables are exactly
+        # what they claim to be.
+        from pyguitest_recorder import recorder as recorder_module
+
+        variables = {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "MATE"}
+        with mock.patch.dict(recorder_module.os.environ, variables, clear=False):
+            scoped = recorder_module.scoped_environment(":0")
+        assert scoped["XDG_CURRENT_DESKTOP"] == "MATE"
+
+    def test_no_display_argument_keeps_the_ambient_desktop_name(self):
+        # `display=""` is what a caller with nothing to override passes; it is
+        # never "a different display" and must not be read as one.
+        from pyguitest_recorder import recorder as recorder_module
+
+        variables = {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "MATE"}
+        with mock.patch.dict(recorder_module.os.environ, variables, clear=False):
+            scoped = recorder_module.scoped_environment("")
+        assert scoped["XDG_CURRENT_DESKTOP"] == "MATE"
+
+    def test_an_implicit_and_explicit_screen_number_are_the_same_display(self):
+        # VITAL -- keep this test. `:0` and `:0.0` name the same X server --
+        # an omitted screen number means screen 0 -- so a user recording
+        # their own ambient desktop with `--display :0` while `$DISPLAY`
+        # reads `:0.0` must not have the real desktop name stripped from a
+        # recording that never left the machine it was made on.
+        from pyguitest_recorder import recorder as recorder_module
+
+        variables = {"DISPLAY": ":0.0", "XDG_CURRENT_DESKTOP": "MATE"}
+        with mock.patch.dict(recorder_module.os.environ, variables, clear=False):
+            scoped = recorder_module.scoped_environment(":0")
+        assert scoped["XDG_CURRENT_DESKTOP"] == "MATE"
+
+    def test_a_genuinely_different_screen_still_loses_the_desktop_name(self):
+        # The equivalence above must not swallow a real difference: screen 1
+        # of the same server is a different display from screen 0.
+        from pyguitest_recorder import recorder as recorder_module
+
+        variables = {"DISPLAY": ":0.0", "XDG_CURRENT_DESKTOP": "MATE"}
+        with mock.patch.dict(recorder_module.os.environ, variables, clear=False):
+            scoped = recorder_module.scoped_environment(":0.1")
+        assert "XDG_CURRENT_DESKTOP" not in scoped
+
+
 class TestPlatformSemanticsFollowTheBackend:
     """The context a recording opens is the recording's platform's, not the host's.
 

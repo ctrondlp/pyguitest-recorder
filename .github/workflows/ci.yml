@@ -122,13 +122,14 @@ jobs:
       # for.
       #
       # pyguitest resolves from PyPI here like every other job's, because the
-      # floor in pyproject.toml is now `pyguitest>=0.11.0` -- the first release
-      # carrying `pyguitest.backends.win32`. Until that release this job
-      # installed pyguitest from git instead, since no published version
-      # imported here at all; the bridge is gone and the floor holds the
-      # platform.
+      # floor in pyproject.toml is now `pyguitest>=0.12.0` -- the release
+      # carrying `Element.expand()`/`.collapse()` and reading `.selectable`
+      # directly, which the generator now emits and reads. Before 0.11.0
+      # (`pyguitest.backends.win32`) this job installed pyguitest from git
+      # instead, since no published version imported here at all; the bridge
+      # is gone and the floor holds the platform.
       #
-      # So this repository does not build at all until pyguitest 0.11.0 is on
+      # So this repository does not build at all until pyguitest 0.12.0 is on
       # PyPI, and not only here: every job installs this package, so `tests`,
       # `lint` and `live` fail at their own install steps for the same reason.
       # That is the honest outcome of a floor raised ahead of its release, and

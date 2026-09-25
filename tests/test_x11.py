@@ -49,12 +49,33 @@ class FakeConnection:
         self.modifier_mapping = modifier_mapping or [[] for _ in range(8)]
         self.closed = False
         self.disabled = threading.Event()
+        self.pending = []
+        self.refreshed = []
+        self.sync_calls = 0
 
     def keycode_to_keysym(self, keycode, index):
         return self.keymap.get((keycode, index), 0)
 
     def get_modifier_mapping(self):
         return self.modifier_mapping
+
+    def sync(self):
+        """A round trip.
+
+        The point at which a real connection would pull a broadcast
+        MappingNotify off the wire. Counted rather than acted on: what
+        matters to the tests here is that `_resolve_keysym` asks.
+        """
+        self.sync_calls += 1
+
+    def pending_events(self):
+        return len(self.pending)
+
+    def next_event(self):
+        return self.pending.pop(0)
+
+    def refresh_keyboard_mapping(self, evt):
+        self.refreshed.append(evt)
 
     def record_disable_context(self, context):
         self.disabled.set()
@@ -300,6 +321,39 @@ def test_an_unmapped_keycode_is_reported_rather_than_dropped():
     assert drain(made)[0].keysym == "0x0"
 
 
+def test_a_pending_mapping_notify_is_applied_before_the_keysym_lookup():
+    """A remap mid-recording is picked up, not read off a stale cache.
+
+    `xdotool type` (and several input methods) type a character outside the
+    base layout by remapping an unused keycode to it, typing through that
+    keycode, then moving on -- and this backend's keysym lookups run against
+    a connection whose local keymap cache is built once, at `start()`, and
+    never refreshed on its own. Found live recording real Chinese text: every
+    character came back keysym `0x0`. `_resolve_keysym` now drains any
+    `MappingNotify` waiting on `self._control` and hands it to
+    `refresh_keyboard_mapping` before resolving -- this checks that it does,
+    using the fake's own bookkeeping rather than a real remap.
+    """
+    made = backend()
+    notice = xevent.MappingNotify(
+        sequence_number=0, request=0, first_keycode=8, count=1
+    )
+    made._control.pending.append(notice)
+    made._handle(FakeReply(key(38)))
+    assert made._control.sync_calls == 1
+    assert made._control.refreshed == [notice]
+
+
+def test_resolving_a_keysym_syncs_even_with_nothing_pending():
+    # The ordinary case: no remap happened, so the drain finds nothing -- but
+    # the sync that would have picked one up still has to run every time,
+    # since a keycode's mapping can change between any two key events.
+    made = backend()
+    made._handle(FakeReply(key(38)))
+    assert made._control.sync_calls == 1
+    assert made._control.refreshed == []
+
+
 def test_a_key_release_is_kept_because_modifiers_need_it():
     from Xlib import XK
 
@@ -337,6 +391,28 @@ def test_printable_rejects_control_characters():
     assert _printable(XK.XK_Return) == ""
     assert _printable(XK.XK_BackSpace) == ""
     assert _printable(XK.XK_Escape) == ""
+
+
+def test_printable_decodes_the_direct_unicode_keysym_block():
+    """ICCCM's 0x01000000+codepoint block.
+
+    `keysym_to_string` never covers it -- confirmed missing live, recording
+    `xdotool type` of Chinese text, where every character in this block came
+    back empty. `chr('你')` is `0x4f60`, so its keysym is `0x1004f60`.
+    """
+    assert _printable(0x01004F60) == "你"
+    assert _printable(0x0100_0041) == "A"  # low end of the block, sanity check
+
+
+def test_printable_refuses_a_lone_surrogate_rather_than_crash_later():
+    # VITAL -- keep this test. A keysym in 0x0100D800-0x0100DFFF is a valid
+    # `chr()` argument -- it does not raise -- but the lone surrogate it
+    # produces cannot be UTF-8 encoded, so it must degrade to "" here rather
+    # than crash a later write of the recording (JSON, or the generated
+    # script) with an unhandled UnicodeEncodeError.
+    assert _printable(0x0100D800) == ""
+    assert _printable(0x0100DFFF) == ""
+    assert _printable(0x0100DC00) == ""  # mid-range, not just the edges
 
 
 def test_stop_lets_the_pump_thread_out_before_closing_its_connection():

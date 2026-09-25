@@ -18,6 +18,13 @@ Only the controls belonging to the selected tab are shown -- SysTabControl32
 does not manage child visibility on its own, so this window does what any
 real application using it raw has to do, on `TCN_SELCHANGE`.
 
+The `Groups` page carries the two controls whose *structure* is the point:
+two radio groups separated by `WS_GROUP`, so one group's selection can be
+told apart from the other's, and a `SysTreeView32` with a branch that starts
+collapsed. A tree item is a tree item to UI Automation -- its own
+expand/collapse state, its own SelectionItem -- where the report-view list on
+the `List` page is flat, and both are shapes the resolver has to name.
+
     python win32_probe_window.py --title "Probe" --at 100 100 --size 520 340
 """
 
@@ -42,6 +49,10 @@ _WS_BORDER = 0x00800000
 _WS_TABSTOP = 0x00010000
 _BS_PUSHBUTTON = 0x00000000
 _BS_AUTOCHECKBOX = 0x00000003
+_BS_AUTORADIOBUTTON = 0x00000009
+_WS_GROUP = 0x00020000
+_BM_SETCHECK = 0x00F1
+_BST_CHECKED = 1
 _CBS_DROPDOWNLIST = 0x0003
 _SW_SHOW = 5
 _SW_HIDE = 0
@@ -77,13 +88,54 @@ _LVCF_WIDTH = 0x0002
 _LVCF_TEXT = 0x0004
 _LVIF_TEXT = 0x0001
 
+_TVS_HASBUTTONS = 0x00000001
+_TVS_HASLINES = 0x00000002
+_TVS_SHOWSELALWAYS = 0x00000010
+_TV_FIRST = 0x1100
+# TV_FIRST + 50, not +12: the ANSI and Unicode forms are +0 and +50, and a
+# wrong message number does not raise -- it silently adds no items at all,
+# which is how the first version of this left a tree with nothing in it.
+_TVM_INSERTITEMW = _TV_FIRST + 50
+_TVM_GETCOUNT = _TV_FIRST + 5
+_TVIF_TEXT = 0x0001
+_TVIF_CHILDREN = 0x0040
+# Both are pseudo-handles the control recognises by their *sign-extended*
+# 64-bit value -- `(HTREEITEM)-0x10000` and `-0x2` -- so they are written as
+# the negatives here and left to ctypes to widen into the pointer field. A
+# plain 0xFFFF0000 is a different number to the control on 64-bit, which is
+# how the first version of this inserted no root items at all while every
+# child insert worked: those used handles the control had just returned.
+_TVI_ROOT = -0x10000
+_TVI_LAST = -0x2
+_ICC_TREEVIEW_CLASSES = 0x00000002
+
 _ID_EDIT, _ID_BUTTON, _ID_LABEL, _ID_COMBO, _ID_CHECKBOX = 1, 2, 3, 4, 5
 _ID_LISTVIEW, _ID_TAB = 6, 10
+# The Groups page, which is where the controls with real *structure* live: two
+# radio groups that must not see each other, and a tree.
+_ID_PRIORITY_CAPTION, _ID_PRIORITY_LOW, _ID_PRIORITY_MEDIUM, _ID_PRIORITY_HIGH = (
+    11,
+    12,
+    13,
+    14,
+)
+_ID_MODE_CAPTION, _ID_MODE_FAST, _ID_MODE_SAFE = 15, 16, 17
+_ID_TREEVIEW = 18
 _ID_MENU_DO_THING, _ID_MENU_EXIT = 100, 101
 _GENERAL_IDS = (_ID_EDIT, _ID_BUTTON, _ID_LABEL)
 _ADVANCED_IDS = (_ID_COMBO, _ID_CHECKBOX)
 _LIST_IDS = (_ID_LISTVIEW,)
-_TAB_IDS = (_GENERAL_IDS, _ADVANCED_IDS, _LIST_IDS)
+_GROUPS_IDS = (
+    _ID_PRIORITY_CAPTION,
+    _ID_PRIORITY_LOW,
+    _ID_PRIORITY_MEDIUM,
+    _ID_PRIORITY_HIGH,
+    _ID_MODE_CAPTION,
+    _ID_MODE_FAST,
+    _ID_MODE_SAFE,
+    _ID_TREEVIEW,
+)
+_TAB_IDS = (_GENERAL_IDS, _ADVANCED_IDS, _LIST_IDS, _GROUPS_IDS)
 
 _WNDPROC = ctypes.WINFUNCTYPE(
     ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM
@@ -209,6 +261,33 @@ class _LvItemW(ctypes.Structure):
     ]
 
 
+class _TvItemW(ctypes.Structure):
+    """`TVITEMW`, only the fields this window actually sets."""
+
+    _fields_ = [
+        ("mask", ctypes.c_uint),
+        ("hItem", wintypes.HANDLE),
+        ("state", ctypes.c_uint),
+        ("stateMask", ctypes.c_uint),
+        ("pszText", wintypes.LPWSTR),
+        ("cchTextMax", ctypes.c_int),
+        ("iImage", ctypes.c_int),
+        ("iSelectedImage", ctypes.c_int),
+        ("cChildren", ctypes.c_int),
+        ("lParam", wintypes.LPARAM),
+    ]
+
+
+class _TvInsertStructW(ctypes.Structure):
+    """`TVINSERTSTRUCTW`, the whole of what inserting a tree item takes."""
+
+    _fields_ = [
+        ("hParent", wintypes.HANDLE),
+        ("hInsertAfter", wintypes.HANDLE),
+        ("item", _TvItemW),
+    ]
+
+
 class _NmHdr(ctypes.Structure):
     """`NMHDR`: enough of `WM_NOTIFY`'s payload to tell tab switches apart."""
 
@@ -307,8 +386,8 @@ def _create(hwnd, hinstance, class_name, text, style, box, control_id):
 
 
 def _populate_tabs(tab: int) -> None:
-    """Give the tab control its three tabs."""
-    for index, label in enumerate(("General", "Advanced", "List")):
+    """Give the tab control its four tabs."""
+    for index, label in enumerate(("General", "Advanced", "List", "Groups")):
         item = _TcItemW()
         item.mask = _TCIF_TEXT
         item.pszText = label
@@ -349,6 +428,48 @@ def _populate_list(listview: int) -> None:
         second.iSubItem = 1
         second.pszText = value
         user32.SendMessageW(listview, _LVM_SETITEMTEXTW, row, ctypes.byref(second))
+
+
+def _populate_tree(tree: int) -> None:
+    """Fill the tree with a two-level hierarchy, the branches left collapsed.
+
+    A tree is the one control here whose *structure* is the thing under test:
+    UI Automation publishes each item as a tree item with its own expansion
+    state, where the report-view list beside it is flat. Nothing is expanded
+    on purpose -- expanding a branch is a gesture, so the state a replay has
+    to reproduce is reached by input rather than by this function.
+    """
+
+    def insert(parent, text, *, branch=False):
+        """Add one item under `parent`, and return its handle."""
+        node = _TvInsertStructW()
+        node.hParent = parent
+        node.hInsertAfter = _TVI_LAST
+        node.item.mask = _TVIF_TEXT | (_TVIF_CHILDREN if branch else 0)
+        node.item.pszText = text
+        node.item.cchTextMax = len(text)
+        node.item.cChildren = 1 if branch else 0
+        handle = user32.SendMessageW(tree, _TVM_INSERTITEMW, 0, ctypes.byref(node))
+        if not handle:
+            print(
+                f"win32_probe_window: could not insert {text!r} under {parent!r}",
+                file=sys.stderr,
+            )
+        return handle
+
+    documents = insert(_TVI_ROOT, "Documents", branch=True)
+    reports = insert(documents, "Reports", branch=True)
+    insert(reports, "Q1")
+    insert(reports, "Q2")
+    insert(documents, "Notes")
+    insert(_TVI_ROOT, "Trash")
+    # Said out loud, because a tree with nothing in it is otherwise
+    # indistinguishable from a tree whose items UI Automation has not
+    # published yet -- and the first version of this had no items at all,
+    # from a message number that was wrong by 38.
+    count = user32.SendMessageW(tree, _TVM_GETCOUNT, 0, 0)
+    if count != 6:
+        print(f"win32_probe_window: tree holds {count} items, not 6", file=sys.stderr)
 
 
 def _build_window(title: str, at: tuple[int, int], size: tuple[int, int]) -> int:
@@ -422,6 +543,52 @@ def _build_window(title: str, at: tuple[int, int], size: tuple[int, int]) -> int
         add("SysListView32", "", listview_style, (30, 50, w - 100, 150), _ID_LISTVIEW)
     )
 
+    # Groups tab: two radio groups that must not see each other, and a tree.
+    # WS_GROUP is what separates the groups -- a group runs from the control
+    # carrying it to the next one that does -- so the second caption ends the
+    # first group and its own first radio starts the second. Two groups rather
+    # than one on purpose: a single group cannot show whether a selection
+    # cleared the radio beside it or every radio on the page.
+    #
+    # Captions rather than `BS_GROUPBOX` frames, which is a measured choice: a
+    # group box *covers* the radios inside it, and with one here a click at a
+    # radio's own centre resolved to the group box instead of the radio -- the
+    # recording named `push button 'Priority'` for a click aimed at `High`, and
+    # the radio never moved. A caption takes no space over anything.
+    add("STATIC", "Priority", _WS_GROUP, (25, 45, 120, 18), _ID_PRIORITY_CAPTION)
+    add(
+        "BUTTON",
+        "Low",
+        _WS_GROUP | _BS_AUTORADIOBUTTON,
+        (25, 66, 120, 22),
+        _ID_PRIORITY_LOW,
+    )
+    add("BUTTON", "Medium", _BS_AUTORADIOBUTTON, (25, 88, 120, 22), _ID_PRIORITY_MEDIUM)
+    add("BUTTON", "High", _BS_AUTORADIOBUTTON, (25, 110, 120, 22), _ID_PRIORITY_HIGH)
+    add("STATIC", "Mode", _WS_GROUP, (25, 145, 120, 18), _ID_MODE_CAPTION)
+    add(
+        "BUTTON",
+        "Fast",
+        _WS_GROUP | _BS_AUTORADIOBUTTON,
+        (25, 166, 120, 22),
+        _ID_MODE_FAST,
+    )
+    add("BUTTON", "Safe", _BS_AUTORADIOBUTTON, (25, 188, 120, 22), _ID_MODE_SAFE)
+    tree_style = (
+        _WS_TABSTOP | _WS_BORDER | _TVS_HASBUTTONS | _TVS_HASLINES | _TVS_SHOWSELALWAYS
+    )
+    _populate_tree(
+        add("SysTreeView32", "", tree_style, (175, 45, w - 225, 200), _ID_TREEVIEW)
+    )
+
+    # One radio checked in each group, so where a selection lands says which
+    # group it landed in: Medium and Safe are the two a click has to move, and
+    # the other group's check is what proves the boundary held.
+    for control_id in (_ID_PRIORITY_MEDIUM, _ID_MODE_SAFE):
+        user32.SendMessageW(
+            user32.GetDlgItem(hwnd, control_id), _BM_SETCHECK, _BST_CHECKED, 0
+        )
+
     _show_tab(hwnd, 0)
     user32.ShowWindow(hwnd, _SW_SHOW)
     user32.UpdateWindow(hwnd)
@@ -439,7 +606,7 @@ def main() -> int:
 
     icc = _InitCommonControlsEx()
     icc.dwSize = ctypes.sizeof(_InitCommonControlsEx)
-    icc.dwICC = _ICC_TAB_CLASSES | _ICC_LISTVIEW_CLASSES
+    icc.dwICC = _ICC_TAB_CLASSES | _ICC_LISTVIEW_CLASSES | _ICC_TREEVIEW_CLASSES
     comctl32.InitCommonControlsEx(ctypes.byref(icc))
 
     _build_window(args.title, tuple(args.at), tuple(args.size))

@@ -129,6 +129,26 @@ def test_event_round_trip_preserves_context(window, save_button):
     assert rebuilt.target.element == save_button
 
 
+def test_expanded_round_trips_through_to_dict_and_back():
+    # _rebuild lists ElementRef's fields by hand rather than reading them off
+    # the dataclass, so a field added there is not a field this reconstructs
+    # for free -- save_button above carries no state either way and would
+    # not have caught expanded being silently dropped on the way back in.
+    row = ElementRef(role="tree item", name="Documents", expanded=True)
+    click = Click(target=Target(x=1, y=2, element=row))
+    rebuilt = event_from_dict(click.to_dict())
+    assert isinstance(rebuilt, Click)
+    assert rebuilt.target.element.expanded is True
+
+
+def test_selectable_round_trips_through_to_dict_and_back():
+    tab = ElementRef(role="page tab", name="Tree", actions=(), selectable=True)
+    click = Click(target=Target(x=1, y=2, element=tab))
+    rebuilt = event_from_dict(click.to_dict())
+    assert isinstance(rebuilt, Click)
+    assert rebuilt.target.element.selectable is True
+
+
 def test_window_with_ambiguous_app_id_round_trips(save_button):
     ambiguous = WindowRef(app_id="plasmashell", app_id_ambiguous=True)
     click = Click(timestamp=0, delay=0, target=Target(x=1, y=2, window=ambiguous))
@@ -406,13 +426,33 @@ def test_element_addressable_requires_a_name():
     assert not ElementRef(role="push button").addressable
 
 
-def test_element_clickable_matches_pyguitests_own_fallback():
-    # Element.click() falls back to whichever action is named "click" or
-    # "press", case-insensitively -- see AtspiBackend.Element.click().
+def test_element_clickable_matches_pyguitests_atspi_fallback():
+    # AtspiBackend.Element.click() matches whichever action is named "click"
+    # or "press", case-insensitively -- see the sibling test below for the
+    # separate UIA vocabulary clickable also recognises.
     assert ElementRef(role="push button", name="Save", actions=("click",)).clickable
     assert ElementRef(role="push button", name="OK", actions=("Press",)).clickable
     assert not ElementRef(role="label", name="Office", actions=()).clickable
     assert not ElementRef(role="label", name="Status", actions=("expand",)).clickable
+
+
+def test_element_clickable_recognises_uias_own_action_names():
+    # Measured live on the win32 probe window: every interactive UIA control
+    # publishes "invoke" and/or "do default action", never "click" or
+    # "press" -- the vocabulary AtspiBackend.Element.click() answers to is a
+    # GTK/AT-SPI one, and UIA's Element.click() tries "invoke", "toggle" and
+    # "do default action" instead, in that order. Checking only the first
+    # pair meant clickable read False for literally every element on
+    # Windows, and every click recorded there fell to a coordinate.
+    assert ElementRef(
+        role="push button", name="Click Me", actions=("do default action", "invoke")
+    ).clickable
+    assert ElementRef(
+        role="check box",
+        name="Enable feature",
+        actions=("do default action", "invoke", "toggle"),
+    ).clickable
+    assert not ElementRef(role="label", name="Status", actions=("select",)).clickable
 
 
 def test_element_clickable_defaults_true_when_actions_were_never_recorded():

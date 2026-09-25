@@ -42,6 +42,7 @@ _KEY_RELEASE = 3
 _BUTTON_PRESS = 4
 _BUTTON_RELEASE = 5
 _MOTION = 6
+_MAPPING_NOTIFY = 34
 
 _SHIFT_MASK = 1 << 0
 _LOCK_MASK = 1 << 1
@@ -324,6 +325,31 @@ class X11CaptureBackend:
             text=_printable(keysym),
         )
 
+    def _refresh_keymap(self) -> None:
+        """Pick up a keyboard mapping change before the next keysym lookup.
+
+        `self._control`'s keymap cache is built once, when the connection
+        opens, and python-xlib only updates it when handed a `MappingNotify`
+        it is explicitly asked to process -- nothing here ever read this
+        connection's own event queue, so a remap made *during* a recording
+        was never seen. That is exactly how anything outside the base X
+        layout gets typed: `XChangeKeyboardMapping` onto a keycode the
+        layout leaves unused, then a key event on that keycode -- the
+        technique behind `xdotool type` of non-Latin-1 text, and behind
+        several input methods. Confirmed live: typing Chinese text this way
+        captured as keysym `0x0` / empty text on every press, because the
+        cached mapping still had that keycode unbound from before the remap.
+        `MappingNotify` is broadcast to every client unconditionally, so
+        nothing has to be selected for it -- it only has to be read off the
+        wire, which `sync()` (a round trip on a local socket, once per key
+        event) does as a side effect of waiting for its own reply.
+        """
+        self._control.sync()
+        for _ in range(self._control.pending_events()):
+            event = self._control.next_event()
+            if getattr(event, "type", None) == _MAPPING_NOTIFY:
+                self._control.refresh_keyboard_mapping(event)
+
     def _resolve_keysym(self, keycode: int, state: int) -> int:
         """Pick the one keysym this keycode+modifier state actually produces.
 
@@ -348,6 +374,7 @@ class X11CaptureBackend:
           Shift: `effective_shift = shift ^ (lock and case_pair)`, which is
           why Shift+CapsLock on a letter types lowercase.
         """
+        self._refresh_keymap()
         base_index = 2 if self._group_mask and (state & self._group_mask) else 0
         unshifted = self._control.keycode_to_keysym(keycode, base_index)
         shifted = self._control.keycode_to_keysym(keycode, base_index + 1)
@@ -525,8 +552,36 @@ def _is_case_pair(unshifted: int, shifted: int) -> bool:
     return bool(lower and upper and lower != upper and lower.lower() == upper.lower())
 
 
+_UNICODE_KEYSYM_BASE = 0x01000000
+"""ICCCM's direct-Unicode keysym block: `keysym - this` is the codepoint.
+
+`Xlib.XK.keysym_to_string` only ever covers Latin-1 (`keysym & 0xff00 == 0`)
+plus a handful of named control keys -- nothing in this block, which is
+exactly where a codepoint with no legacy X keysym of its own (all of CJK,
+among others) is placed. Confirmed live: `xdotool type` of Chinese text
+remaps an unused keycode to a keysym in this block for each character, and
+without this branch every one of them fell through to `""`, so the
+characters were captured as bare `key_press`/`key_release` events with no
+text at all -- silently, the same shape of loss as the Windows `VK_PACKET`
+bug this project already fixed (see status.md), on X11 instead.
+"""
+
+
 def _printable(keysym: int) -> str:
     """The character a keysym produces, or empty for a non-printing key."""
+    if keysym >= _UNICODE_KEYSYM_BASE:
+        codepoint = keysym - _UNICODE_KEYSYM_BASE
+        # A lone UTF-16 surrogate (0xD800-0xDFFF) is a valid `chr()` argument
+        # -- it does not raise -- but the string it produces cannot be
+        # encoded as UTF-8, so it would otherwise crash a later write of the
+        # recording rather than degrading to "" the way an out-of-range
+        # codepoint already does below.
+        if 0xD800 <= codepoint <= 0xDFFF:
+            return ""
+        try:
+            return chr(codepoint)
+        except ValueError:
+            return ""
     try:
         from Xlib import XK
     except ImportError:  # pragma: no cover - reached only without python-xlib

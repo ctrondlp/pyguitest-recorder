@@ -11,13 +11,15 @@ a plausible-looking script that names a function the library does not have.
 Three emission rules carry the design.
 
 *Elements lead, coordinates follow.* A click on a widget AT-SPI could name
-becomes `gui.button("Save").click()`, not a coordinate -- unless AT-SPI named
-it but offered it no click or press action, the way KDE's QML-based Kickoff
-menu does, in which case `Element.click()` would fail at replay on every
-compositor without GNOME's ponytail daemon, so this falls straight to a
-coordinate instead. Coordinates are the last resort otherwise, in the order
-window-relative then absolute, because a coordinate is the one locator
-guaranteed to break when the window moves.
+becomes `gui.button("Save").click()`, not a coordinate -- and where the
+element offers a selection rather than an activation, as a radio button, a
+page tab, a list row and a tree item all do, it becomes
+`gui.tree_item("Q1").select()` instead. Only an element that offered neither
+falls to a coordinate: KDE's QML-based Kickoff menu publishes labels with no
+click or press action, where `Element.click()` would fail at replay on every
+compositor without GNOME's ponytail daemon. Coordinates are the last resort
+otherwise, in the order window-relative then absolute, because a coordinate is
+the one locator guaranteed to break when the window moves.
 
 *Scripts declare what they need.* Every generated file opens with
 `gui.require(...)` naming the capabilities it uses. A recording made on X11
@@ -27,6 +29,15 @@ not halfway through with a click that went nowhere.
 *Waits are synchronization, not sleeps.* The analyzer infers wait events; this
 module renders them. `gui.wait(...)` appears only where nothing better could
 be inferred, and says so in a comment.
+
+*Public API only, and nothing of its own.* Every call in a generated script is
+a method or property pyguitest publishes, and the only thing the file defines
+is `main`. A private name in the output is a dependency on an implementation
+detail, and a helper function written into a script is extensibility in the
+wrong repository: the library the script runs against is pyguitest, so that is
+where a capability belongs. `tests/test_generator.py` asserts both, because
+the generator once wrote private helpers into every script that needed one
+(`_HELPER_SOURCE`, removed in 0.2.0).
 """
 
 from __future__ import annotations
@@ -76,7 +87,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.11"
+PROFILE = "pyguitest-0.12"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -1137,6 +1148,9 @@ class PythonGenerator:
         turn a context menu into an ordinary activation -- a script that runs
         cleanly and does the wrong thing, which is the worst outcome here.
         """
+        if event.button == 1 and event.count == 2 and self._expand_click(event, state):
+            state.bare_click_pending = False
+            return
         if event.button == 1 and event.count == 2 and self._double_click(event, state):
             state.bare_click_pending = False
             return
@@ -1147,6 +1161,8 @@ class PythonGenerator:
                 state.pointer = None
                 state.bare_click_pending = False
                 self._note_element_repeat(event, state)
+                return
+            if self._select_click(event, state):
                 return
         if state.bare_click_pending:
             state.capabilities.add("TIMING")
@@ -1168,6 +1184,61 @@ class PythonGenerator:
             state.lines.extend([f"gui.click({button})"] * event.count)
             self._note_repeat(event, state)
         state.bare_click_pending = True
+
+    def _select_click(self, event: Click, state: _State) -> bool:
+        """Render a single click as `Element.select()`, where that is the act.
+
+        The second named path, for the controls that answer a click with a
+        *selection* rather than an activation -- a radio button, a page tab, a
+        list row, a tree item. Each offers `select` and not `click`, so
+        without this a click on one fell all the way to a coordinate, which is
+        the one locator guaranteed to break when the window moves.
+
+        A single click only: `select()` is idempotent, so a repeated click has
+        no rendering as one and keeps its coordinates.
+        """
+        element = event.target.element
+        if event.count != 1 or element is None or not element.selectable:
+            return False
+        call = self._element_locator_call(element, state, "select()")
+        if call is None:
+            return False
+        state.lines.append(call)
+        state.pointer = None
+        state.bare_click_pending = False
+        return True
+
+    def _expand_click(self, event: Click, state: _State) -> bool:
+        """Render a double click on a disclosure control as expand()/collapse().
+
+        The third named path, ahead of `_double_click`: a tree row, a
+        notebook, anything AT-SPI or UIA marks EXPANDABLE. Measured live on
+        a GTK3 GtkTreeView, `.double_click()` -- the fallback this pre-empts
+        -- *activates* a row rather than opening it; double-clicking a
+        Windows tree row happens to expand it, which is exactly the kind of
+        agreement-by-accident that stops holding the moment a script written
+        against one platform runs on the other. `.expand()`/`.collapse()`
+        names the actual intent and means the same thing everywhere pyguitest
+        implements it -- both platforms, as of the floor this package names.
+
+        The direction comes from `expanded` as it read *before* this click,
+        which is what recording it, not the toggle the click went on to
+        cause: collapsed means the click opened it, so the replay should too.
+
+        Two clicks, one call, the same way `_double_click` collapses its
+        pair -- an element only answers `expand()`/`collapse()` once either
+        way, so recording it twice would toggle it back.
+        """
+        element = event.target.element
+        if element is None or not element.expandable:
+            return False
+        action = "collapse()" if element.expanded else "expand()"
+        call = self._element_locator_call(element, state, action)
+        if call is None:
+            return False
+        state.lines.append(call)
+        state.pointer = None
+        return True
 
     def _double_click(self, event: Click, state: _State) -> bool:
         """Render a double click on a named element that stays a double click.
@@ -1718,6 +1789,18 @@ class PythonGenerator:
         """
         if element is not None and not element.clickable:
             return None
+        return self._element_locator_call(element, state, action)
+
+    def _element_locator_call(
+        self, element: ElementRef | None, state: _State, action: str
+    ) -> str | None:
+        """A locator plus an action on it, with no actionability gate.
+
+        Separate from `_element_call` because `select()` is gated on
+        `selectable` rather than `clickable` -- a tree item offers the first
+        and not the second -- and both have to reach the locator without a
+        refused call leaving a `within=` line behind.
+        """
         locator = self._element_expr(element, state)
         if locator is None:
             return None

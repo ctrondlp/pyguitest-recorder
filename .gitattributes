@@ -1,0 +1,35 @@
+# Line endings and binary-ness, decided by git rather than by whichever editor
+# or platform last touched a file. The companion to `.editorconfig`: that one
+# tells an editor what to write, and this one makes git normalize what it
+# stores, which is the half an editor's settings cannot reach.
+#
+# This is the half of the project that talks to a Windows box -- the capture
+# probes and the live checks recorded in docs/developers/status.md are run
+# there over SSH -- and a global `core.autocrlf` on that machine (neither this
+# repository nor pyguitest pins one) would otherwise check these files out with
+# CRLF and hand back a whole-file diff on the next commit from Linux or
+# GhostBSD. There is no file type here that only Windows reads (no .bat, .cmd
+# or .ps1), so nothing needs CRLF in the working tree.
+#
+# `text=auto` lets git decide what is text; `eol=lf` is what it puts in the
+# working tree even on Windows. Every tracked file here already has LF in the
+# index -- measured, not assumed -- so there is nothing to renormalize for this
+# to take effect; it takes effect on the way in from here on.
+* text=auto eol=lf
+
+# Not text at all: git must never translate these, and showing a diff of one is
+# meaningless. No binary is tracked here today; these are named so that the
+# first captured screenshot, icon or log archive committed is classified by
+# this file rather than by whatever bytes it happens to contain.
+*.png binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+
+# Build and cache artifacts, named for the same reason.
+*.pyc binary
+*.whl binary
+*.zip binary
+*.tar.gz binary

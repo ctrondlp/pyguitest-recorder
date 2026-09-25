@@ -472,12 +472,16 @@ def test_whitespace_only_title_changes_do_not_count_as_drift():
 # -- session leakage ---------------------------------------------------------
 
 
-def leak_resolver(element_pid, window_pid, window_app_id="org.example.App", **kwargs):
+def leak_resolver(
+    element_pid, window_pid, window_app_id="org.example.App", path=(), **kwargs
+):
     """A resolver whose window and element deliberately may not agree.
 
     `window_app_id` is the window's class name as Windows reports it, which is
     what `_in_a_frame_host` reads -- "ApplicationFrameWindow" for a Store app
-    and anything else for an ordinary one.
+    and anything else for an ordinary one. `path` is the element's own
+    ancestry, empty by default like an element recorded before that field
+    existed.
     """
     session = FakeSession(
         window=FakeWindow(title="Target", app_id=window_app_id, pid=window_pid)
@@ -485,7 +489,7 @@ def leak_resolver(element_pid, window_pid, window_app_id="org.example.App", **kw
     made = DesktopResolver(session=session, elements=False, **kwargs)
     made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
-        role="push button", name="Save", pid=element_pid
+        role="push button", name="Save", pid=element_pid, path=path
     )
     return made
 
@@ -637,6 +641,158 @@ def test_an_element_from_the_same_process_is_kept():
     target = leak_resolver(element_pid=77, window_pid=77).resolve(100, 100)
     assert target.element is not None
     assert target.element.name == "Save"
+
+
+def test_a_same_process_element_from_a_different_toplevel_is_refused():
+    """A pid match is not a window match -- one process owns several at once.
+
+    Found live: mate-calc's Help > About opened a second toplevel almost the
+    same size as 'Calculator' and at the same origin, both pid 6700 -- the
+    window list correctly told them apart, but the click still resolved to
+    the Calculator's own '=' button, because AT-SPI's hit test has no idea a
+    dialog is stacked above its parent. The element's own `path` is what
+    settles it: its toplevel ancestor is named 'Calculator', not the 'About
+    MATE Calculator' the window list resolved for the same point.
+    """
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Calculator"),),
+    )
+    made.session.window.title = "About MATE Calculator"
+    target = made.resolve(100, 100)
+    assert target.element is None
+    assert target.window is not None and target.window.title == "About MATE Calculator"
+    (warning,) = made.warnings
+    assert "'Calculator'" in warning
+    assert "'About MATE Calculator'" in warning
+
+
+def test_an_open_popups_item_is_kept_though_its_path_names_the_parent_frame():
+    """The exemption without which the toplevel check undoes `_popup_at`.
+
+    A GTK menu is an override-redirect window of its own, which the window
+    list names after the process -- while its items stay published as
+    descendants of the frame owning the menu bar. So every item in an open
+    menu has a path naming the parent frame and a window under the point
+    naming the popup: a disagreement in form only. Caught live, the same
+    afternoon the check was written, when `gui.menu_item("Open").click()`
+    degraded to a bare coordinate.
+    """
+    item_path = (("frame", "Probe Window"), ("menu bar", ""), ("menu", "File"))
+    made = leak_resolver(element_pid=77, window_pid=77, path=item_path)
+    made.session.window.title = "gtk_probe_window.py"
+
+    def from_open_popup(x, y):
+        """Stand in for `_element` answering out of `_popup_at`.
+
+        That path is what sets `_from_popup`, and carries the rectangle the
+        item had while the popup was open.
+        """
+        made._from_popup = True
+        return ElementRef(
+            role="menu item",
+            name="Open",
+            pid=77,
+            path=item_path,
+            extents=(10, 20, 80, 24),
+        )
+
+    made._element = from_open_popup
+    target = made.resolve(15, 25)
+    assert target.element is not None
+    assert target.element.name == "Open"
+    assert not made.warnings
+
+
+def test_a_same_process_element_with_no_path_is_kept():
+    # An element recorded before `path` existed, or a bridge that never
+    # populates it -- no evidence of a mismatch, so none is assumed.
+    target = leak_resolver(element_pid=77, window_pid=77, path=()).resolve(100, 100)
+    assert target.element is not None
+
+
+def test_a_same_process_element_whose_path_agrees_is_kept():
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Target"),),
+    )
+    target = made.resolve(100, 100)
+    assert target.element is not None
+
+
+def test_a_same_process_element_is_kept_when_the_window_has_no_title():
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Something Else"),),
+    )
+    made.session.window.title = ""
+    target = made.resolve(100, 100)
+    assert target.element is not None
+
+
+def test_a_same_process_element_is_kept_once_the_window_title_has_drifted():
+    # VITAL -- keep this test. `window.title` is anchored to the *first*
+    # title a window was seen with (see `_identify`), but an element's own
+    # `path` is read live at click time -- so once a title has drifted (a
+    # text editor gaining an unsaved-changes marker, GNOME Text Editor
+    # renaming itself the moment it has content), the two are no longer
+    # comparable, and a same-window click would otherwise be misread as
+    # landing in a different toplevel and downgraded to a bare coordinate.
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Untitled Document 1 - gedit"),),
+    )
+    made.session.window.title = "Untitled Document 1 - gedit"
+    first = made.resolve(100, 100)
+    assert first.element is not None
+
+    made._element = lambda x, y: ElementRef(
+        role="push button",
+        name="Save",
+        pid=77,
+        path=(("frame", "*Untitled Document 1 - gedit"),),
+    )
+    made.session.window.title = "*Untitled Document 1 - gedit"
+    second = made.resolve(100, 100)
+    assert second.element is not None
+    assert second.window is not None
+    assert second.window.title == "Untitled Document 1 - gedit"  # still anchored
+    assert not second.window.title_stable
+
+
+def test_a_same_process_element_is_still_refused_after_the_window_stays_stable():
+    # The drift exemption above must not swallow a genuine mismatch: with no
+    # drift ever observed, title_stable stays True and the check still runs.
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Calculator"),),
+    )
+    made.session.window.title = "About MATE Calculator"
+    target = made.resolve(100, 100)
+    assert target.element is None
+
+
+def test_the_nearest_toplevel_ancestor_is_checked_not_the_outermost():
+    # `_best_owner` reads `path` nearest-to-element first, for the same
+    # reason this does: a dialog nested under another toplevel (plausible on
+    # Qt/KDE, unlike GTK's flatter sibling toplevels) must be judged by the
+    # one the element is actually inside. A path naming the right outer
+    # frame first and a mismatched dialog second, closest to the element,
+    # must still be refused.
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("frame", "Target"), ("dialog", "About")),
+    )
+    target = made.resolve(100, 100)
+    assert target.element is None
+    (warning,) = made.warnings
+    assert "'About'" in warning
 
 
 def test_an_element_with_no_pid_is_kept_rather_than_lost():
@@ -833,6 +989,8 @@ class FakeElement:
         checked=None,
         checkable=False,
         actions=(),
+        expanded=None,
+        selectable=None,
     ):
         self.role = role
         self.name = name
@@ -844,6 +1002,8 @@ class FakeElement:
         self.checked = checked
         self.checkable = checkable
         self.actions = list(actions)
+        self.expanded = expanded
+        self.selectable = selectable
 
 
 class ElementSession(FakeSession):
@@ -1381,6 +1541,32 @@ def test_an_element_with_a_click_action_is_described_as_clickable():
     assert target.element.clickable
 
 
+def test_selectable_is_described_from_pyguitest_directly_not_actions():
+    # A GTK page tab measured live publishes no Action interface entries at
+    # all -- actions=() -- while pyguitest's own Element.selectable still
+    # correctly reads True and .select() works, because GTK exposes the
+    # Selection interface without naming it as an action. Reading `actions`
+    # for this, the way clickable does, would have missed it on that
+    # platform entirely.
+    element = FakeElement("page tab", "Tree", pid=77, actions=(), selectable=True)
+    target = element_resolver(element=element).resolve(130, 130)
+    assert target.element.selectable is True
+
+
+def test_an_expandable_elements_open_state_is_described():
+    element = FakeElement("tree item", "Documents", pid=77, expanded=True)
+    target = element_resolver(element=element).resolve(130, 130)
+    assert target.element.expanded is True
+    assert target.element.expandable
+
+
+def test_an_unexpandable_elements_state_is_described_as_none():
+    element = FakeElement("push button", "Save", pid=77)
+    target = element_resolver(element=element).resolve(130, 130)
+    assert target.element.expanded is None
+    assert not target.element.expandable
+
+
 def test_the_ancestry_walks_the_elements_own_parents():
     target = element_resolver().resolve(130, 130)
     assert target.element.path == (("frame", "Target"),)
@@ -1426,6 +1612,40 @@ def test_no_chromium_note_when_it_cannot_be_measured(monkeypatch):
     monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: None)
     made = element_resolver()
     assert not any("IsEnabled" in warning for warning in made.warnings)
+
+
+def test_no_at_bridge_is_noted_even_though_the_tree_answers(monkeypatch):
+    """The probe cannot see this one, which is exactly why it needs saying.
+
+    `NO_AT_BRIDGE` stops GTK3 and Qt registering at startup, so an
+    application launched from such an environment publishes nothing -- while
+    the desktop's own components, which registered long before the variable
+    was ever set, keep the tree populated and the probe passing. Found live
+    on a MATE session where `--doctor` answered "ready to record, and clicks
+    will be named" and a mate-calc launched from that same environment never
+    appeared in the tree at all.
+    """
+    monkeypatch.setenv("NO_AT_BRIDGE", "1")
+    made = element_resolver()
+    assert made.resolves_elements
+    assert made.bridge_disabled
+    assert any("NO_AT_BRIDGE" in warning for warning in made.warnings)
+
+
+def test_no_bridge_note_when_the_variable_is_unset(monkeypatch):
+    monkeypatch.delenv("NO_AT_BRIDGE", raising=False)
+    made = element_resolver()
+    assert not made.bridge_disabled
+    assert not any("NO_AT_BRIDGE" in warning for warning in made.warnings)
+
+
+def test_no_bridge_note_when_the_variable_is_switched_off(monkeypatch):
+    # "0" is how a shell turns it back off again, and reads as unset here --
+    # the toolkits treat it that way too.
+    monkeypatch.setenv("NO_AT_BRIDGE", "0")
+    made = element_resolver()
+    assert not made.bridge_disabled
+    assert not any("NO_AT_BRIDGE" in warning for warning in made.warnings)
 
 
 def test_no_session_leaves_element_resolution_off_and_says_so():

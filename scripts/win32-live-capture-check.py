@@ -177,6 +177,128 @@ def _click_element(
     _click_at(gui, gui.element(role=role, name=name, within=win_el))
 
 
+def _double_click_element(
+    gui: pyguitest.Session, window_title: str, role: str, name: str
+) -> None:
+    """Double-click an element by name, at its own rectangle.
+
+    For opening a tree branch, which is what a user does and therefore what a
+    recording has to contain: `Element.do_action("expand")` would do the same
+    thing and produce no input at all, so there would be nothing to record.
+    """
+    _step(f"double click {role} {name!r}")
+    _element(gui, window_title, role=role, name=name).double_click()
+    time.sleep(0.6)
+
+
+_TAB_CONTENTS = {
+    # What confirms each page is showing. A page's controls are not in the UI
+    # Automation tree at all while another tab is selected -- measured on
+    # Windows 11: with List showing, the entry is absent even from a search
+    # that asks for invisible elements -- so their presence is the signal that
+    # the tab click landed, where a fixed sleep is a guess.
+    "General": (Role.ENTRY, None),
+    "Advanced": (Role.CHECK_BOX, "Enable feature"),
+    "List": (Role.LIST_ITEM, "Alpha"),
+    "Groups": (Role.RADIO_BUTTON, "Low"),
+}
+
+
+def _describe(gui: pyguitest.Session, window_title: str) -> str:
+    """What a window is publishing right now, for a failure message.
+
+    A tab that never showed its controls is either a click that missed or a
+    page that is not being published, and the two are told apart by what the
+    tree *does* hold -- plus where the pointer and the focus are, since a
+    click that did nothing is usually about one of those. Without this it is a
+    Windows-side debugging session away from being visible.
+    """
+    try:
+        active = gui.active_window()
+    except Exception as error:  # noqa: BLE001 - a description, not a check
+        active = f"{type(error).__name__}"
+    try:
+        pointer = gui.pointer_position()
+    except Exception as error:  # noqa: BLE001 - a description, not a check
+        pointer = f"{type(error).__name__}"
+    where = f"pointer {pointer}, active {getattr(active, 'title', None)!r}"
+    try:
+        found = gui.find_elements(within=gui.window_element(window_title))
+    except Exception as error:  # noqa: BLE001 - a description, not a check
+        return f"{where}; could not read the tree ({type(error).__name__}: {error})"
+    showing = ", ".join(f"{one.role}:{one.name!r}" for one in found[:25]) or "nothing"
+    return f"{where}; showing: {showing}"
+
+
+def _focus_window(gui: pyguitest.Session, window_title: str) -> None:
+    """Bring the probe window forward, then park the pointer in its body.
+
+    Both halves are load-bearing and the first was missing. Measured on
+    Windows 11 with another window on top (the recorder's own VirtualBox
+    session): the verifier clicked a tab at the tab's own coordinates and the
+    *other* window took the click -- its failure message read
+    `active 'GhostBSD 26.1 ... - Oracle VirtualBox'` while the probe was still
+    showing the General page, and every later click landed on the VM as well,
+    so the tab looked like it simply did not respond. `focus_window` asks for
+    the front and confirms it arrived, which is what the driver's
+    `activate_window` was already doing and this was not.
+
+    The pointer half is the second way a click goes elsewhere: Windows 11
+    opens its Snap Layouts flyout -- a separate `Popup` window -- for as long
+    as the pointer rests on a maximize/restore button, and the replay ends
+    with it exactly there.
+    """
+    window = gui.wait_for_window(window_title, timeout=10)
+    if window is None:
+        raise Failure(f"{window_title!r} is not there to click in")
+    gui.focus_window(window)
+    x, y, width, height = gui.geometry(window)
+    gui.move_mouse(x + width // 2, y + height // 2)
+    time.sleep(0.5)
+
+
+def _element(
+    gui: pyguitest.Session,
+    window_title: str,
+    *,
+    role: str,
+    name: object = None,
+    timeout: float = 10.0,
+) -> pyguitest.Element:
+    """Find an element, retrying: a miss here is often a moment, not an absence.
+
+    Measured on Windows 11: a lookup that raises ElementNotFound one moment
+    returns the element the next, with nothing about the window changed and no
+    input in between -- while `find_elements` on the same window finds the
+    element the single lookup missed. The control that misses differs run to
+    run, so a check that reported it as the product being wrong would be
+    reporting its own race.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return gui.element(
+                role=role, name=name, within=gui.window_element(window_title)
+            )
+        except Exception:  # noqa: BLE001 - a missed lookup, not a failure yet
+            if time.monotonic() > deadline:
+                raise Failure(
+                    f"no {role!r} {name!r} after {timeout:g}s; showing: "
+                    f"{_describe(gui, window_title)}"
+                ) from None
+            time.sleep(0.2)
+
+
+def _select_tab(
+    gui: pyguitest.Session, window_title: str, name: str, timeout: float = 10.0
+) -> None:
+    """Click a page tab, and wait until that page's controls are published."""
+    role, label = _TAB_CONTENTS[name]
+    _focus_window(gui, window_title)
+    _click_element(gui, window_title, Role.PAGE_TAB, name)
+    _element(gui, window_title, role=role, name=label, timeout=timeout)
+
+
 def _click_titlebar_button(
     gui: pyguitest.Session, window_title: str, contains: str
 ) -> None:
@@ -254,7 +376,7 @@ def drive_probe_window(title: str) -> None:
     _click_titlebar_button(gui, title, "Restore")
     _click_element(gui, title, Role.PUSH_BUTTON, "Click Me")
 
-    _click_element(gui, title, Role.PAGE_TAB, "Advanced")
+    _select_tab(gui, title, "Advanced")
     _click_element(gui, title, Role.COMBO_BOX, None)
     time.sleep(0.3)
     _click_element(gui, title, Role.LIST_ITEM, "Beta")
@@ -262,10 +384,9 @@ def drive_probe_window(title: str) -> None:
 
     # A real SysListView32 offers UI Automation a genuine SelectionItem
     # action, unlike this window's tabs, menu items and checkbox.
-    _click_element(gui, title, Role.PAGE_TAB, "List")
+    _select_tab(gui, title, "List")
     _click_element(gui, title, Role.LIST_ITEM, "Gamma")
-    _click_element(gui, title, Role.PAGE_TAB, "General")
-
+    _select_tab(gui, title, "General")
     _click_element(gui, title, Role.MENU_ITEM, "Actions")
     time.sleep(0.2)
     _click_element(gui, title, Role.MENU_ITEM, "Do Thing")
@@ -289,6 +410,19 @@ def drive_probe_window(title: str) -> None:
     gui.click()
     gui.click()
     time.sleep(0.5)
+
+    # Two radio groups that must not see each other, and a tree whose branch
+    # has to be opened before a nested item exists to click. Both are driven
+    # with the mouse rather than through the accessibility API: what is under
+    # test is what the *recorder* makes of real input, and `Element.select()`
+    # would produce nothing to record at all.
+    _step("radio groups, and a nested tree")
+    _select_tab(gui, title, "Groups")
+    _click_element(gui, title, Role.RADIO_BUTTON, "High")
+    _click_element(gui, title, Role.RADIO_BUTTON, "Fast")
+    _double_click_element(gui, title, Role.TREE_ITEM, "Documents")
+    _double_click_element(gui, title, Role.TREE_ITEM, "Reports")
+    _click_element(gui, title, Role.TREE_ITEM, "Q1")
 
     _step("stop chord")
     # The stop chord: two Escapes, exercised rather than only described.
@@ -346,19 +480,26 @@ def round_trip(recording: Recording, source: str) -> list[str]:
 
 
 def _verify_replay(title: str) -> list[str]:
-    """Read the replayed window back, and say what did not land."""
+    """Read the replayed window back, and say what did not land.
+
+    Each control is read with its own tab selected. A page's controls are not
+    in the UI Automation tree at all while another tab is selected, and the
+    replay's last tab click is not something a read can depend on -- so
+    reading the entry first, as this did, reported a missing control whenever
+    the replay happened not to leave the General page showing.
+    """
     gui = pyguitest.connect()
-    win_el = gui.window_element(title)
+    _select_tab(gui, title, "General")
     problems = []
 
-    entry = gui.element(role=Role.ENTRY, within=win_el)
+    entry = _element(gui, title, role=Role.ENTRY)
     if entry.text != "Ada":
         problems.append(f"edit control does not read 'Ada' (got {entry.text!r})")
 
     # Found by pattern rather than role alone: the ListView's own cells are a
     # table of "text" elements too, hidden or not.
-    label = gui.element(
-        role=Role.TEXT, name=re.compile(r"^(clicked|menu) \d+$"), within=win_el
+    label = _element(
+        gui, title, role=Role.TEXT, name=re.compile(r"^(clicked|menu) \d+$")
     )
     # "Click Me" is clicked 4 times (original position, after the drag, after
     # maximizing, after restoring) and "Do Thing" once after that; the label's
@@ -370,12 +511,42 @@ def _verify_replay(title: str) -> list[str]:
             f"click landed (got {label.name!r})"
         )
 
-    _click_element(gui, title, Role.PAGE_TAB, "List")
-    gamma = gui.element(
-        role=Role.LIST_ITEM, name="Gamma", within=gui.window_element(title)
-    )
+    _select_tab(gui, title, "List")
+    gamma = _element(gui, title, role=Role.LIST_ITEM, name="Gamma")
     if not gamma.selected:
         problems.append("ListView row 'Gamma' is not selected after replay")
+
+    _select_tab(gui, title, "Groups")
+    problems += _verify_groups(gui, title)
+    return problems
+
+
+def _verify_groups(gui: pyguitest.Session, title: str) -> list[str]:
+    """Read the radio groups and the nested tree item back.
+
+    The radios are what shows the groups are *separate*: moving the priority
+    group has to leave the mode group where it was, which a single group
+    cannot demonstrate. The tree item is what shows a nested one is reachable
+    at all -- `Q1` does not exist in the tree until the replay has opened its
+    branch, so finding it selected is also the check that the recorded
+    double-clicks landed.
+    """
+    problems = []
+    for name, want in (
+        ("Low", False),
+        ("Medium", False),
+        ("High", True),
+        ("Fast", True),
+        ("Safe", False),
+    ):
+        selected = _element(gui, title, role=Role.RADIO_BUTTON, name=name).selected
+        if bool(selected) != want:
+            problems.append(
+                f"radio {name!r} reads selected={selected}, expected {want}"
+            )
+    nested = _element(gui, title, role=Role.TREE_ITEM, name="Q1")
+    if not nested.selected:
+        problems.append("tree item 'Q1' is not selected after replay")
     return problems
 
 
@@ -397,12 +568,34 @@ def replay(source: str, title: str) -> list[str]:
         problems = _verify_replay(title)
         if not problems:
             print(
-                "replay: PASS -- every click, the menu action, and the ListView "
-                "selection landed"
+                "replay: PASS -- every click, the menu action, the ListView "
+                "selection, both radio groups and the nested tree item landed"
             )
         return problems
     finally:
         stop_probe(process, title)
+
+
+def _check_the_script_names_its_controls(source: str) -> list[str]:
+    """Read the generated script for the preference this package claims.
+
+    The radio and the nested tree item were driven with the *mouse*, and the
+    script has to reach for them by name, through `select()`, because a
+    coordinate is the one locator that breaks the moment the window moves.
+    Asserted rather than assumed: a recording is only as good as what it
+    renders, and both of these controls publish `select` and no `click`, which
+    is exactly the shape that used to fall to a coordinate.
+    """
+    problems = []
+    for wanted in (
+        'role=Role.RADIO_BUTTON, name="High"',
+        'role=Role.TREE_ITEM, name="Q1"',
+    ):
+        if wanted not in source:
+            problems.append(f"the generated script does not name {wanted}")
+    if ".select()" not in source:
+        problems.append("nothing came out as select() -- see the radio and the tree")
+    return problems
 
 
 def check(*, do_replay: bool) -> int:
@@ -470,6 +663,7 @@ def check(*, do_replay: bool) -> int:
     problems = validate(source)
     print("validate:", problems or "clean")
     problems += round_trip(recording, source)
+    problems += _check_the_script_names_its_controls(source)
 
     if do_replay:
         problems += replay(source, title)

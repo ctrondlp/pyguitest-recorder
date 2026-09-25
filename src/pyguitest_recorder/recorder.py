@@ -127,6 +127,15 @@ class ContextReport:
     elements: bool = False
     """Whether a click can be named, which is the reason this tool exists."""
 
+    bridge_disabled: bool = False
+    """Whether `elements` is true but GTK3 and Qt will still publish nothing.
+
+    `NO_AT_BRIDGE` in this environment, which the element probe cannot see --
+    the desktop's own components registered before it was ever set, so the
+    tree has children and the probe passes while the application being
+    recorded is absent from it. Kept apart from `elements` so the verdict can
+    say so without having to read its own notes back."""
+
     notes: list[str] = field(default_factory=list)
     """Everything that degraded, in the words the recording would carry."""
 
@@ -150,6 +159,7 @@ def probe_context(settings: Settings) -> ContextReport:
         report.windows = _lists_windows(session)
         resolver = recorder._open_resolver_for(session)
         report.elements = resolver.resolves_elements
+        report.bridge_disabled = resolver.bridge_disabled
         report.notes.extend(w for w in resolver.warnings if w not in report.notes)
     finally:
         with contextlib.suppress(Exception):
@@ -1036,14 +1046,59 @@ def _environment(values: dict[str, str]) -> Iterator[None]:
         os.environ.update(saved)
 
 
+_DESKTOP_NAME_VARIABLES = (
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_DESKTOP",
+    "DESKTOP_SESSION",
+)
+"""What pyguitest's own `_desktop_name`/`_compositor` read to name a session.
+
+Scoped out below whenever `display` is not the ambient one, because unlike
+`DISPLAY` and `WAYLAND_DISPLAY` there is no override to put a correct value in
+their place -- unlike an XWayland server, a private Xvfb cannot be asked which
+desktop environment it belongs to, because it does not belong to one."""
+
+
+def _same_display(a: str, b: str) -> bool:
+    """Whether two X display strings name the same server.
+
+    A bare string comparison treats `:0` and `:0.0` as different displays,
+    though they are the same one: a display string is `[host]:server[.screen]`,
+    and an omitted screen number means screen 0, the same server X itself
+    treats them as. Found the gap by inspection rather than live -- a user
+    recording their own ambient desktop with `--display :0` while `$DISPLAY`
+    reads `:0.0` (or the reverse) would otherwise have `scoped_environment`
+    treat that display as foreign and strip the real desktop name from a
+    recording that never left the machine it was made on.
+    """
+    if a == b:
+        return True
+    return a.removesuffix(".0") == b.removesuffix(".0")
+
+
 def scoped_environment(display: str) -> dict[str, str]:
     """The environment as it looks from the display being recorded.
 
     `WAYLAND_DISPLAY` goes because a recording made through XRecord contains X
     clients and nothing else, so describing it as a Wayland session would put
     a compositor in the header of a recording that compositor never saw.
+
+    The desktop-name variables go too, but only when `display` names a server
+    other than the ambient `DISPLAY` -- found live, recording on a private
+    Xvfb (`--display :99`) launched from this developer's own MATE session:
+    `XDG_CURRENT_DESKTOP` is scoped to the *login session*, not to any one X
+    display, so it survived into the scoped environment unchanged and
+    `describe_environment` reported "Recorded on: x11 (other, MATE)" for a
+    bare server with no window manager and nothing resembling MATE running on
+    it at all. Left alone when `display` matches the ambient one, which is
+    the ordinary case of recording the desktop you are sitting in front of,
+    where those variables are exactly what they claim to be -- see
+    `_same_display` for what "matches" means.
     """
     scoped = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
+    if display and not _same_display(display, os.environ.get("DISPLAY", "")):
+        for name in _DESKTOP_NAME_VARIABLES:
+            scoped.pop(name, None)
     if display:
         scoped["DISPLAY"] = display
     return scoped

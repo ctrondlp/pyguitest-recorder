@@ -3,9 +3,181 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.5.0] — 2026-09-24
+
+### Fixed
+
+- **Every recorded click fell to a coordinate on Windows -- `Element.click()`
+  was never once named for it.** `ElementRef.clickable` checked the
+  element's own `actions` for `"click"` or `"press"`, matching
+  `AtspiBackend.Element.click()`'s own fallback -- a GTK measurement, with
+  no Windows counterpart. UIA's `Element.click()` answers to a different
+  vocabulary entirely: `"invoke"`, `"toggle"`, `"do default action"`, never
+  `"click"` or `"press"` -- confirmed live against the win32 probe window in
+  this repository, where a push button, a checkbox and a page tab each
+  publish `invoke` and/or `do default action` and none of them ever
+  publishes `click`. So `clickable` read False for literally every element
+  on that platform, and a script recorded there named nothing: `Element
+  .checkbox("Enable feature")` existed, addressable and correctly
+  resolved, and every click on it still rendered as a bare
+  `gui.move_mouse(...)` / `gui.click()` pair. Found the way the `selectable`
+  gap in the entry below was: record a session against the win32 probe
+  window and read the script it generated. `clickable` now recognises both
+  vocabularies.
+
+### Changed
+
+- **A recorded double click that opened or closed a tree row, a notebook
+  page, or another disclosure control now comes out as `expand()`/
+  `collapse()` on the named element, not `double_click()`.** Measured live
+  on a GTK3 GtkTreeView: double-clicking a tree row *selects* it -- it does
+  not expand, so the script this used to generate replayed clean and did
+  nothing to the tree. A double-click on a Windows tree row happens to
+  expand it, which is exactly the kind of agreement-by-accident that stops
+  holding the moment a script recorded on one platform runs on the other.
+  This needed pyguitest's new `Element.expand()`/`collapse()` (see that
+  repository's changelog); the direction is read from `expanded` as it
+  stood *before* the click, so a replay opens what recording opened rather
+  than guessing from the toggle the click went on to cause. Replayed for
+  real against the same window after recording: the generated
+  `gui.element(role=Role.TABLE_CELL, name="Documents").expand()` opened the
+  row and its children where the raw double-click recorded to produce it
+  had only selected the row. `locators = "relative"` or `"absolute"` still
+  favours coordinates, and a session saved before `expanded` was captured
+  renders exactly as it used to.
+
+- **A recorded click on a radio button, a page tab, a list row or a tree item
+  now comes out as `select()` on the named element rather than a coordinate.**
+  Measured on Windows 11: a coordinate click at a radio button's own reported
+  centre did nothing whatever, while
+  `gui.element(role=Role.RADIO_BUTTON, name="High").select()` moved it and
+  left the other radio group alone, and a nested tree item came back
+  `selected` after a replay that had only ever sent clicks. `locators =
+  "relative"` or `"absolute"` still says to favour coordinates, and a
+  recording made before `ElementRef.selectable` was captured renders exactly
+  as it used to.
+
+  `selectable` is read from pyguitest's own `Element.selectable`, not
+  inferred from `actions` the way this first shipped internally: the Windows
+  11 measurement above found `select` (and `invoke`) in `actions` for both
+  controls, and the first version of this checked for that string there. GTK
+  does not agree -- a page tab on the probe window in this same repository
+  publishes `actions=[]`, no Action interface entries at all, while
+  `Element.selectable` still correctly read True and `.select()` worked,
+  because GTK exposes the Selection interface directly rather than naming it
+  as an action. The `actions`-only check was blind to that on every GTK page
+  tab, tree row and list row, silently falling all of them back to a
+  coordinate on Linux while the changelog above claimed to have fixed exactly
+  that. Confirmed both ways on a live GTK3 window: recording a click on the
+  `Tree` page tab produced `gui.element(role=Role.PAGE_TAB,
+  name="Tree").select()`, which switched the tab on replay against a fresh
+  window -- where it had rendered as a bare `gui.click()` before this.
+
+- **The pyguitest floor moved to 0.12.0, and the generated header moved with
+  it.** A script generated now says `Profile:     pyguitest-0.12`, because
+  `PROFILE` follows the API surface `validate()` checks the emitted calls
+  against rather than this package's own version. `.expand()`/`.collapse()`
+  and reading `Element.selectable` directly, both above, are pyguitest 0.12.0
+  additions -- a floor left at 0.11.0 would let a recording generate calls an
+  installed pyguitest does not actually have.
+
 ## [0.4.0] — 2026-09-23
 
 ### Fixed
+
+- **The press that opened a drop-down was recorded as a click on an item
+  inside it, and the replay crashed.** A press is resolved when it is
+  *consumed*, which is after the application has reacted to it -- so a click
+  that opens a combo box is asked about at a moment when the popup is already
+  on screen and over the point that was clicked. GTK positions a combo's popup
+  so the selected item sits on top of the combo and publishes those items as
+  children of the combo itself, so `element_at` answers with the item: smaller
+  than the combo, equally covering the point, and with no stacking order to
+  tell them apart. Found driving a real GTK combo box: the opening press
+  recorded as `gui.menu_item("Alpha").click()` -- an item nothing had chosen --
+  and the replay raised `ValueError: Attempting to generate a mouse event at
+  negative coordinates: (-2147483647, -2147483647)`, because a closed popup's
+  items report AT-SPI's unplaced sentinel. It cascaded, too: `_popup_at` only
+  recognises a popup whose opening it saw, and this one registered no owner,
+  so the press that *did* choose an item went unnamed as well. The press is
+  now attributed to the nearest ancestor that is not itself part of a popup --
+  the combo box -- and the popup is remembered on the way past, so the choice
+  after it resolves normally. The same interaction now records as
+  `gui.dropdown("Size").click()` then `gui.menu_item("Gamma").click()`, and
+  replays clean.
+
+- **`--doctor` said "ready to record, and clicks will be named" on a session
+  where no GTK3 or Qt application could be named at all.** `NO_AT_BRIDGE` --
+  exported by plenty of shells, containers and IDE terminals to silence GTK's
+  "couldn't connect to accessibility bus" warning -- stops GTK3 and Qt
+  registering with the bus at startup, so an application launched from such a
+  shell to be recorded publishes nothing. The element probe cannot see it: the
+  desktop's own components registered when the session started, long before
+  the variable was in anyone's environment, so the tree has children and the
+  probe passes. Found on a MATE session where `--doctor` gave that verdict and
+  a `mate-calc` launched from the same environment never appeared in the tree,
+  while pyguitest's own `doctor` named the variable in the same minute. The
+  recorder now reports it too -- in `--doctor` and in every recording's notes --
+  and the verdict says "a GTK3 or Qt application that inherits NO_AT_BRIDGE
+  will have no click named" rather than contradicting the note three lines
+  above it. Stated as the risk rather than the outcome, deliberately: the
+  recorder reads its own environment as a proxy for the one the application
+  was launched in, and a real run that launched the application without the
+  variable did name every click.
+
+- **A click resolved to the wrong toplevel's element whenever a process owned
+  two overlapping windows.** `_belongs`'s process check treats a matching pid
+  as proof an element belongs to the window resolved under the same point --
+  true for a single-window application, but one process routinely owns
+  several toplevels at once, most commonly a dialog and its parent. Found
+  live: mate-calc's Help > About opens a second window almost the same size
+  as `Calculator` and at the same origin, both pid-identical, and a click on
+  the About dialog's Close button resolved to `Calculator`'s own `=` button
+  instead -- the window was named correctly (window lookup uses real X
+  stacking order), but AT-SPI's hit test has no concept of one window being
+  stacked above another window of the *same* process, so it answered from
+  whichever toplevel's tree it reached first. `path` -- the element's own
+  ancestry, already captured for locator disambiguation -- carries the
+  (role, name) of the toplevel the element is actually nested under, and now
+  settles it: a same-pid element whose own path names a different toplevel
+  than the one resolved is refused, the same way an element from a different
+  process stacked underneath already was, with a note explaining why.
+
+- **Typing anything outside the base X keyboard layout was captured as
+  nothing at all.** `xdotool type` (and several input methods) type such a
+  character by remapping an unused keycode to it via `XChangeKeyboardMapping`
+  and pressing that keycode -- and this backend's keysym lookups run against
+  a connection whose local keymap cache is built once and never refreshed,
+  because nothing here ever read that connection's own event queue for the
+  `MappingNotify` the server broadcasts on every remap. Confirmed live:
+  recording real Chinese text typed into gedit captured every keystroke as
+  keysym `0x0` with no text, and the generated script called
+  `gui.tap_key("0x0")` four times instead of typing anything. Two fixes,
+  found together: `_resolve_keysym` now drains and applies any pending
+  `MappingNotify` before every lookup, and `_printable` now decodes ICCCM's
+  direct-Unicode keysym block (`0x01000000 + codepoint`), which
+  `Xlib.XK.keysym_to_string` never covered and which is exactly where a
+  character with no legacy X keysym of its own -- all of CJK, among others --
+  lands. Re-run after both fixes: the same recording produced
+  `gui.type_text("你好世界")`, and replaying it into a fresh gedit read back
+  the same text through AT-SPI. The same shape of bug as the Windows
+  `VK_PACKET` fix below, on X11 instead.
+
+- **A recording made on a private Xvfb reported the developer's own desktop
+  environment.** `scoped_environment` strips `WAYLAND_DISPLAY` so a recording
+  of X clients is not described as a Wayland session, but never stripped
+  `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`/`DESKTOP_SESSION` -- variables
+  scoped to the *login session*, not to any one X display. Found live:
+  recording through `--display :99` from a MATE session put
+  `XDG_CURRENT_DESKTOP=MATE` into the scoped environment unchanged, and the
+  generated script's header read `Recorded on: x11 (other, MATE)` for a bare
+  Xvfb with no window manager and nothing resembling MATE running on it.
+  Those three variables are now dropped whenever `display` names a server
+  other than the ambient one, since unlike `DISPLAY` there is no override to
+  put a correct value in their place -- a private Xvfb cannot be asked which
+  desktop environment it belongs to, because it does not belong to one. Left
+  alone recording the desktop you are sitting in front of, where the
+  variables are exactly what they claim to be.
 
 - **`scripts/live-capture-check.py`'s private bus was not private enough, and
   evicted the developer's accessibility bus.** It re-execs on a session bus of
@@ -124,6 +296,20 @@ was released.
   the right display in it.
 
 ### Added
+
+- **`scripts/gtk_probe_window.py`, a GTK window with a real control set, for
+  the X11 live checks.** The X11 counterpart of `win32_probe_window.py`, and
+  the answer to this file's own long-standing note that the routine live check
+  drove two bare GTK windows -- an entry and a label -- so every control a real
+  application is mostly *made of* went unexercised on this platform while the
+  Windows side had a tab control, a combo box, a list view and a real menu bar
+  to aim at. It publishes an entry, a password entry, a button, a check box, a
+  radio pair, a combo box, a spin button, a notebook with two pages, a tree
+  view, a two-menu menu bar and a button raising a real modal dialog, each
+  with an explicit accessible name. It earned its place immediately:
+  recording against it found the notebook hit-test bug fixed upstream in
+  pyguitest (see that repository's changelog), the drop-down misattribution
+  above, and the `NO_AT_BRIDGE` gap in `--doctor`.
 
 - **A generated script says when its `app_id` match is protocol-specific.** An
   app id recorded through XWayland is the class half of `WM_CLASS`, and the

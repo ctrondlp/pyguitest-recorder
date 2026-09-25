@@ -149,7 +149,7 @@ dependencies = [
     # would let pip install a pair whose generated scripts the library cannot
     # answer.
     #
-    # 0.11.0 raises it once more, and for the reason the floor exists at all
+    # 0.11.0 raised it once more, and for the reason the floor exists at all
     # rather than for any one method: it is the first release that imports on
     # Windows. Everything before it carried `import grp` -- a Unix-only
     # standard-library module -- at module scope, so this package could not be
@@ -159,7 +159,13 @@ dependencies = [
     # reads, which is the same floor seen from the other side: an older
     # pyguitest leaves that backend with nothing to report a virtual key in,
     # and `win32.unavailable_reason` says as much rather than raising.
-    "pyguitest>=0.11.0",
+    #
+    # 0.12.0 raises it again: the generator now emits `.expand()`/.collapse()`
+    # and reads `Element.selectable` directly rather than inferring it from
+    # `actions`, both new in that release. An older pyguitest installed
+    # against this floor would let a recording generate calls that do not
+    # exist on it, the exact failure this floor exists to prevent.
+    "pyguitest>=0.12.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

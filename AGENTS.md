@@ -27,15 +27,12 @@ the code does* — read the source and `docs/` for that.
 
 ## Verifying a change
 
-CI (`.github/workflows/ci.yml`) is the reference for what "green" means
-here:
-
-```sh
-python -m pytest -q
-ruff check .
-ruff format --check .
-mypy
-```
+`./scripts/pre-commit-test.sh` is the authoritative gate — tests (pytest),
+ruff lint, ruff format check, and mypy, mirroring `.github/workflows/ci.yml`'s
+`lint` and `tests` jobs. A green run here is what CI means. `--full` adds the
+sdist/wheel build and `twine check --strict`; `live` (recording a real
+application on a real X server) is deliberately not covered — see the
+script's own header before running it by hand.
 
 Fix lint/format/type issues right the first time rather than looping
 edit-check-edit-check; run the full gate once near the end of a change, not
@@ -46,6 +43,10 @@ after every edit.
 `CHANGELOG.md`'s `[Unreleased]` section gets an entry for any user-facing
 fix or feature, in the same voice as the existing entries (a bold one-line
 summary, then the story: what broke, how it was found, what changed).
+Bumping `__version__` and retitling `[Unreleased]` to a dated version header
+is ordinary work here too, not a separate ceremony — see `pyguitest`'s
+AGENTS.md, "Cutting a version," for the convention; it applies to this
+package's own `__version__` the same way.
 
 ## Testing against a real desktop
 
@@ -54,6 +55,11 @@ recording a session or replaying a generated script moves the actual mouse
 and clicks real windows. Don't do either against the user's own live
 desktop without telling them first and letting them confirm, the same as
 any other real-GUI action.
+
+If a live Windows box is available for testing the win32 capture path, see
+`pyguitest`'s AGENTS.md for the logistics (a `SetWinEventHook` gotcha in
+particular applies here too, since this project's win32 capture path goes
+through the same backend).
 
 ## This repo's place in the family
 

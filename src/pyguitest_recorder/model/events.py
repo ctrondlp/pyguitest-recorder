@@ -100,25 +100,91 @@ class ElementRef:
     this field existed -- and is treated as unknown, not as no actions, so
     `--regenerate` on an old `.json` does not downgrade elements that were
     working fine to coordinates just because this was never recorded."""
+    expanded: bool | None = None
+    """Whether this element was open when recorded, from pyguitest's own
+    `Element.expanded` -- a tree row, a notebook, a similar disclosure
+    control. `None` means the same two things `actions is None` does: an
+    element that cannot be expanded at all, or one recorded before this
+    field existed. Both get the same safe answer here, the way they do
+    there -- `expandable` below reads False either way, so an old session
+    simply keeps whatever a double click rendered as before this existed,
+    rather than being guessed into an expand() or collapse() nothing here
+    actually observed."""
+    selectable: bool | None = None
+    """Whether AT-SPI offered `Element.select()`, from pyguitest's own
+    `Element.selectable` -- not inferred from `actions`, unlike `clickable`.
+
+    This used to be `any(a.lower() == "select" for a in self.actions)`, on
+    the strength of a Windows 11 measurement: a radio button and a tree item
+    each published `select` there. GTK does not agree: a page tab measured
+    live on the probe window in pyguitest-recorder published `actions=[]` --
+    no Action interface entries at all -- while pyguitest's own
+    `Element.selectable` correctly read True and `.select()` worked, because
+    GTK exposes the Selection interface directly rather than naming it as an
+    action. The old check was blind to that everywhere on this platform,
+    silently falling every page tab, tree row and list row back to a
+    coordinate on GTK while claiming to have fixed exactly that. Same
+    fallback as `expanded`: `None` covers both "not selectable" and
+    "recorded before this field existed", and an old session keeps whatever
+    it used to render."""
 
     @property
     def addressable(self) -> bool:
         """Whether this element can be located by name at replay time."""
         return bool(self.name)
 
+    _CLICK_ACTIONS = frozenset(
+        {"click", "press", "invoke", "toggle", "do default action"}
+    )
+    """Every action name a `click()` call is known to act through, across both
+    backends. Not one vocabulary: AT-SPI's `Element.click()` matches `click`
+    or `press` in the element's own actions; UIA's tries `invoke`, `toggle`
+    and `do default action`, in that order, and raises outright if none of
+    the three is there -- no coordinate fallback the way AT-SPI has one.
+
+    This used to check only `("click", "press")`, on the strength of a GTK
+    measurement (a Save button and a radio both publish `click`) with no
+    Windows counterpart. Measured live on the win32 probe window in this
+    repository: every interactive UIA control -- a push button, a checkbox,
+    a menu item -- publishes `invoke` and/or `do default action` and *never*
+    `click` or `press`, so `clickable` read False for literally every
+    element on that platform and every recorded click fell to a coordinate,
+    the one locator guaranteed to break when the window moves. Found by
+    recording a real session against the win32 probe window and reading the
+    script it generated, the same way the `selectable` gap was found on
+    GTK.
+
+    Unioning both vocabularies here rather than branching on the recording's
+    own platform is safe because `actions` is always populated by whichever
+    single backend recorded the session, never a mix -- and, checked against
+    pyguitest's `AtspiBackend.Element.click()` directly, AT-SPI never
+    constructs `invoke`/`toggle`/`do default action` as action-interface
+    names; those three are UIA's own synthetic vocabulary. A GTK control
+    publishing one of them under some future toolkit version would be a new
+    finding to measure, not a risk already sitting in this union."""
+
     @property
     def clickable(self) -> bool:
-        """Whether AT-SPI offered an action `Element.click()` can invoke.
+        """Whether the element's own actions give `Element.click()` a route.
 
-        Mirrors pyguitest's own fallback match in `AtspiBackend`'s
-        `Element.click()` (`a.lower() in ("click", "press")`) -- anything
-        looser would claim clickability the replay side cannot make good on.
-        `actions is None` (unknown -- see its docstring) counts as clickable,
-        the same optimism this locator always had before actions existed.
+        `actions is None` (unknown -- see its docstring) counts as
+        clickable, the same optimism this locator always had before
+        `actions` existed.
         """
         if self.actions is None:
             return True
-        return any(a.lower() in ("click", "press") for a in self.actions)
+        return any(a.lower() in self._CLICK_ACTIONS for a in self.actions)
+
+    @property
+    def expandable(self) -> bool:
+        """Whether `Element.expand()`/`collapse()` can act on this element.
+
+        `expanded` is the only source for this -- pyguitest's own property
+        already answers None for anything that is not a disclosure control,
+        so there is no second, looser signal (an action name, say) worth
+        checking the way `clickable` and `selectable` check `actions`.
+        """
+        return self.expanded is not None
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -516,6 +582,8 @@ def _rebuild(cls: type, data: Any) -> Any:
         extents=tuple(extents) if extents else None,
         pid=data.get("pid"),
         actions=tuple(raw_actions) if raw_actions is not None else None,
+        expanded=data.get("expanded"),
+        selectable=data.get("selectable"),
     )
 
 
