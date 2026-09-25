@@ -818,8 +818,11 @@ checkbox, a page tab -- includes `invoke` and/or `do default action`, never
 Fixed; see the changelog. Confirmed live afterward: the same checkbox now
 records as `gui.checkbox("Enable feature").click()`.
 
-**Still open: a double click on a *collapsed* tree row recorded as
-`collapse()`.** Isolated to a single double-click event, nothing else: read
+**Resolved in the generator, not in capture: a double click on a *collapsed*
+tree row recorded as `collapse()`.** A double click on an expandable row now
+renders as a toggle decided at replay (`collapse()` if open, `expand()` if
+not), so the stale read below no longer decides anything. What follows is the
+investigation that led there. Isolated to a single double-click event, nothing else: read
 `Documents.expanded` directly beforehand (`False`), recorded one
 double-click on it, and the JSON `_describe_element` wrote for that same
 event carries `"expanded": true`. Win32's native `SysTreeView32` toggles a

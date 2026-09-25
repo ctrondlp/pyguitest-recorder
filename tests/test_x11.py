@@ -8,6 +8,7 @@ with real `Xlib.protocol.event` structures and stand-in connections, which is
 the difference between this file being written and being known to work.
 """
 
+import sys
 import threading
 
 import pytest
@@ -25,6 +26,7 @@ from pyguitest_recorder.backends.x11 import (  # noqa: E402
     X11CaptureBackend,
     _group_switch_mask,
     _is_case_pair,
+    _Keymap,
     _keysym_names,
     _printable,
 )
@@ -35,6 +37,12 @@ class FakeProtocolDisplay:
     """Enough of a protocol display for EventField to decode against."""
 
     event_classes = pdisplay.Display.event_classes
+
+    class info:  # noqa: N801 - mirrors the attribute python-xlib exposes
+        """The server's keycode range, as the connection setup reports it."""
+
+        min_keycode = 8
+        max_keycode = 255
 
     def get_resource_class(self, name):
         return None
@@ -50,32 +58,32 @@ class FakeConnection:
         self.closed = False
         self.disabled = threading.Event()
         self.pending = []
-        self.refreshed = []
-        self.sync_calls = 0
+        self.queries = []
 
     def keycode_to_keysym(self, keycode, index):
         return self.keymap.get((keycode, index), 0)
 
-    def get_modifier_mapping(self):
-        return self.modifier_mapping
+    def get_keyboard_mapping(self, first, count):
+        """The server's mapping *now*, with every call recorded.
 
-    def sync(self):
-        """A round trip.
-
-        The point at which a real connection would pull a broadcast
-        MappingNotify off the wire. Counted rather than acted on: what
-        matters to the tests here is that `_resolve_keysym` asks.
+        Which is exactly what a lagging pump must not decode an earlier key
+        event by.
         """
-        self.sync_calls += 1
+        self.queries.append(("keyboard", first, count))
+        return [
+            [self.keymap.get((code, index), 0) for index in range(4)]
+            for code in range(first, first + count)
+        ]
+
+    def get_modifier_mapping(self):
+        self.queries.append(("modifier",))
+        return self.modifier_mapping
 
     def pending_events(self):
         return len(self.pending)
 
     def next_event(self):
         return self.pending.pop(0)
-
-    def refresh_keyboard_mapping(self, evt):
-        self.refreshed.append(evt)
 
     def record_disable_context(self, context):
         self.disabled.set()
@@ -169,9 +177,59 @@ def backend(keymap=None, screen=0, group_mask=None, stop_key=None):
     made = X11CaptureBackend(screen=screen, stop_key=stop_key)
     made._control = FakeConnection(keymap)
     made._pump = FakeConnection(keymap)
+    made._keymap = _keymap_of(keymap)
     made._keysyms = _keysym_names({"XK": __import__("Xlib.XK", fromlist=["XK"])})
     made._group_mask = group_mask
     return made
+
+
+def _keymap_of(keymap):
+    """The `_Keymap` a `{(keycode, index): keysym}` table describes."""
+    rows = {}
+    for (code, index), keysym in (keymap or {}).items():
+        row = rows.setdefault(code, [])
+        row.extend([0] * (index + 1 - len(row)))
+        row[index] = keysym
+    return _Keymap(rows)
+
+
+def change_keyboard_mapping(first, rows):
+    """A recorded ChangeKeyboardMapping request, as a client sends it."""
+    per = max(len(row) for row in rows)
+    body = b"".join(
+        keysym.to_bytes(4, sys.byteorder)
+        for row in rows
+        for keysym in row + [0] * (per - len(row))
+    )
+    length = (8 + len(body)) // 4
+    return (
+        bytes([100, len(rows)])
+        + length.to_bytes(2, sys.byteorder)
+        + bytes([first, per, 0, 0])
+        + body
+    )
+
+
+def set_modifier_mapping(modifiers):
+    """A recorded SetModifierMapping request: eight rows of keycodes."""
+    per = max(1, *(len(codes) for codes in modifiers))
+    codes = b"".join(bytes(row + [0] * (per - len(row))) for row in modifiers)
+    pad = (-len(codes)) % 4
+    length = (4 + len(codes) + pad) // 4
+    return bytes([118, per]) + length.to_bytes(2, sys.byteorder) + codes + b"\0" * pad
+
+
+def requested(data, swapped=0):
+    """A record reply carrying client requests rather than server events."""
+    reply = FakeReply(category=1, swapped=swapped)
+    reply.data = data
+    return reply
+
+
+def notify(request=1, first=0, count=0):
+    return xevent.MappingNotify(
+        sequence_number=0, request=request, first_keycode=first, count=count
+    )
 
 
 def escape_backend(stop_key=None):
@@ -321,37 +379,96 @@ def test_an_unmapped_keycode_is_reported_rather_than_dropped():
     assert drain(made)[0].keysym == "0x0"
 
 
-def test_a_pending_mapping_notify_is_applied_before_the_keysym_lookup():
-    """A remap mid-recording is picked up, not read off a stale cache.
+def test_each_press_is_decoded_by_the_mapping_in_force_when_it_was_made():
+    """A remap overtaking a buffered key event does not rename it.
 
-    `xdotool type` (and several input methods) type a character outside the
-    base layout by remapping an unused keycode to it, typing through that
-    keycode, then moving on -- and this backend's keysym lookups run against
-    a connection whose local keymap cache is built once, at `start()`, and
-    never refreshed on its own. Found live recording real Chinese text: every
-    character came back keysym `0x0`. `_resolve_keysym` now drains any
-    `MappingNotify` waiting on `self._control` and hands it to
-    `refresh_keyboard_mapping` before resolving -- this checks that it does,
-    using the fake's own bookkeeping rather than a real remap.
+    `xdotool type` types text outside the base layout through one spare
+    keycode, remapped to each character in turn. A pump running behind
+    used to decode every press through the server's mapping at the time
+    it got there -- the *last* character's -- so a fast "ab" could record
+    as "bb". The remap requests are recorded in the same ordered stream as
+    the presses, and each press is now decoded by the one before it.
     """
-    made = backend()
-    notice = xevent.MappingNotify(
-        sequence_number=0, request=0, first_keycode=8, count=1
-    )
-    made._control.pending.append(notice)
-    made._handle(FakeReply(key(38)))
-    assert made._control.sync_calls == 1
-    assert made._control.refreshed == [notice]
+    from Xlib import XK
+
+    # The server has already moved on to "b" by the time any of it is read.
+    made = backend(keymap={(255, 0): XK.XK_b})
+    made._keymap = _Keymap()
+    made._handle(requested(change_keyboard_mapping(255, [[XK.XK_a]])))
+    made._handle(FakeReply(notify(first=255, count=1), notify(first=255, count=1)))
+    made._handle(FakeReply(key(255)))
+    made._handle(requested(change_keyboard_mapping(255, [[XK.XK_b]])))
+    made._handle(FakeReply(notify(first=255, count=1), key(255)))
+    assert [e.text for e in drain(made)] == ["a", "b"]
+    # Every copy of both notifies came from a request already seen, so the
+    # server -- which could only answer "b" -- was never asked.
+    assert made._control.queries == []
 
 
-def test_resolving_a_keysym_syncs_even_with_nothing_pending():
-    # The ordinary case: no remap happened, so the drain finds nothing -- but
-    # the sync that would have picked one up still has to run every time,
-    # since a keycode's mapping can change between any two key events.
-    made = backend()
+def test_a_remap_the_server_never_confirmed_is_not_applied():
+    # A request can fail (BadValue, or MappingBusy for a modifier change),
+    # and then no MappingNotify follows it: the next event ends the chance.
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a})
+    made._handle(requested(change_keyboard_mapping(38, [[XK.XK_z]])))
     made._handle(FakeReply(key(38)))
-    assert made._control.sync_calls == 1
-    assert made._control.refreshed == []
+    made._handle(FakeReply(notify(first=38, count=1)))
+    assert drain(made)[0].text == "a"
+
+
+def test_a_remap_with_no_request_behind_it_is_read_back_from_the_server():
+    # XKB remaps -- setxkbmap, a desktop's layout switch -- are not core
+    # requests, so the notify arrives with nothing staged and the server
+    # is the only source of the new mapping.
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_q})
+    made._keymap = _keymap_of({(38, 0): XK.XK_a})
+    made._handle(FakeReply(notify(first=38, count=1), key(38)))
+    assert drain(made)[0].text == "q"
+    assert ("keyboard", 38, 1) in made._control.queries
+
+
+def test_a_byte_swapped_clients_remap_is_read_back_from_the_server():
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_q})
+    made._keymap = _keymap_of({(38, 0): XK.XK_a})
+    made._handle(requested(change_keyboard_mapping(38, [[XK.XK_z]]), swapped=1))
+    made._handle(FakeReply(notify(first=38, count=1), key(38)))
+    assert drain(made)[0].text == "q"
+
+
+def test_a_modifier_remap_mid_recording_moves_altgr():
+    # Which modifier bit selects group 2 is found at start; a remap that
+    # binds ISO_Level3_Shift afterwards has to be picked up, or every AltGr
+    # press after it reads as group 1.
+    from Xlib import XK
+
+    XK.load_keysym_group("xkb")
+    table = {
+        (108, 0): XK.XK_ISO_Level3_Shift,
+        (10, 0): XK.XK_1,
+        (10, 1): XK.XK_exclam,
+        (10, 2): XK.XK_at,
+    }
+    made = backend(keymap=table)
+    modifiers = [[] for _ in range(8)]
+    modifiers[5] = [108]
+    made._handle(requested(set_modifier_mapping(modifiers)))
+    made._handle(FakeReply(notify(request=0), key(10, state=1 << 5)))
+    assert drain(made)[0].text == "@"
+    assert made._control.queries == []
+
+
+def test_the_request_parser_ignores_what_it_does_not_record():
+    # Garbage, a zero length (BIG-REQUESTS) and a torn record all stage
+    # nothing, rather than raising on the pump thread.
+    made = backend()
+    for data in (b"", b"\x04\x00\x00\x00", b"\x64\x01\x09\x00\x26"):
+        made._handle(requested(data))
+        assert made._staged is None
 
 
 def test_a_key_release_is_kept_because_modifiers_need_it():
@@ -509,6 +626,35 @@ def test_start_closes_both_connections_when_creating_the_context_fails(monkeypat
     assert made._control is None
     assert made._pump is None
     assert made._context is None
+
+
+def test_start_records_the_remaps_alongside_the_input(monkeypatch):
+    # The in-order mapping is only as good as what the context is asked
+    # for: the two remap requests, and the MappingNotify that confirms each.
+    opened = []
+
+    def fake_connect(xlib, name):
+        conn = _StartFakeConnection(create_context_error=RuntimeError("stop here"))
+        opened.append(conn)
+        return conn
+
+    seen = []
+
+    def create(self, *args):
+        seen.append(args)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(x11_module, "_connect", fake_connect)
+    monkeypatch.setattr(_StartFakeConnection, "record_create_context", create)
+    with pytest.raises(RuntimeError, match="stop here"):
+        X11CaptureBackend().start()
+    ranges = seen[0][2]
+    assert {r["core_requests"] for r in ranges} >= {(100, 100), (118, 118)}
+    assert any(r["delivered_events"] == (34, 34) for r in ranges)
+    assert any(
+        r["device_events"] == (x11_module._KEY_PRESS, x11_module._MOTION)
+        for r in ranges
+    )
 
 
 def test_the_stream_ends_where_the_stop_chord_completed():

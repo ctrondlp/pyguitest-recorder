@@ -1455,31 +1455,32 @@ def test_a_three_key_combination_keeps_every_modifier():
     assert 'gui.send_keys("^(+(S))")' in render(HotKey(keys=("ctrl", "shift", "S")))
 
 
+_ROW = 'gui.element(role=Role.TREE_ITEM, name="Documents")'
+_TOGGLE = (
+    f"if {_ROW}.expanded:\n"
+    f"            {_ROW}.collapse()\n"
+    "        else:\n"
+    f"            {_ROW}.expand()\n"
+)
+
+
 @pytest.mark.needs_ruff
-def test_a_double_click_on_a_collapsed_tree_row_expands_it(window):
+@pytest.mark.parametrize("expanded", [False, True])
+def test_a_double_click_on_a_tree_row_replays_as_the_toggle_it_was(window, expanded):
     # Measured live on a GTK3 GtkTreeView: double_click() activates a row
-    # rather than opening it -- double-clicking a Windows tree row happens to
-    # expand it, agreement by accident that stops holding the moment a
-    # script written against one platform runs on the other. expand() names
-    # the actual intent and means the same thing on both.
-    row = ElementRef(role="tree item", name="Documents", expanded=False)
+    # rather than opening it, so the row is named and toggled through
+    # expand()/collapse() instead. Which one is decided at replay, not from
+    # the recorded `expanded`: on Windows that read lands after the native
+    # tree view has already toggled the row whenever the consumer runs
+    # behind the second press -- a collapsed row recorded True, rendered
+    # collapse(), and the replay never opened it. Both recorded states have
+    # to render the same toggle for that reason.
+    row = ElementRef(role="tree item", name="Documents", expanded=expanded)
     source = render(
         Click(target=Target(x=40, y=50, window=window, element=row), count=2)
     )
-    assert 'gui.element(role=Role.TREE_ITEM, name="Documents").expand()' in source
+    assert _TOGGLE in source
     assert ".double_click()" not in source
-    assert validate(source) == []
-
-
-@pytest.mark.needs_ruff
-def test_a_double_click_on_an_expanded_tree_row_collapses_it(window):
-    # The direction comes from the state recorded before the click, not the
-    # toggle the click went on to cause: open already means this closed it.
-    row = ElementRef(role="tree item", name="Documents", expanded=True)
-    source = render(
-        Click(target=Target(x=40, y=50, window=window, element=row), count=2)
-    )
-    assert 'gui.element(role=Role.TREE_ITEM, name="Documents").collapse()' in source
     assert validate(source) == []
 
 

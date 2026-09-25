@@ -1238,22 +1238,36 @@ class PythonGenerator:
         names the actual intent and means the same thing everywhere pyguitest
         implements it -- both platforms, as of the floor this package names.
 
-        The direction comes from `expanded` as it read *before* this click,
-        which is what recording it, not the toggle the click went on to
-        cause: collapsed means the click opened it, so the replay should too.
+        Rendered as the toggle a double click is, read at replay -- collapse
+        if open, expand if not -- rather than as a direction fixed from the
+        `expanded` the recording captured. That read is not reliably from
+        before the click: an element is described when its press is
+        consumed, and on Windows a native tree view has toggled the row by
+        then whenever the consumer ran behind the second press -- so the
+        same double click on a collapsed row recorded `expanded` True and
+        rendered `collapse()`, a no-op on replay that left the next,
+        nested row missing. Whether the read lands before or after depends
+        only on timing, so no reading of it is safe; replaying the toggle
+        itself reproduces the recording from the state it started in.
 
-        Two clicks, one call, the same way `_double_click` collapses its
-        pair -- an element only answers `expand()`/`collapse()` once either
-        way, so recording it twice would toggle it back.
+        Two clicks, one toggle, the same way `_double_click` collapses its
+        pair -- toggling twice would put the row back.
         """
         element = event.target.element
         if element is None or not element.expandable:
             return False
-        action = "collapse()" if element.expanded else "expand()"
-        call = self._element_locator_call(element, state, action)
-        if call is None:
+        locator = self._element_expr(element, state)
+        if locator is None:
             return False
-        state.lines.append(call)
+        state.capabilities.add("ELEMENT_ACTION")
+        state.lines.extend(
+            [
+                f"if {locator}.expanded:",
+                f"    {locator}.collapse()",
+                "else:",
+                f"    {locator}.expand()",
+            ]
+        )
         state.pointer = None
         return True
 

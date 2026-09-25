@@ -7,6 +7,23 @@ was released.
 
 ### Fixed
 
+- **Text typed through a keycode remapped per character could record as
+  the wrong characters, or none.** `xdotool type` types anything outside
+  the base layout by remapping one spare keycode to each character in
+  turn, and a key event was decoded against the server's mapping at the
+  moment the pump reached it -- by then often a later character's, or the
+  layout restored after the last one. Found reviewing the remap fix below,
+  then confirmed on a private Xvfb with the pump held back while
+  `xdotool type "héllo你好ßü"` ran: the recording read `hllo`. The two remap
+  requests, `ChangeKeyboardMapping` and `SetModifierMapping`, are now
+  recorded in the same ordered stream as the key events and applied to a
+  mapping kept here once the server's `MappingNotify` confirms them, so
+  each press is decoded by the mapping in force when it was made: the same
+  run now records `héllo你好ßü` exactly. A remap no core request explains --
+  XKB, which is how `setxkbmap` and a desktop's layout switch work -- is
+  still read back from the server when its notify arrives. This also drops
+  the round trip every key event used to make to look for a remap.
+
 - **Every recorded click fell to a coordinate on Windows -- `Element.click()`
   was never once named for it.** `ElementRef.clickable` checked the
   element's own `actions` for `"click"` or `"press"`, matching
@@ -138,21 +155,30 @@ was released.
 ### Changed
 
 - **A recorded double click that opened or closed a tree row, a notebook
-  page, or another disclosure control now comes out as `expand()`/
-  `collapse()` on the named element, not `double_click()`.** Measured live
+  page, or another disclosure control now comes out as an `expand()`/
+  `collapse()` toggle on the named element, not `double_click()`.** Measured live
   on a GTK3 GtkTreeView: double-clicking a tree row *selects* it -- it does
   not expand, so the script this used to generate replayed clean and did
   nothing to the tree. A double-click on a Windows tree row happens to
   expand it, which is exactly the kind of agreement-by-accident that stops
   holding the moment a script recorded on one platform runs on the other.
   This needed pyguitest's new `Element.expand()`/`collapse()` (see that
-  repository's changelog); the direction is read from `expanded` as it
-  stood *before* the click, so a replay opens what recording opened rather
-  than guessing from the toggle the click went on to cause. Replayed for
-  real against the same window after recording: the generated
-  `gui.element(role=Role.TABLE_CELL, name="Documents").expand()` opened the
-  row and its children where the raw double-click recorded to produce it
-  had only selected the row. `locators = "relative"` or `"absolute"` still
+  repository's changelog). Replayed for real against the same window after
+  recording: the generated `expand()` opened the row and its children where
+  the raw double-click recorded to produce it had only selected the row.
+
+  Which of the two is called is decided at replay -- `collapse()` if the
+  row is open, `expand()` if not -- rather than fixed from the `expanded`
+  the recording captured. That read was meant to be the state before the
+  click, and on Windows it often is not: an element is described when its
+  press is consumed, and a native tree view has already toggled the row by
+  then whenever the consumer is behind the second press. Found live on the
+  win32 probe window: a double click on a collapsed row captured
+  `"expanded": true`, rendered `collapse()` -- a no-op on replay -- and the
+  nested row the recording went on to click never existed. No read made at
+  consume time can be sure of being early enough, so the script replays
+  the toggle a double click is, which reproduces the recording from the
+  state it started in. `locators = "relative"` or `"absolute"` still
   favours coordinates, and a session saved before `expanded` was captured
   renders exactly as it used to.
 
