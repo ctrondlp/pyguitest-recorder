@@ -77,7 +77,7 @@ from ..model import (
     WindowRef,
     describe_assertion,
 )
-from ..platforms import element_api, plain_name
+from ..platforms import element_api, is_macos, plain_name
 
 __all__ = [
     "GeneratorOptions",
@@ -87,7 +87,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.12"
+PROFILE = "pyguitest-0.14"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -2054,7 +2054,7 @@ class PythonGenerator:
         out.append("")
         out.append(f"def {self.options.function_name}() -> None:")
         out.append('    """Replay the recorded interaction."""')
-        out.append("    with pyguitest.connect() as gui:")
+        out.append(f"    with {_connect(state)} as gui:")
         body = _collapse_taps(_drop_unused_bindings(state.lines))
         if self.options.capability_preamble and state.capabilities:
             body = _require_lines(state.capabilities) + [""] + body
@@ -2307,6 +2307,32 @@ def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
 def _notes(recording: Recording, state: _State) -> list[str]:
     """Everything the recording has to say about how it went."""
     return [*recording.environment.notes, *(f"WARNING: {w}" for w in state.warnings)]
+
+
+def _connect(state: _State) -> str:
+    """The `pyguitest.connect(...)` call a script for this recording needs.
+
+    `pyguitest.connect()` on its own is right everywhere but one place. On a Mac
+    the input backend is registered `opt_in`, because constructing `macquartz`
+    asks for the PostEvent grant, and pyguitest's ADR 003/004 make that the
+    caller's decision rather than something a plain `connect()` does on their
+    behalf. A generated script *is* that caller -- it recorded input and exists
+    to replay it -- and a bare `connect()` there composes the Accessibility read
+    backend alone, so the script's own `require(KEY_EVENT, ...)` preamble raised
+    `CapabilityUnsupported: KEY_EVENT is unsupported on
+    macos+capture:screencapture` on the very machine it was recorded on. Measured
+    on a granted macOS 26.7 VM: a live round trip could not be replayed until the
+    input backend was named.
+
+    Named in precedence order -- input first, then the element and window
+    backend, since the first member that has a capability is the one that serves
+    it. Both are real on the machine this was recorded on, and a Mac that has
+    since lost either gets the named-backend refusal pyguitest documents rather
+    than a silent downgrade to coordinates.
+    """
+    if is_macos(state.session_type):
+        return 'pyguitest.connect(backend=["macquartz", "macos"])'
+    return "pyguitest.connect()"
 
 
 def _footer(recording: Recording, state: _State) -> list[str]:

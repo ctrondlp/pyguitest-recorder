@@ -1092,3 +1092,66 @@ class TestASmallerContextThanAskedForSaysWhy:
         assert Recorder(Settings())._open_session("", notes) is None
         assert any("window and element context off" in n for n in notes)
         assert not any("smaller context" in n for n in notes)
+
+
+class HookLostBackend(InterruptedBackend):
+    """A Windows capture whose low-level hook stopped being called mid-run.
+
+    `hook_lost_seconds` is the attribute `win32`'s heartbeat sets (see
+    `backends/win32.py`), and this class is the whole contract the recorder
+    depends on: an attribute, asked with `getattr`, carrying how much input went
+    unseen. Every other backend simply does not have it.
+    """
+
+    hook_lost_seconds = 4.5
+
+
+class TestALostWindowsHookIsReported:
+    """A recording with a hole in it must not read as complete.
+
+    Windows removes a low-level hook whose callback misses
+    `LowLevelHooksTimeout` without telling the process, so the recording looks
+    fine and the script generated from it replays a sequence nobody performed.
+    `win32`'s heartbeat is what sees it; this is the recorder's half -- a note
+    on the recording, naming what may be missing and the mechanism behind it.
+    """
+
+    def test_the_recording_carries_the_gap(self):
+        recording = _run(
+            HookLostBackend(
+                RawEvent(
+                    kind="key_press",
+                    timestamp=time.monotonic(),
+                    keysym="a",
+                    text="a",
+                )
+            )
+        )
+        note = " ".join(recording.environment.notes)
+        assert "about 4.5s of input may be missing" in note
+        assert "LowLevelHooksTimeout" in note
+
+    def test_the_note_does_not_claim_to_know_what_happened(self):
+        # A UAC prompt and a locked screen read exactly like a removed hook, so
+        # the note points at the possibility and says so rather than accusing a
+        # cause nothing here can see.
+        from pyguitest_recorder.recorder import _hook_lost_note
+
+        note = _hook_lost_note(3.0)
+        assert "UAC prompt" in note
+        assert "re-record" in note
+
+    def test_a_backend_with_no_answer_says_nothing(self):
+        # Every other backend has no reading to give, and a note built from
+        # their silence would put a Windows mechanism in a Linux recording.
+        recording = _run(
+            InterruptedBackend(
+                RawEvent(
+                    kind="key_press",
+                    timestamp=time.monotonic(),
+                    keysym="a",
+                    text="a",
+                )
+            )
+        )
+        assert not [n for n in recording.environment.notes if "input the hooks" in n]

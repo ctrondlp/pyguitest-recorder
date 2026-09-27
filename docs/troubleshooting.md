@@ -43,6 +43,22 @@ widget in gnome-calculator, baobab and gnome-text-editor reported its correct
 widgets apart and answers with the window. A coordinate that works beats a
 named element that does not, so the recorder takes the coordinate.
 
+**One thing that is not a refusal, and still comes out as a coordinate: a click
+on a popup that has already closed.** A press is resolved once the application
+has consumed it, and choosing a combo box's own item, or a submenu entry, closes
+the popup it was in — so by then there is nothing there to name. On Linux the
+recorder looks at the popup while it is open and remembers its layout, which is
+what `_popup_at` exists for; on Windows it relies on UI Automation hit-testing
+popups itself, and that cannot see one that has closed. Measured on Windows 11
+(2026-09-26) against a real combo box and a real submenu: both clicks recorded as
+coordinates, with none of the `'X' was named, but ...` comments that accompany an
+element the recorder *did* name and could not act on — there was nothing there to
+name by then. Both replayed correctly, because the script's coordinates are
+relative to the window's own origin. If that matters for a particular control, a
+hand-written `gui.menu_item("Save As").click()` or
+`gui.dropdown("Size").choose("Large")` is the upgrade — those go through the
+accessibility layer instead.
+
 **Typed text is the exception** and still gets named, because focus involves
 no geometry: you will see `gui.text_field("Name").set_text("Ada")` in a
 recording whose clicks are all coordinates. That is expected, not
@@ -202,17 +218,51 @@ time — often because it opened in a different state, or a dialog had not
 appeared yet. Adding a wait is usually the fix, and the recorder's inference
 did not add one because nothing observable changed at that moment.
 
+**With `ElementNotActionable`, or a `CapabilityUnsupported` naming a pattern**,
+the element the recorder named has no action to run — and the two shapes now call
+for different things. A `CapabilityUnsupported` naming a pattern — *"the do
+default action pattern failed on this element"* with a hex HRESULT — is a
+**refusal**: the element advertises a `LegacyIAccessible` default action and its
+own provider throws when asked for it, which is what a WinForms control that
+declares no default action looks like from UI Automation: the MSAA bridge
+exposes `accDoDefaultAction` for everything, so `actions` carries `do default
+action` (which is why the generator named it at all) and the call then raises
+.NET's `InvalidOperationException` (`0x80131509`). Measured live on Windows 11
+(2026-09-26) on this repository's probe window: a `SysListView32` *cell* refused
+while the window's `EDIT` accepted the identical call, so the shim's fidelity
+varies by control and cannot be asked in advance. The fix is to act on the
+*control* rather than the piece under the cursor — `gui.list_item("Gamma").click()`,
+or `.select()` where the row offers it — and `docs/developers/status.md` records
+what the recorder itself will do about the naming.
+
+A plain `ElementNotActionable` is the other shape: the element publishes
+*nothing at all*, which is what that same cell does on a platform whose shim
+declares none, and **pyguitest's `Element.click()` now clicks such an element by
+coordinate rather than raising** — the element stays the locator and only the
+gesture falls back to the pointer, so a recording that names one keeps working
+with no change to what the recorder generated. Seeing this error there now means
+the element had no *rectangle* to aim at either — it is not showing, or the
+backend reports none — and the message says so; `Session.click_element(element)`
+is the same call spelled for an element taken straight from a backend. Both are
+in pyguitest's `[Unreleased]` until they get a live pass. On a released pyguitest
+older than that, a no-action element fails at replay, so edit that one line of
+the generated script to the coordinate pair the recording carries —
+`gui.move_mouse(x, y)` then `gui.click()`, which is what the generator renders
+for a click that has no element at all — or act on the control as above.
+
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.12.0 or newer is required
+older than the recording expects. **pyguitest 0.14.0 or newer is required
 outright** — the floor the generated code is verified against. Generated
 scripts may call `Element.expand()`/`.collapse()` or read `.selectable`
 directly (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and
 later), double-click named elements with `Element.double_click` (0.10.0), and
 under `motion = "natural"` or `"recorded"` move the pointer with
 `Session.move_mouse_naturally` (0.10.1). 0.11.0 is the first release that
-imports on Windows at all. Older floors matter as well: `gui.button(...)`
-finds nothing on a current at-spi2 before
-0.5.0.
+imports on Windows at all, and 0.14.0 is the one a macOS recording needs:
+before it there is no `macos` backend for the recording's windows and
+elements to be resolved through, and no `macquartz` key vocabulary for its
+key names to be translated through. Older floors matter as well:
+`gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
 

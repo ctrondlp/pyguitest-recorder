@@ -12,8 +12,14 @@ coordinates. `Capability.ELEMENT_GEOMETRY` closed that gap, and this asks the
 question through the public API now, which is also how the recorder inherits
 pyguitest's own honesty about when screen coordinates mean anything.
 
-Everything degrades. No AT-SPI means coordinates with window context; no
-window backend means bare coordinates; and a recording made either way still
+The session is composed per platform, so nothing here is Linux's alone: the
+element half is AT-SPI on Linux, UI Automation on Windows and the Accessibility
+API on macOS, and what counts as corroboration differs accordingly (see
+`DesktopResolver._same_process`). Whether a note's wording names a display, a
+bus or a grant follows the same rule -- see `platforms.py` and `_scope_phrase`.
+
+Everything degrades. No accessible tree means coordinates with window context;
+no window backend means bare coordinates; and a recording made either way still
 generates a working script, just a more fragile one.
 """
 
@@ -27,7 +33,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from ..model import ElementRef, Target, WindowRef
-from ..platforms import foreign_element_reason, foreign_focus_reason, is_windows
+from ..platforms import (
+    foreign_element_reason,
+    foreign_focus_reason,
+    is_macos,
+    is_windows,
+)
 
 __all__ = ["ContextResolver", "NullResolver", "DesktopResolver", "Observation"]
 
@@ -125,19 +136,29 @@ recording pays to notice it.
 """
 
 
-def _scope_phrase(windows: bool | None = None) -> str:
+def _scope_phrase(windows: bool | None = None, macos: bool | None = None) -> str:
     """How to describe the set of windows this recording covers.
 
     "the recorded display" is an X11 idea; on a native Windows recording there
-    is no display to name and the windows are the desktop's own.
+    is no display to name and the windows are the desktop's own. A Mac is the
+    same answer for the same reason, and it is the one place this wording was
+    still wrong after Windows was fixed: `AXUIElementCopyElementAtPosition`
+    answers about the window server's desktop and `CGWindowList` lists it, with
+    no X server anywhere in the question, so a note about "the recorded display"
+    sent a Mac reader looking for a display that does not exist. `xrecord` *on*
+    a Mac (XQuartz) is the recording there that really is of a display, which is
+    why this asks the backend rather than the host.
 
-    `windows` is the recording's platform where the caller knows it from the
-    capture backend rather than from the host -- see `DesktopResolver.windows`.
-    None asks about this machine, which is the right answer for a caller with
-    no backend to ask.
+    `windows` and `macos` are the recording's platform where the caller knows it
+    from the capture backend rather than from the host -- see
+    `DesktopResolver.windows` and `DesktopResolver.macos`. None asks about this
+    machine, which is the right answer for a caller with no backend to ask.
     """
     on_windows = is_windows() if windows is None else windows
-    return "in this recording" if on_windows else "on the recorded display"
+    on_macos = is_macos() if macos is None else macos
+    if on_windows or on_macos:
+        return "in this recording"
+    return "on the recorded display"
 
 
 _FRAME_WINDOW_CLASS = "applicationframewindow"
@@ -146,6 +167,28 @@ _FRAME_WINDOW_CLASS = "applicationframewindow"
 Lower case because window classes are compared case-insensitively, and this is
 the form `_in_a_frame_host` compares against.
 """
+
+
+def _missing_capability_hint(macos: bool) -> str:
+    """What to add to "no element can be named" on a Mac, and nothing elsewhere.
+
+    The base sentence names the missing capability, which is the whole story on
+    Linux and Windows -- an older pyguitest, or a composition that lost the
+    element half. On a Mac the likeliest cause is not the package at all: the
+    Accessibility grant is per *process*, so a session without it still lists
+    windows (that half is ungated) while every element question is refused. A
+    reader told only about `ELEMENT_GEOMETRY` would go hunting for a backend
+    that is working perfectly, so the note has to name the pane.
+    """
+    if not macos:
+        return ""
+    return (
+        " -- on a Mac that is usually the Accessibility grant rather than the "
+        "package: the window half needs no grant, so windows are still listed, "
+        "and no element can be named until the program driving the recorder "
+        "(the terminal, or python itself) is ticked in System Settings > "
+        "Privacy & Security > Accessibility. `pyguitest --doctor` names it"
+    )
 
 
 def _in_a_frame_host(window: WindowRef) -> bool:
@@ -325,7 +368,14 @@ class _Identity:
 
 @dataclass
 class DesktopResolver:
-    """Resolves against the live desktop, through pyguitest and AT-SPI.
+    """Resolves against the live desktop, through pyguitest and its elements.
+
+    One pyguitest session answers both halves of a click, and the accessibility
+    API behind the element half is the one this recording's platform publishes
+    to: AT-SPI on Linux, UI Automation on Windows, the Accessibility API on
+    macOS. Everything above this class in the file is that shape -- what
+    "corroborated" means differs per platform, and the wrong-platform answer is
+    a refusal of every good element on the desktop.
 
     `ignore_pids` keeps the recorder out of its own recording: the recorder's
     window is on the same desktop, appears in the same window list, and would
@@ -344,6 +394,21 @@ class DesktopResolver:
     windows, elements and pids are all X11's to interpret. `Recorder` passes
     the answer its capture backend gives -- see `recorder._windows_desktop` --
     and None keeps every other caller on the host answer this used to read.
+    """
+
+    macos: bool | None = None
+    """Whether this recording is of a Mac's own desktop. None asks the host.
+
+    The same question as `windows`, asked for the same reason: a Mac runs X
+    servers too (XQuartz), where `backend = "xrecord"` records the X clients
+    drawn into one of them and nothing else -- no menu bar, no Dock, no native
+    application, all of which the Accessibility API would otherwise answer
+    about. On a Mac the grant is also what decides how much of this class
+    works at all: without Accessibility the window half still answers
+    (`WINDOW_LIST` and `WINDOW_AT_POINT` are ungated) while no element can be
+    named, which `_can_resolve_elements` reports in macOS's own terms.
+
+    Read through `_on_macos`, which falls back to the host when this is None.
     """
 
     _identity: dict[Any, _Identity] = field(default_factory=dict, init=False)
@@ -387,6 +452,24 @@ class DesktopResolver:
         """Whether this recording is of a native Windows desktop."""
         return is_windows() if self.windows is None else self.windows
 
+    def _on_macos(self) -> bool:
+        """Whether this recording is of a Mac's own desktop."""
+        return is_macos() if self.macos is None else self.macos
+
+    def _atspi(self) -> bool:
+        """Whether this recording's accessible tree is AT-SPI's.
+
+        True on Linux and nowhere else, where the two notes that ask this name
+        machinery only Linux has: `org.a11y.Status.IsEnabled` on the
+        accessibility bus, and `NO_AT_BRIDGE` in the environment. Windows
+        publishes to UI Automation and a Mac to the Accessibility API, and on
+        neither is there a bus signal or an environment variable to read --
+        saying otherwise is the same failure as naming `$DISPLAY` at a Mac
+        reader. See `_warn_if_chromium_invisible` and
+        `_warn_if_bridge_disabled`, the two callers.
+        """
+        return not (self._on_windows() or self._on_macos())
+
     def _session_type(self) -> str:
         """This recording's platform in the vocabulary `platforms` reads.
 
@@ -394,9 +477,15 @@ class DesktopResolver:
         `Environment.session_type` stores -- the `str()` of a pyguitest
         `SessionType` -- and looks for the member name inside it. Built from
         the backend here instead, because the recording whose header this
-        wording ends up in has not been written yet at this point.
+        wording ends up in has not been written yet at this point, and macOS is
+        built the same way so that `foreign_element_reason` and
+        `foreign_focus_reason` can answer in that platform's terms.
         """
-        return "WIN32" if self._on_windows() else "X11"
+        if self._on_windows():
+            return "WIN32"
+        if self._on_macos():
+            return "DARWIN"
+        return "X11"
 
     def _own_terminal_pids(self) -> set[int]:
         """The window-owning process the recorder is being driven from, if any.
@@ -475,6 +564,7 @@ class DesktopResolver:
             self._warn(
                 "element resolution off: this session does not provide "
                 "ELEMENT_GEOMETRY, so nothing can say what is under a point"
+                + _missing_capability_hint(self._on_macos())
             )
             return False
         try:
@@ -499,7 +589,13 @@ class DesktopResolver:
         without this note reads as a resolver bug rather than the known,
         diagnosable gap it is. See pyguitest's own
         `assistive_technology_enabled` for the measurement this reports.
+
+        Linux only -- see `_atspi`. On Windows and macOS this signal does not
+        exist, and a note about a bus that is not on the machine is worse than
+        the silence it replaced.
         """
+        if not self._atspi():
+            return
         try:
             from pyguitest.session import assistive_technology_enabled
         except ImportError:
@@ -537,7 +633,13 @@ class DesktopResolver:
 
         GTK4 ignores the variable, which is what makes the failure look
         selective rather than total, and so harder to recognise.
+
+        Linux only, like `_warn_if_chromium_invisible` -- see `_atspi`. It is a
+        GTK and Qt variable read by their AT-SPI bridges, so on Windows and
+        macOS there is nothing for it to do.
         """
+        if not self._atspi():
+            return
         if os.environ.get("NO_AT_BRIDGE", "") not in ("", "0"):
             self._bridge_disabled = True
             self._warn(
@@ -550,7 +652,22 @@ class DesktopResolver:
             )
 
     def _any_screen_scaled(self) -> bool:
-        """Whether any screen is scaled, which makes extents incomparable."""
+        """Whether any screen is scaled, which makes extents incomparable.
+
+        Never asked on a Mac, where the answer is False rather than a
+        measurement. `Screen.scale` is pixels over DPI-96 wherever a backend
+        reports it, and on macOS that is a property of the panel rather than a
+        statement about coordinates -- the live virtual display this was checked
+        on answered 0.75. What this method is asking is whether the
+        accessibility API's rectangles and the capture backend's coordinates
+        are in the same units, and on a Mac they are: AX reports points, the
+        event tap reports points, `CGWindowList` reports points. Reading the DPI
+        convention as a unit mismatch would switch off every containment check
+        (`_covers`, `_fits`, `_fits_answer`) on every Mac for nothing, which is
+        the opposite of what they are for.
+        """
+        if self._on_macos():
+            return False
         if self.session is None:
             return False
         try:
@@ -820,7 +937,7 @@ class DesktopResolver:
             return self._describe(self._best_owner(owned, element))
         self._warn(
             f"ignored keyboard focus in pid {element.pid}, which owns no window "
-            f"{_scope_phrase(self._on_windows())}; "
+            f"{_scope_phrase(self._on_windows(), self._on_macos())}; "
             f"{foreign_focus_reason(self._session_type())}"
         )
         return None
@@ -927,8 +1044,8 @@ class DesktopResolver:
                 return True
             self._warn(
                 f"ignored accessible elements that no window "
-                f"{_scope_phrase(self._on_windows())} accounts for; "
-                f"{foreign_element_reason(self._session_type())}"
+                f"{_scope_phrase(self._on_windows(), self._on_macos())} accounts "
+                f"for; {foreign_element_reason(self._session_type())}"
             )
             return False
         if window.pid is not None and element.pid is not None:
@@ -1078,7 +1195,8 @@ class DesktopResolver:
         if stacked is None:
             return foreign_element_reason(self._session_type())
         return (
-            f"that process owns another window on this display "
+            f"that process owns another window "
+            f"{_scope_phrase(self._on_windows(), self._on_macos())} "
             f"({stacked.title or stacked.app_id!r}), so this is the hit-test "
             "answering for a window stacked underneath the one clicked -- the "
             "accessible tree has no stacking order"
@@ -1523,6 +1641,8 @@ class DesktopResolver:
         element = self.session.element_at(x, y)
         if element is None:
             return None
+        if self._on_windows():
+            element = self._past_a_bare_text_leaf(element)
         # Not on Windows, where UI Automation hit-tests popups itself and there is
         # nothing to remember: this would be up to `POPUP_WAIT_SECONDS` and a
         # subtree read over UI Automation on every press on a menu, for an answer
@@ -1554,6 +1674,41 @@ class DesktopResolver:
                 self._from_popup = True
                 return owner, None
         return element, None
+
+    def _past_a_bare_text_leaf(self, element: Any) -> Any:
+        """The element to name, where the hit test answered with a decorative run.
+
+        A `SysListView32` row in report view publishes two accessibles at the
+        same point: the row itself (role "list item", with a real `invoke` and
+        `select`) and, hit-tested more precisely, the cell's own text (role
+        "text", whose only action is "do default action"). That action is not
+        a real one -- it is the same universal MSAA-bridge fallback
+        `_CLICK_IS_AN_EXPAND` in pyguitest's `uia.py` was written for, and
+        invoking it on this element raises the identical
+        `(-2146233079, ...)` .NET-facility HRESULT, on a plain native control
+        with no .NET anywhere in it. Measured live: `element_at` on the centre
+        of a real "Gamma" row answered the text leaf, not the row, and a
+        recorded click on it generated `gui.element(role=Role.TEXT,
+        name="Gamma").click()` -- a script with no working route at all,
+        since the row's own genuine actions were never named.
+
+        The signature checked -- role exactly "text", actions exactly
+        `["do default action"]` -- is structural rather than a guess from the
+        failure: a real, clickable text control is an "edit" on Windows, so a
+        "text" role publishing only the one bogus action is never a legitimate
+        target, and nothing here has to invoke anything to find that out.
+        Reaches only up to the immediate parent, and only when that parent is
+        a "list item" -- deliberately as narrow as `_CLICK_IS_AN_EXPAND`, for
+        the same reason: this is the one shape that has been measured, not a
+        general "walk up to something clickable" rule that would also decide
+        the answer for the roles that have not.
+        """
+        if element.role != "text" or element.actions != ["do default action"]:
+            return element
+        parent = element.parent
+        if parent is not None and parent.role == "list item":
+            return parent
+        return element
 
     def _revealed_popup_owner(self, item: Any) -> Any | None:
         """The control a press landed on, where the popup it opened answered.

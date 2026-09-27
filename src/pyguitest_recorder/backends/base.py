@@ -7,11 +7,14 @@ keylogger reads. That is not an oversight to work around: no ordinary Wayland
 client can observe another client's input, on any compositor, and no backend
 added later will change it.
 
-X11 is the exception, which is why it is the first backend and why the
-recorder is honest about being X11-only. `RawEvent` is deliberately free of
-X11 vocabulary anyway, so an acquisition layer that is not XRecord -- AT-SPI
-events being the plausible one, since those behave identically under Wayland
--- can feed the same normalizer.
+X11 is not the only exception, which is why three backends sit behind this
+interface now: XRecord for the X11 stream, the low-level Windows hooks for
+`WH_KEYBOARD_LL`/`WH_MOUSE_LL`, and a `CGEventTap` at the HID tap on macOS —
+each one a stream the platform publishes to a process that asks for it.
+`RawEvent` is deliberately free of all three vocabularies, which is what let
+the later two arrive without the normalizer changing: an acquisition layer that
+is none of them — AT-SPI events being the plausible one, since those behave
+identically under Wayland — can feed the same normalizer.
 """
 
 from __future__ import annotations

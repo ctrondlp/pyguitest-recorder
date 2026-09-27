@@ -24,6 +24,7 @@ import sys
 
 __all__ = [
     "is_windows",
+    "is_macos",
     "plain_name",
     "element_api",
     "foreign_focus_reason",
@@ -67,9 +68,26 @@ def is_windows(session_type: str | None = None) -> bool:
     return "WIN32" in session_type.upper()
 
 
+def is_macos(session_type: str | None = None) -> bool:
+    """Whether the session in question is a macOS one.
+
+    Matched on the member name the way `is_windows` is, and for the same reason:
+    `Environment.session_type` stores the `str()` of a `pyguitest.SessionType`, so
+    `"SessionType.DARWIN"`, and that spelling is pyguitest's to change. None asks about
+    this machine, which is what a caller with no recording falls back to.
+    """
+    if session_type is None:
+        return sys.platform == "darwin"
+    return "DARWIN" in session_type.upper()
+
+
 def element_api(session_type: str | None = None) -> str:
     """What this platform publishes accessible elements through, by name."""
-    return "UI Automation" if is_windows(session_type) else "AT-SPI"
+    if is_windows(session_type):
+        return "UI Automation"
+    if is_macos(session_type):
+        return "the Accessibility API"
+    return "AT-SPI"
 
 
 def foreign_focus_reason(session_type: str | None = None) -> str:
@@ -95,6 +113,12 @@ def foreign_focus_reason(session_type: str | None = None) -> str:
             "UI Automation reports the whole desktop, so it belongs to an "
             "application this recording lists no window for"
         )
+    if is_macos(session_type):
+        return (
+            "the Accessibility API reaches every process the window server names, so "
+            "it belongs to an application this recording lists no window for -- an XPC "
+            "helper, or an application whose windows were all closed"
+        )
     return (
         "the accessibility bus covers the whole login session while this "
         "recording covers one X display, so it belongs to something not on "
@@ -109,6 +133,12 @@ def foreign_element_reason(session_type: str | None = None) -> str:
         return (
             "UI Automation reports the whole desktop, so they belong to "
             "applications this recording lists no window for"
+        )
+    if is_macos(session_type):
+        return (
+            "the Accessibility API reaches every process the window server names, so "
+            "they belong to applications this recording lists no window for -- XPC "
+            "helpers, or applications whose windows were all closed"
         )
     return (
         "the accessibility bus covers the whole login session while this "

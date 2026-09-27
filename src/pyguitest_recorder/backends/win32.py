@@ -3,8 +3,8 @@ r"""Input capture through Windows' low-level input hooks.
 `WH_KEYBOARD_LL` and `WH_MOUSE_LL` are the Windows counterpart of XRecord --
 the one interface that lets this process observe input aimed at every other
 window on the desktop -- and they come with a cost XRecord does not: **a slow
-hook is silently removed, and there is no way for this process to know.**
-Windows documents the rule plainly: the hook procedure must finish inside
+hook is silently removed, and Windows does not say so.** Windows documents the
+rule plainly: the hook procedure must finish inside
 `HKEY_CURRENT_USER\Control Panel\Desktop\LowLevelHooksTimeout` (300ms by
 default, 1000ms the most any Windows 10 1709+ build will honour even if
 configured higher), and on Windows 7 and later a hook that misses that window
@@ -12,12 +12,27 @@ is unhooked without so much as a `CallNextHookEx` -- not passed through, not
 logged, just gone. The mitigation this backend takes is Microsoft's own
 recommendation: the callback does the least possible work -- read the
 structure, enqueue it, return -- and everything else (`ToUnicodeEx`, the
-queue consumer, the normalizer) runs off the hook's own thread. Periodic
-re-installation, which might shrink the undetectable gap to one interval, is
-not attempted here: whether re-installing actually restores a silently-removed
-hook is not settled by Windows' own documentation, and a mitigation for an
-unverified mechanism is not a mitigation, it is a guess wearing one's clothes.
-That gap is the honest limit of this backend, not a bug to chase.
+queue consumer, the normalizer) runs off the hook's own thread.
+
+**The removal is silent to this process, but it is not invisible to the
+session.** `GetLastInputInfo` is the session's own last-input time, maintained
+for idle detection whether or not any hook exists, so comparing it with the
+last time a callback ran measures exactly the input that went unrecorded --
+`_unseen_input_seconds` does that arithmetic and `_watch_health` asks it once a
+second. A lost hook is therefore *reported*: `hook_lost_seconds` carries how
+much input went unseen, and the recorder states it on the recording
+(`recorder._hook_lost_note`) instead of letting a script with a hole in it read
+as complete. `HOOK_LOST_SLACK` explains why the number is a floor, and the one
+other thing that reads the same way -- input on a desktop these hooks cannot
+see, such as a UAC prompt or the lock screen -- is why the note says "may be
+missing" rather than naming a cause it cannot prove.
+
+Periodic re-installation is still not attempted, and that is now a *choice*
+rather than a limit: whether re-installing restores a silently-removed hook is
+not settled by Windows' own documentation, and this backend no longer has to
+guess in order to be honest -- the heartbeat above is what a verified
+re-installation would be judged by, and until somebody measures it, a recording
+says what it lost.
 
 Raw input (`RegisterRawInputDevices`) is Microsoft's own stated preference
 over low-level hooks for exactly this use, and it has neither the timeout nor
@@ -26,13 +41,13 @@ message-only window (`RegisterClassExW`/`CreateWindowExW`, a `WNDPROC` of its
 own) rather than a callback, which is a materially larger surface for a
 first implementation to get right -- see docs/developers/adr-003-windows.md
 in pyguitest for the sibling decision to keep new Win32 surface small and
-reviewable. Low-level hooks are simpler, are what nearly every real-world tool
-in this space actually ships, and their one failure mode is already the honest
-thing to document rather than solve. Measured on Windows 11, the callback
+reviewable. Low-level hooks are simpler and are what nearly every real-world
+tool in this space actually ships. Measured on Windows 11, the callback
 (`ToUnicodeEx` included) takes 0.04ms at the median and 3ms at the worst of
 20,000 key-downs, against the 300ms limit; the gap is a property of the
-mechanism, not something a live run has shown to happen. If it proves real in
-practice, raw input is the documented next step, not a surprise.
+mechanism rather than something a live run has shown to happen, and if it does
+happen the recording now carries the fact. If it proves common in practice,
+raw input is the documented next step, not a surprise.
 
 **The reach sentence this module's honesty depends on**: a low-level hook
 sees every keystroke on the machine, in every application, with no permission
@@ -264,6 +279,36 @@ Windows does not interrupt an untimed wait for a signal; see `events`. A quarter
 of a second is short enough that an interrupt is prompt to a person and long
 enough that an idle recording costs four wake-ups a second, not a busy loop."""
 
+HOOK_HEALTH_INTERVAL = 1.0
+"""Seconds between heartbeats that ask whether these hooks are still firing.
+
+One second is the resolution of the answer a person needs: a recording whose
+hook was removed is missing everything typed since, and knowing within a second
+of it happening is the difference between a note that says how much is missing
+and a script nobody can reconcile with what they did.
+
+Cheap, too, and measured so: a heartbeat is `GetLastInputInfo` and `GetTickCount`
+-- two reads of values the system keeps for idle detection -- once a second, on
+a thread of its own, with no AX or window-server work anywhere near it.
+"""
+
+HOOK_LOST_SLACK = 2.0
+"""How far the hook may trail the system's last input before it is called lost.
+
+Seconds, and the quantity being compared is a *duration*, not a latency: the
+system's "time since the last input" against this backend's "time since the last
+callback", both read at the same instant. A hook that is working trails the
+system by microseconds, so the difference is 0 whatever the sampling rate; a
+hook Windows has removed trails it by everything since, so the difference *is*
+the length of the input nobody recorded.
+
+Two seconds rather than one because a heartbeat can only notice what has already
+happened: with a one-second interval, a gap opens and is measured somewhere
+between one and two seconds after it starts, so the threshold has to sit above
+the interval. Above it, the reading is a floor on the gap rather than a
+measurement of it, and the note this feeds says "about" for that reason.
+"""
+
 _SENTINEL = object()
 
 
@@ -298,6 +343,23 @@ class _MSLLHOOKSTRUCT(ctypes.Structure):
         ("time", ctypes.c_ulong),
         ("dwExtraInfo", ctypes.c_void_p),
     ]
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    """`GetLastInputInfo`'s structure: a size field, then a 32-bit tick count.
+
+    `dwTime` is `GetTickCount`'s own milliseconds-since-boot of the session's
+    last input event, which is a different clock from `time.monotonic()` -- see
+    `Win32CaptureBackend._unseen_input_seconds` for why only *differences*
+    between the two are ever compared, and why that makes them comparable at
+    all.
+
+    `cbSize` is not optional and not decoration: the function refuses (returns
+    FALSE) unless it is set to this structure's own size, which is how the API
+    stays extensible.
+    """
+
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
 
 
 class _MSG(ctypes.Structure):
@@ -358,13 +420,19 @@ def _user32() -> Any:
 
 
 def _kernel32() -> Any:
-    """kernel32.dll, with `GetCurrentThreadId` declared."""
+    """kernel32.dll, with `GetCurrentThreadId` and `GetTickCount` declared."""
     global _kernel32_cache
     if _kernel32_cache is None:
         lib = _load("kernel32")
         if lib is not None:
             lib.GetCurrentThreadId.argtypes = ()
             lib.GetCurrentThreadId.restype = ctypes.c_ulong
+            # `GetTickCount`, not `GetTickCount64`: `_LASTINPUTINFO.dwTime` is
+            # the 32-bit one whatever the machine's uptime, and the heartbeat
+            # compares them, so both sides have to be the same width. The
+            # subtraction is done modulo 2**32 for the 49.7-day wrap.
+            lib.GetTickCount.argtypes = ()
+            lib.GetTickCount.restype = ctypes.c_ulong
         _kernel32_cache = lib
     return _kernel32_cache
 
@@ -442,6 +510,12 @@ def _declare_user32(lib: Any) -> None:
         ctypes.c_void_p,
     )
     lib.ToUnicodeEx.restype = ctypes.c_int
+    # The heartbeat's two calls. `GetLastInputInfo` is the session's own last
+    # input -- the one reading that is not this process's opinion -- and
+    # `GetTickCount` is the same clock it reports in, which lives in kernel32
+    # rather than here; see `_kernel32`.
+    lib.GetLastInputInfo.argtypes = (ctypes.POINTER(_LASTINPUTINFO),)
+    lib.GetLastInputInfo.restype = ctypes.c_int
 
 
 def available() -> bool:
@@ -942,6 +1016,38 @@ class Win32CaptureBackend:
         self._surrogates = _SurrogatePairs()
         self._altgr_announced = False
         self._altgr_down = False
+        self._last_event: float = 0.0
+        """When a hook callback last ran, on `time.monotonic`'s clock.
+
+        Stamped by both callbacks, which is the one thing the heartbeat asks of
+        them: a single float assignment, the cheapest write there is, in the one
+        place the platform's `LowLevelHooksTimeout` rule says to keep minimal.
+        The module's own `_now` is the same clock and is deliberately *not* used
+        here -- one function call less, in the callback.
+        """
+        self._health_stop = threading.Event()
+        self._health_thread: threading.Thread | None = None
+
+    hook_lost_seconds: float | None = None
+    """How much input went unseen by these hooks, or None if none did.
+
+    Set by the heartbeat (`_watch_health`) when the system reports input this
+    backend's callbacks never saw. It is the *duration* of the gap rather than a
+    flag, and it is a floor rather than a measurement -- see `HOOK_LOST_SLACK` --
+    because the heartbeat can only answer for the interval it has just watched.
+
+    None means the question never came up: hooks that kept firing, or a run too
+    short for a heartbeat to be sure. The recorder turns this into a note (see
+    `recorder._hook_lost_note`), which is the whole reason it is public: a
+    recording whose hook was removed looks complete, and a script generated from
+    it replays a sequence with a hole in the middle that nobody can see.
+
+    The other reading of the same number is not a defect and not distinguishable
+    from here: input on a desktop these hooks cannot see -- a UAC prompt, the
+    lock screen, an RDP session that dropped -- advances the system's last-input
+    time with no callback, exactly like a removed hook. The note says "may be
+    missing" for that reason rather than naming a cause.
+    """
 
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
@@ -976,6 +1082,11 @@ class Win32CaptureBackend:
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
         self._start_error = None
+        # Reset rather than left from a previous start() on this same object:
+        # `_watch_health` returns for good the first time it finds a gap, so a
+        # stale value here would silently survive into a recording whose hooks
+        # never missed a beat.
+        self.hook_lost_seconds = None
         self._thread = threading.Thread(
             target=self._run, name="pyguitest-recorder-win32", daemon=True
         )
@@ -1028,6 +1139,19 @@ class Win32CaptureBackend:
                 # `PostThreadMessageW` sent the instant a caller decides to
                 # stop must never race the pump's first real `GetMessageW`.
                 lib.PeekMessageW(pointer, None, 0, 0, 0)
+                # Started here rather than before the hooks, and for the reason
+                # the hooks are installed here at all: a heartbeat with nothing
+                # to watch would measure its own start-up. `_last_event` is
+                # stamped at the same moment for the same reason -- both hooks
+                # are live, so "no callback since" is a fact from now on.
+                self._last_event = time.monotonic()
+                self._health_stop.clear()
+                self._health_thread = threading.Thread(
+                    target=self._watch_health,
+                    name="pyguitest-recorder-hook-health",
+                    daemon=True,
+                )
+                self._health_thread.start()
             finally:
                 self._ready.set()
             if self._start_error is not None:
@@ -1039,11 +1163,80 @@ class Win32CaptureBackend:
                 lib.TranslateMessage(pointer)
                 lib.DispatchMessageW(pointer)
         finally:
+            # Asked to stop before the hooks come off, not after: the heartbeat
+            # reads `_last_event`, and a heartbeat still polling through the
+            # teardown would be measuring the gap the unhooking itself makes.
+            self._health_stop.set()
+            self._health_thread = None
             for hook in (self._keyboard_hook, self._mouse_hook):
                 if hook:
                     lib.UnhookWindowsHookEx(hook)
             self._keyboard_hook = self._mouse_hook = None
             self._queue.put(_SENTINEL)
+
+    def _watch_health(self) -> None:
+        """Notice a hook Windows removed without saying so, and record the gap.
+
+        Windows does not tell a process that its low-level hook was dropped for
+        missing `LowLevelHooksTimeout`: the hook is simply no longer called, and
+        the callback -- the only part of this process the platform ever speaks
+        to -- has no way to notice its own absence. What the platform *does*
+        publish is the session's own last-input time, which is kept whether or
+        not any hook exists, and comparing it with the last time a callback ran
+        is what turns "undetectable" into "detected".
+
+        Stops after the first answer rather than repeating: what a recording is
+        owed is the fact and a duration, not a log, and the recorder states it
+        once (`recorder._hook_lost_note`).
+
+        A thread of its own, and this is load-bearing rather than tidy: the pump
+        thread is inside `GetMessageW`, which does not return for a heartbeat,
+        and the callback is the one place the platform's timeout rule says must
+        stay small. `stop()` sets `_health_stop`, so the wait is the only thing
+        this ever blocks on.
+        """
+        while not self._health_stop.wait(HOOK_HEALTH_INTERVAL):
+            if self.hook_lost_seconds is not None:
+                return
+            missed = self._unseen_input_seconds()
+            if missed is not None and missed > HOOK_LOST_SLACK:
+                self.hook_lost_seconds = missed
+                return
+
+    def _unseen_input_seconds(self) -> float | None:
+        """How much input the system saw that these hooks did not, or None.
+
+        Two *ages*, both read now, so the two clocks never have to agree about
+        anything except a rate: `GetLastInputInfo`'s tick count -- milliseconds
+        since boot, kept by the system for idle detection -- and this backend's
+        monotonic stamp of its own last callback. A working hook trails the
+        system by microseconds whatever the sample rate; one that has been
+        removed trails it by everything since, and the difference between the
+        two ages is exactly the input that went unrecorded.
+
+        Answering None is "could not be asked", never "all is well": a `user32`
+        that will not load here is the same answer `unavailable_reason` gives,
+        and inventing a zero would report a healthy hook this call never
+        checked.
+
+        `GetTickCount` is 32-bit and wraps after 49.7 days of uptime, so the
+        subtraction is masked to its own width; both sides wrap together, which
+        is what makes that correct rather than lucky.
+        """
+        lib, kernel = _user32(), _kernel32()
+        if lib is None or kernel is None:
+            return None
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not lib.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        # `int()` around both because `_kernel32()` and the struct fields are
+        # `Any` by construction (ctypes), and this function's answer is a number
+        # or nothing -- mypy is right to insist.
+        elapsed_ms = int(kernel.GetTickCount()) - int(info.dwTime)
+        since_input = (elapsed_ms & 0xFFFFFFFF) / 1000.0
+        since_callback = time.monotonic() - self._last_event
+        return since_callback - since_input
 
     def _on_keyboard_event(self, code: int, wparam: int, lparam: int) -> int:
         """`WH_KEYBOARD_LL`'s callback: read the structure, enqueue, return.
@@ -1060,6 +1253,10 @@ class Win32CaptureBackend:
         """
         lib = _user32()
         if code == HC_ACTION:
+            # The heartbeat's whole input, and the reason it is outside the
+            # `suppress` below: this cannot raise, and a callback that was
+            # reached at all is what it is reporting.
+            self._last_event = time.monotonic()
             # Suppressed, and the reason is the person at the keyboard rather
             # than tidiness: an exception escaping a ctypes callback does not
             # propagate anywhere a caller can catch it -- ctypes prints the
@@ -1151,6 +1348,8 @@ class Win32CaptureBackend:
         """`WH_MOUSE_LL`'s callback: read the structure, enqueue, return."""
         lib = _user32()
         if code == HC_ACTION:
+            # The heartbeat's reading, exactly as in `_on_keyboard_event`.
+            self._last_event = time.monotonic()
             # Guarded for `_on_keyboard_event`'s reason: an escaping exception
             # would cost the pointer event the rest of its hook chain.
             with contextlib.suppress(Exception):

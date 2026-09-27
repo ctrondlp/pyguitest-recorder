@@ -84,6 +84,36 @@ def _injected_note(keysyms: list[str]) -> str:
     )
 
 
+def _hook_lost_note(gap: float) -> str:
+    """What to say when the Windows input hook stopped being called.
+
+    `win32`'s heartbeat is the only thing that can see this (see
+    `backends/win32.py`'s `_unseen_input_seconds`): Windows removes a low-level
+    hook whose callback misses `LowLevelHooksTimeout` without saying so, and a
+    recording made across that moment looks complete -- it has a hole in it, and
+    the script generated from it replays a sequence nobody performed. Naming the
+    mechanism, the size of the gap and what to do about it is the whole value
+    here, so the note is long on purpose.
+
+    "may be missing" rather than "is missing", because the same reading comes
+    from input on a desktop these hooks cannot see -- a UAC prompt, the lock
+    screen, an RDP session that dropped -- and nothing here can tell the two
+    apart.
+    """
+    return (
+        f"about {gap:.1f}s of input may be missing from this recording: the "
+        "keyboard and mouse hooks stopped being called while input kept "
+        "arriving, which on Windows means the hook was removed -- a low-level "
+        "hook whose callback misses LowLevelHooksTimeout (300ms by default) is "
+        "unhooked without an error, and nothing was left to record the input in "
+        "the gap. Input on a desktop the hooks cannot see -- a UAC prompt, the "
+        "lock screen -- reads the same way, so re-record before assuming the "
+        "worst; if it recurs, something is stalling this process rather than "
+        "the typing being fast (a busy CPU, a paging storm, another low-level "
+        "hook ahead of this one on the chain)"
+    )
+
+
 def _lag_note(lag: float, stopped_at: float | None) -> str:
     """What to say about a recording that fell behind the input it consumed.
 
@@ -186,6 +216,15 @@ def selected_backend_name(settings: Settings) -> str:
         settings.backend == "auto" and sys.platform == "win32"
     ):
         return "win32"
+    # macOS before xrecord, and for the Windows reason rather than a new one: a Mac
+    # can run an X server (XQuartz), and `backend = "xrecord"` there records the X
+    # clients drawing into it -- a fraction of a desktop, captured without an error.
+    # `auto` on a Mac therefore means the event tap, and naming `xrecord` is what asks
+    # for the X server instead.
+    if settings.backend == "macos" or (
+        settings.backend == "auto" and sys.platform == "darwin"
+    ):
+        return "macos"
     if settings.backend in ("auto", "xrecord"):
         return "xrecord"
     return ""
@@ -218,9 +257,29 @@ def _windows_desktop(backend_name: str) -> bool:
     """
     if backend_name == "win32":
         return True
-    if backend_name == "xrecord":
+    if backend_name in ("xrecord", "macos"):
         return False
     return sys.platform == "win32"
+
+
+def _macos_desktop(backend_name: str) -> bool:
+    """Whether a recording through `backend_name` is about a Mac's own desktop.
+
+    The backend decides, not the host process, for the reason `_windows_desktop`
+    gives: `macos` reads the desktop the window server names -- every
+    application's windows and elements, which is the machine's own -- while
+    `xrecord` captures the X clients drawn into an X server, and a Mac runs
+    those too (XQuartz). A recording of the second kind is of a display, with
+    X11's window list, its pids and nothing of macOS in it, so asking about a
+    Mac here would name the wrong machinery in every note. `win32` is nobody's
+    Mac. Any other name -- no backend yet, or one this recorder does not know --
+    falls back to the host, which is what `Recorder._on_macos` relies on.
+    """
+    if backend_name == "macos":
+        return True
+    if backend_name in ("xrecord", "win32"):
+        return False
+    return sys.platform == "darwin"
 
 
 def choose_backend(settings: Settings) -> CaptureBackend:
@@ -242,6 +301,8 @@ def choose_backend(settings: Settings) -> CaptureBackend:
         raise CaptureUnavailable(f"unknown capture backend {settings.backend!r}")
     if name == "win32":
         return _choose_win32(settings)
+    if name == "macos":
+        return _choose_macos(settings)
     return _choose_xrecord(settings)
 
 
@@ -259,6 +320,33 @@ def _choose_win32(settings: Settings) -> CaptureBackend:
     if reason is not None:
         raise CaptureUnavailable(reason)
     return Win32CaptureBackend(display=settings.display, screen=settings.screen)
+
+
+def _choose_macos(settings: Settings) -> CaptureBackend:
+    """The macos backend, or explain why this machine cannot offer it.
+
+    The reason is worth reading even on a Mac, because the commonest way this backend
+    is unavailable is a grant rather than a missing dependency: the tap creation
+    `unavailable_reason` performs *is* the permission question, asked of the window
+    server rather than through a preflight. pyguitest's docs/validation.md carries the
+    measurement behind that.
+
+    `display` is passed through and ignored by the backend itself -- see
+    `MacosCaptureBackend.__init__` for why it is accepted at all. The stop key is
+    handed over for the same reason it is on X11: so capture ends the stream where the
+    chord completed, rather than only where the consumer reached it.
+    """
+    from .backends.macos import MacosCaptureBackend
+    from .backends.macos import unavailable_reason as macos_unavailable_reason
+
+    reason = macos_unavailable_reason()
+    if reason is not None:
+        raise CaptureUnavailable(reason)
+    return MacosCaptureBackend(
+        display=settings.display,
+        screen=settings.screen,
+        stop_key=StopKey.from_settings(settings),
+    )
 
 
 def _choose_xrecord(settings: Settings) -> CaptureBackend:
@@ -318,6 +406,13 @@ def describe_environment(
     # out of *that* recording's header would delete the one fact explaining
     # where its coordinates came from.
     windows = _windows_desktop(backend_name)
+    # macOS answers the same question the same way, and needs to: installing
+    # XQuartz puts `DISPLAY` into the login environment, so a Mac recording its
+    # own desktop through `backend = "macos"` would otherwise carry an X
+    # display in its header -- the mirror image of the Windows bug above, and
+    # just as misleading about where the coordinates came from. `xrecord` on a
+    # Mac keeps its display, exactly as it does on Windows.
+    native = windows or _macos_desktop(backend_name)
     # From the environment this was *handed*, not the ambient one. `env`
     # already carries the display actually being recorded -- `scoped_environment`
     # puts `--display` into it -- and reading `os.environ` instead recorded the
@@ -325,7 +420,7 @@ def describe_environment(
     # which is the one fact that header exists to carry. It also decides which
     # server the XWayland probe below asks.
     source = env if env is not None else os.environ
-    environment.display = "" if windows else source.get("DISPLAY", "")
+    environment.display = "" if native else source.get("DISPLAY", "")
     # Ask the server being recorded, and only guess where it cannot be asked.
     #
     # Detection alone cannot answer this, because the environment it is handed
@@ -344,11 +439,11 @@ def describe_environment(
     # session -- both have the two variables set, and only the first is an
     # XWayland recording. The environment heuristic stays as the fallback for
     # a host with no python-xlib, where nothing can be asked.
-    probed = _is_xwayland_display(environment.display) if not windows else None
+    probed = _is_xwayland_display(environment.display) if not native else None
     if probed is not None:
         environment.xwayland = probed
     else:
-        environment.xwayland = not windows and (
+        environment.xwayland = not native and (
             "XWAYLAND" in environment.session_type.upper()
             or (
                 not environment.session_type
@@ -585,6 +680,13 @@ class Recorder:
             self.recording.environment.notes.append(
                 _lag_note(self._worst_lag, self._stop_pressed_at())
             )
+        # Only `win32` has this (see `backends/win32.py`), and asking by
+        # attribute rather than by backend name is the same shape the injected
+        # keys take: a backend that cannot see the failure simply has no answer
+        # to give, and one that can says how much went missing.
+        gap = getattr(self._backend, "hook_lost_seconds", None)
+        if isinstance(gap, float):
+            self.recording.environment.notes.append(_hook_lost_note(gap))
         if self._injected_keys:
             self.recording.environment.notes.append(_injected_note(self._injected_keys))
         self._collect_warnings()
@@ -837,6 +939,19 @@ class Recorder:
         )
         return _windows_desktop(name)
 
+    def _on_macos(self) -> bool:
+        """Whether what is being recorded is a Mac's own desktop.
+
+        The same rule as `_on_windows`, from the same place: the capture
+        backend decides, and the settings answer only where there is no backend
+        yet. A Mac recording through `xrecord` is X11's to describe -- XQuartz
+        is a display like any other -- and a Windows process is never macOS.
+        """
+        name = getattr(self._backend, "name", "") or selected_backend_name(
+            self.settings
+        )
+        return _macos_desktop(name)
+
     def _context_backends(self) -> tuple[str, ...]:
         """The pyguitest backends that answer "which window, which element".
 
@@ -847,15 +962,36 @@ class Recorder:
         everywhere else `x11` + `atspi`. Window first in both, so it keeps
         every window capability when the element backend joins it.
 
-        Which of the two is asked of the capture backend rather than of the
-        host -- see `_on_windows`. On a Windows machine running Xming, VcXsrv
-        or WSLg with `backend = "xrecord"`, the host answers Windows while the
-        recording is of an X server: `win32` for the window half would ask
-        pyguitest about a native desktop none of whose windows are in the
-        recording, and `uia` for the element half would ask a bus the X11
-        clients in it never publish to.
+        **macOS names one, not two.** There is no second half to compose there:
+        pyguitest's `macos` backend serves the window list and the Accessibility
+        elements both, out of the same frameworks, and the backend that injects
+        input on a Mac (`macquartz`) is the capture half's counterpart rather
+        than something the resolver asks questions of. Asking for it twice, once
+        per half, would also be a session composed of the same backend with
+        itself. Which half is *wanted* still decides whether anything is opened
+        at all, so switching both off asks for no session -- see
+        `settings.window_context`.
+
+        Which of these is asked of the capture backend rather than of the
+        host -- see `_on_windows` and `_on_macos`. On a Windows machine running
+        Xming, VcXsrv or WSLg with `backend = "xrecord"`, the host answers
+        Windows while the recording is of an X server: `win32` for the window
+        half would ask pyguitest about a native desktop none of whose windows
+        are in the recording, and `uia` for the element half would ask a bus the
+        X11 clients in it never publish to.
+
+        `macos` on an untrusted process is not an error and not this method's
+        business: the backend builds and lists windows without the Accessibility
+        grant, and the element half then reports itself missing -- which
+        `DesktopResolver` turns into a note naming the grant.
         """
-        window, element = ("win32", "uia") if self._on_windows() else ("x11", "atspi")
+        if self._on_macos():
+            asked = self.settings.window_context or self.settings.element_context
+            return ("macos",) if asked else ()
+        if self._on_windows():
+            window, element = "win32", "uia"
+        else:
+            window, element = "x11", "atspi"
         wanted = []
         if self.settings.window_context:
             wanted.append(window)
@@ -870,12 +1006,15 @@ class Recorder:
         desktop, where the session is the desktop this process is attached to
         -- so a Windows recording used to carry "no pyguitest session on
         $DISPLAY" into every generated script and session file, sending a
-        reader after a variable their machine does not have. The other way
-        round, an `xrecord` recording made *on* Windows (Xming, VcXsrv, WSLg)
-        is of an X display and says so, which is the whole reason this asks
-        the backend rather than the host.
+        reader after a variable their machine does not have. A Mac is the same
+        sentence for the same reason and was the same bug one platform over:
+        the Accessibility API answers about the machine's own desktop and no
+        variable names it. The other way round, an `xrecord` recording made *on*
+        Windows or on a Mac (Xming, VcXsrv, WSLg, XQuartz) is of an X display
+        and says so, which is the whole reason this asks the backend rather
+        than the host.
         """
-        if self._on_windows():
+        if self._on_windows() or self._on_macos():
             return "for this desktop"
         return f"on {display or '$DISPLAY'}"
 
@@ -912,6 +1051,18 @@ class Recorder:
         Windows 11 recording before this was fixed -- thirteen events, every
         one of them `window: null, element: null`, which is the recorder
         losing the thing it exists to do.
+
+        **macOS names one backend for both halves**, where the other platforms
+        name a pair -- see `_context_backends` for why there is no second half
+        there. Before that, a Mac recording asked for `x11` + `atspi` like any
+        other non-Windows host: no X server and no accessibility bus on a Mac,
+        so the session never opened, and the note it left blamed `$DISPLAY` --
+        a variable a Mac does not have, next to machinery it does not have
+        either. Confirmed live on macOS 26.7 before the fix. Both halves are
+        genuinely served by one backend here, so this is a name change and not
+        a reduction: `macos` answers `WINDOW_AT_POINT` and `ELEMENT_GEOMETRY`
+        from the same session, and without the Accessibility grant the element
+        half is the only part that goes missing.
         """
         wanted = list(self._context_backends())
         if not wanted:
@@ -997,12 +1148,16 @@ class Recorder:
         The recording's own platform goes with it: the resolver corroborates a
         pid mismatch differently on Windows than on X11 (`is_windows`, which
         reads the host), and an `xrecord` recording made on a Windows machine
-        is X11's to interpret. See `_on_windows`.
+        is X11's to interpret. macOS travels the same way and for the same
+        reason -- `macos` phrases its notes about the Accessibility API, and an
+        XQuartz recording on a Mac is X11's either way. See `_on_windows` and
+        `_on_macos`.
         """
         return DesktopResolver(
             session=session,
             elements=self.settings.element_context,
             windows=self._on_windows(),
+            macos=self._on_macos(),
         )
 
     def _normalizer_options(self) -> NormalizerOptions:

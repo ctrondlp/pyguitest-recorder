@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument(
         "--display",
         help="X display to record (default: $DISPLAY); xrecord only, ignored "
-        "on Windows",
+        "by the win32 and macos backends",
     )
     capture.add_argument(
         "--screen",
@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="element_context",
         action="store_false",
         default=None,
-        help="do not resolve clicks to accessible elements through AT-SPI",
+        help="do not resolve clicks to accessible elements",
     )
 
     output = parser.add_argument_group("output")
