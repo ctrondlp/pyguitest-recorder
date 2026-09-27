@@ -174,7 +174,15 @@ dependencies = [
     # tap's names are derived from. Under an older pyguitest a macOS recording would
     # capture and analyze, then generate a script naming a backend the installed
     # library does not have.
-    "pyguitest>=0.14.0",
+    # 0.15.0 raises it once more, and this step is not a missing method: it is the
+    # release the generator was last validated against end to end, on all three
+    # platforms, and this floor is the version the output was checked against
+    # rather than the oldest that might work -- the convention every step above
+    # already follows. Nothing emitted here needs what 0.15.0 added, so a script
+    # generated against this floor still replays under 0.14.0; what does not hold
+    # under an older install is any claim that this package's own output was
+    # verified there.
+    "pyguitest>=0.15.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

@@ -97,10 +97,10 @@ what `--regenerate` re-renders against when that API has moved on.
 
 0.15.0 is the release whose `WINDOW_CAPTURE` reaches macOS, so the three
 platforms this recorder captures on are the three whose native per-window
-capture the library now has. Nothing this generator emits needs it -- the
-floor in `pyproject.toml` stays where it is for that reason, and a script
-generated here still runs under 0.14.0 -- but the header is a claim about what
-was checked, and the check was against this.
+capture the library now has. Nothing this generator emits needs it -- a script
+generated here still replays under 0.14.0 -- but the header is a claim about
+what was checked, and the check was against this, which is the same claim
+`pyproject.toml`'s floor makes.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -2050,7 +2050,14 @@ class PythonGenerator:
         """Wrap the emitted body in imports, a preamble and an entry point."""
         out: list[str] = []
         if self.options.include_header:
-            out.extend(_header(recording, state, self.options.header))
+            out.extend(
+                _header(
+                    recording,
+                    state,
+                    self.options.header,
+                    floor=self.options.default_timeout,
+                )
+            )
         out.extend(_imports(state, self.options))
         out.append("")
         suppression = _warning_suppression(self.options)
@@ -2251,7 +2258,9 @@ def _secret_bindings(state: _State) -> list[str]:
     return lines
 
 
-def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
+def _header(
+    recording: Recording, state: _State, custom: str = "", *, floor: float
+) -> list[str]:
     """Render the module docstring describing where the recording came from.
 
     A caller's own text leads where there is any -- it is what they wanted the
@@ -2259,6 +2268,13 @@ def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
     still follow it. Provenance is not something setting a header should be
     able to drop by accident; `include_header = false` is how you drop it on
     purpose.
+
+    `floor` is the one number in the `Timeouts:` line the header cannot work
+    out for itself: the `min_timeout` the analyzer ran with, which is the same
+    `Settings.default_timeout` the CLI hands both sides. The other two numbers
+    in that line are the recorder's own scaling (`SyncOptions.factor` and
+    `max_timeout`), so a caller who ran the analyzer with a custom
+    `SyncOptions` reads the defaults here rather than its own.
     """
     env = recording.environment
     # Escaped, not rejected: this text is spliced straight into the module's
@@ -2289,6 +2305,15 @@ def _header(recording: Recording, state: _State, custom: str = "") -> list[str]:
         f"{('(' + parenthetical + ')') if parenthetical else ''}".rstrip(),
         f"Capture:     {env.capture_backend or 'unknown'}",
         f"pyguitest:   {env.pyguitest_version or 'unknown'}",
+        # A wait's two numbers disagree on purpose: the comment above it
+        # reports the pause the recording actually took ("the recording waited
+        # 3.8s here") and the call beside it allows three times that. Nothing
+        # else in the file says so, and read together without it the pair looks
+        # like a bug -- the README's own example was read exactly that way.
+        # `tests/test_generator.py` holds these three numbers to the scaling
+        # `SyncOptions` actually applies.
+        f"Timeouts:    seconds; 3x the wait the recording observed "
+        f"(floor {floor:g}s, cap 120s)",
     ]
     lines.extend(d for d in detail if d)
     if env.xwayland:

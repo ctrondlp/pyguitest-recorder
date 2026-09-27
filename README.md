@@ -65,6 +65,7 @@ properly.
 
 Profile:     pyguitest-0.15
 Recorded on: x11 (mutter)
+Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)
 """
 
 import pyguitest
@@ -157,14 +158,20 @@ the recorded events themselves saw:
 | Nothing observable changed | `wait_for_idle(win.pid)` |
 | None of the above | `gui.wait(...)`, and a comment saying why |
 
-So a four-second gap becomes
+So a 3.8-second gap becomes
 
 ```python
 # the recording waited 3.8s here for 'Save As' to open
 saveas = gui.wait_for_window("Save As", timeout=11.4)
 ```
 
-with the timeout scaled to what was actually observed rather than guessed.
+`timeout` is in seconds, and it is deliberately not the 3.8s the comment
+reports: it is three times that wait, floored at ten seconds and capped at two
+minutes, because replay is a different machine — what the recording took once
+is not what it will take again. The comment is what happened; the timeout is
+what the script allows. Every generated file says the same in its header, and
+the number is a plain literal to edit when a slower machine needs longer — see
+[troubleshooting.md](docs/troubleshooting.md#the-script-waits-too-long-or-not-long-enough).
 
 Inference runs when a script is generated, not when a recording is made — so
 `--regenerate` re-analyzes an old recording under whatever rules exist now,
@@ -190,7 +197,7 @@ gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
 What comes out depends on what was under the pointer — a checkbox gives
 `expect_checked`, a label with something to say gives `expect_text`, anything
 else named gives `expect_showing`. These are pyguitest `Session` methods, so a
-generated script depends on nothing but pyguitest — and it needs 0.14.0 or
+generated script depends on nothing but pyguitest — and it needs 0.15.0 or
 newer, as the install section explains. They name what was wrong instead of
 raising a bare
 `AssertionError`, and each retries until its timeout so a check cannot race a
@@ -251,7 +258,7 @@ On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
 [install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
 carries the full table, including Arch, openSUSE and FreeBSD.
 
-**pyguitest 0.14.0 or newer is required outright** — the floor the generated
+**pyguitest 0.15.0 or newer is required outright** — the floor the generated
 code is verified against. Generated scripts call the `expect_` family as
 pyguitest `Session` methods, which do not exist before 0.9.0; double-click a
 named element with `Element.double_click`, which 0.10.0 added; once `motion`
@@ -263,7 +270,10 @@ the floor required until 0.14.0 raised it again: that is the release whose
 `macos` backend a macOS recording resolves windows and elements through, and
 whose `macquartz` vocabulary its key names are translated through, so a
 recording made on a Mac has nothing older to replay or regenerate against.
-Nothing here depends on that going unnoticed: `validate()` checks
+0.15.0 is where the floor stands now, and it is the one step in that list
+nothing here strictly needs: it is the pyguitest this output was last verified
+against, which is the standard this floor has always used. Nothing here
+depends on that going unnoticed: `validate()` checks
 `gui.*` calls against the installed `Session` and what is called on an element
 against the installed `Element`, so a script naming a method this pyguitest does
 not have is reported INVALID when it is generated. `--doctor` prints the

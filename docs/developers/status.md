@@ -66,8 +66,9 @@ is a person's own keyboard -- no real hardware key has been through it yet.
 
 **Two gaps on the pyguitest side were found by this backend's tests, and a third by the
 live run.** All three need a recording made on a Mac to replay *as recorded*, and all
-three are closed in pyguitest 0.14.0 -- the release this repository's floor names, which
-is what makes that floor do real work rather than only gate the macOS read path:
+three are closed in pyguitest 0.14.0 -- the release whose `macos` backend and
+`macquartz` key vocabulary the macOS read path resolves through, and the version the
+repository's floor required until the 0.15.0 validation pass raised it:
 
 1. ~~**Fifteen key names the recorder emits are not in `macquartz`'s vocabulary.**~~
    **Closed:** the names differed only in spelling -- X11's `Page_Up`, `bracketleft` and
@@ -403,8 +404,9 @@ shape: the pointer is reached only where an element published *nothing*, never w
 published route refused, so a combo box's ExpandCollapse refusal is still reported.
 **It ships in pyguitest 0.14.0 with its own live pass still outstanding**, because it
 is a public-contract change on every platform and wants one -- this check on Windows, and
-a live session on a Mac. This repository's `pyguitest>=` floor is that same 0.14.0, and
-this file says which version the check above was measured against.
+a live session on a Mac. The method itself is 0.14.0's, while this repository's
+`pyguitest>=` floor names 0.15.0 -- the release the pass above was measured against,
+which is the convention that floor has always followed.
 
 **Two bugs in this script, found by that session and fixed.** The watchdog that exists to
 stop a *hung* drive was set to 90 seconds while a healthy drive takes about 92: it fired
@@ -453,7 +455,7 @@ half is in that repository's `docs/validation.md`, beside the runs it belongs to
 | **AltGr and dead keys against a real non-US layout (Medium)** | **Partly, and honestly so.** Unit-tested (the AltGr fake-Control fold-back and the dead-key distinction are pinned in `tests/test_win32.py`) and unmeasured against a real German or French layout, which needs a machine whose layout is that -- not reachable from this session. The backend's docstring already draws the line at plain Shift and CapsLock, as X11's does. |
 | **UAC/UIPI boundaries (Medium)** | **Documented, and now with a diagnostic behind it.** A non-elevated hook still cannot reach a higher-integrity process, which stays the documented product boundary. What is new is the reading that catches the desktop it cannot see: input on a UAC prompt or the lock screen advances the session's last-input clock with no callback, so the recording carries "about Ns of input may be missing". Same-integrity-level workflows remain the only way to record an elevated application. |
 | **Adversarial accessibility trees (item 10)** | **The pyguitest half is closed, 2026-09-26; this half was already pinned, and is now named rather than assumed.** pyguitest gained one adversarial-tree class per platform -- `tests/test_uia_backend.py::TestTreesThatLie` and `tests/test_macos_backend.py::TestTreesThatLie` -- for the combinations this row used to call untested: every child reported at `(0, 0)`, one name in two windows of one process, a popup that closes between the capture and the read, a condition a provider answers with more than was asked, a parent chain that loops, a title that is not text, and the node and depth budgets a merely enormous tree has to stop at. Writing them found three defects in its own read paths -- a NULL element-array slot wrapped as a real element and handed to a caller inside a search's answer, a non-string name reaching a compiled-regex filter as a `TypeError` instead of "no match", and a macOS tree reporting an ancestor as its child walked into itself so one widget came back as twelve matches -- all three fixed (pyguitest's CHANGELOG). The four named combinations are pinned here too, spread over the suite rather than gathered into one class: the `(0, 0)` toolkit in `test_resolver.py::test_an_element_that_does_not_cover_the_point_is_refused`, with the cover check's slack and its scaled-screen exemption in the two tests beside it; duplicated names in `test_generator.py::test_two_same_named_buttons_are_scoped_by_their_dialog` and `test_a_check_on_an_ambiguous_element_is_scoped_too`; one process owning several windows in the toplevel-path tests and `TestProcessAncestry`; and a popup whose rectangle exists only while it is open in `test_a_press_consumed_after_its_popup_closed_is_still_named_for_the_item` and `test_a_menu_that_is_closed_claims_no_points`. What stays genuinely uncovered is a *real* toolkit lying -- the GTK4 `(0, 0)` finding was one, and a fake can only reproduce the lie it was told about -- plus a third platform's tree: a live-run item rather than a test-writing one. |
-| **Package maturity and a tested/untested matrix** | The state table at the top of this file is that matrix, and it is kept current rather than summarised: it says which parts were run live and where. Alpha in `pyproject.toml` still matches the evidence. |
+| **Package maturity and a tested/untested matrix** | The state table at the top of this file is that matrix, and it is kept current rather than summarised: it says which parts were run live and where. It is also what moved `pyproject.toml` from `3 - Alpha` to `4 - Beta` in 0.7.0 -- the comment withholding that promotion said every piece working end to end was not the same as the coverage `4 - Beta` claims, and the rows below are that coverage: a capture backend on each of Linux, Windows and macOS, and the resolver and `SysListView32` click fixes those live runs landed against. |
 
 ## The live capture check
 
@@ -989,7 +991,8 @@ clicks there degrade to coordinates rather than to wrong elements.
   daemon paths are observed rather than reasoned.
 - ~~**A double click on a named element is emitted on the element itself only
   where the installed pyguitest has `Element.double_click`.**~~ **Closed:** the
-  floor is 0.11.0, and `Element.double_click` has been in since 0.10.0, so the
+  floor guarantees it -- 0.11.0 when this row was closed, higher since -- and
+  `Element.double_click` has been in since 0.10.0, so the
   `double_click_element` fallback and the probe that chose between the two
   spellings are gone. The element is looked
   up, its rectangle read *at replay*, and `element.double_click()` called

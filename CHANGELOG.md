@@ -18,19 +18,32 @@ was released.
   `xwayland` joins `x11` and `macos` — an XWayland session is exactly what this
   records, and the description names it — and `bsd` joins `freebsd`, which the
   classifiers list as a supported platform.
-- **`PROFILE` moves to `pyguitest-0.15`, and the floor does not.** The header a
-  generated script carries is a claim about the API its calls were checked against,
-  so it follows the pyguitest this generator was last validated against; pyguitest's
-  0.15.0 is that release. The floor in `pyproject.toml` stays at 0.14.0 because
-  nothing this generator emits needs 0.15.0 -- the 0.14.0 floor is about the
-  Accessibility backend the macOS resolver reads through and the `macquartz` key
-  vocabulary, neither of which moved -- and a script generated here still runs under
-  0.14.0. That split is deliberate rather than overlooked: the header describes a
-  check, the floor describes a requirement, and only one of them changed. Landing
-  it wants pyguitest 0.15.0 *published*, not merely tagged: CI here installs
-  pyguitest from PyPI like every other job, so until that release exists the
-  profile test compares the header against 0.14.x and goes red for a reason that
-  has nothing to do with this change.
+- **`PROFILE` and the `pyguitest` floor both move to 0.15.0.** The header a generated
+  script carries is a claim about the API its calls were checked against, so it
+  follows the pyguitest this generator was last validated against; pyguitest's 0.15.0
+  is that release. The floor follows it there, which is one step past what the version
+  before this one argued: nothing this generator emits needs 0.15.0 -- the macOS
+  resolver still reads through the same Accessibility backend and translates its key
+  names through the same `macquartz` vocabulary -- and a script generated here still
+  replays under 0.14.0. The floor is held to the release the output was verified
+  against rather than the oldest that might work, because that is the only version the
+  check behind it can speak for, and an install left at 0.14.0 therefore has to move up
+  to run *this* recorder even though the scripts it writes would still run there. That
+  is the whole cost, stated rather than discovered. Landing it wants pyguitest 0.15.0
+  *published*, not merely tagged: CI here installs pyguitest from PyPI like every other
+  job, so until that release exists the requirement cannot resolve at all and the
+  profile test compares the header against 0.14.x, red for a reason that has nothing to
+  do with this change.
+- **A generated script now says what its timeouts are in.** Every file opens with
+  a `Timeouts:` line — `seconds; 3x the wait the recording observed (floor 10s,
+  cap 120s)` — because the two numbers a wait carries disagree on purpose: the
+  comment above it reports the pause the recording actually took ("the recording
+  waited 3.8s here"), and the call beside it allows three times that. Read
+  together with nothing to explain them, that pair looks like a bug, and the
+  README's own example was read exactly that way — which is what turned this up.
+  Both pages that quote the example now say which number is which, and the
+  header line's three numbers are held to the scaling `SyncOptions` actually
+  applies, so the prose cannot drift from the code under a green suite.
 
 ## [0.6.0] — 2026-09-26
 
@@ -237,7 +250,8 @@ field is on a platform with no injected bit to read. `CGEventKeyboardGetUnicodeS
 is no longer the unverified call, and the three pyguitest-side bugs this found --
 fifteen key names the tap emits that `macquartz` could not press, the `Delete`/`delete`
 collision, and a replayed modifier being captured as a *release* -- are all fixed in the
-0.14.0 this repository's floor names. `docs/developers/status.md` carries the numbers.
+pyguitest 0.14.0 this repository's floor named at the time. `docs/developers/status.md`
+carries the numbers.
 
 **Then a whole session: recorded, generated, replayed, and recorded again.** Same Mac,
 same day, with the same arrangement of a child process posting through `macquartz`. A

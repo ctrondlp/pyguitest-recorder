@@ -70,6 +70,7 @@ redirect works too.
 
 Profile:     pyguitest-0.15
 Recorded on: x11 (mutter)
+Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)
 """
 
 import pyguitest
@@ -126,6 +127,11 @@ from what the events themselves saw:
 # the recording waited 3.8s here for 'Save As' to open
 saveas = gui.wait_for_window("Save As", timeout=11.4)
 ```
+
+`timeout` is in seconds, and not the 3.8s the comment reports: it is three
+times the wait the pause actually took, floored at ten seconds and capped at
+two minutes, because the replay is not the machine that recorded it. The
+comment is what happened; the timeout is what the script allows.
 
 If a script came out as coordinates and you expected names,
 [troubleshooting.md](troubleshooting.md#why-is-my-script-all-coordinates) is
