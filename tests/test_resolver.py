@@ -833,13 +833,13 @@ def test_without_window_context_at_all_the_element_is_kept():
     assert made.resolve(100, 100).element is not None
 
 
-def fitting_resolver(extents, geometry=(0, 0, 310, 263), scale=1.0):
+def fitting_resolver(extents, geometry=(0, 0, 310, 263), scale=1.0, **kwargs):
     """A resolver whose window and element rectangles may not be compatible."""
     session = FakeSession(
         window=FakeWindow(title="Target", pid=None), geometry=geometry
     )
     session.screens = lambda: [type("S", (), {"scale": scale})()]
-    made = DesktopResolver(session=session, elements=False)
+    made = DesktopResolver(session=session, elements=False, **kwargs)
     made._resolves_elements = True
     made._element = lambda x, y: ElementRef(role="panel", name="", extents=extents)
     return made
@@ -882,11 +882,11 @@ def test_a_matching_pid_settles_it_without_consulting_geometry():
     assert made.resolve(100, 100).element is not None
 
 
-def hit_resolver(extents, scale=1.0):
+def hit_resolver(extents, scale=1.0, **kwargs):
     """A resolver whose AT-SPI hit-testing may be answering nonsense."""
     session = FakeSession(window=FakeWindow(title="Target", pid=77))
     session.screens = lambda: [type("S", (), {"scale": scale})()]
-    made = DesktopResolver(session=session, elements=False)
+    made = DesktopResolver(session=session, elements=False, **kwargs)
     made._resolves_elements = True
     made._element = lambda x, y: ElementRef(
         role="label", name="Recorder Check", pid=77, extents=extents
@@ -1046,9 +1046,19 @@ class ElementSession(FakeSession):
         return self._extents
 
 
-def element_resolver(**kwargs):
+def element_resolver(windows=None, macos=None, **kwargs):
+    """An element resolver whose session answers about elements too.
+
+    `windows` and `macos` are the recording's platform, which the resolver
+    reads for its wording and, in `_atspi`, for whether a note about an
+    accessibility bus or `NO_AT_BRIDGE` means anything at all. Left out they
+    ask the host, which is what the recorder does with no backend yet -- and
+    which makes a test that depends on Linux-only notes pass on Linux and fail
+    on Windows for no defect (`element_resolver(windows=False, macos=False)`
+    is the X11 session these fakes are pretending to be).
+    """
     session = ElementSession(window=FakeWindow(title="Target", pid=77), **kwargs)
-    return DesktopResolver(session=session, elements=True)
+    return DesktopResolver(session=session, elements=True, windows=windows, macos=macos)
 
 
 def test_resolving_a_window_only_never_asks_the_tree_for_an_element():
@@ -1594,15 +1604,18 @@ def test_chromium_invisibility_is_noted_when_measured_off(monkeypatch):
     # announces an AT is running -- element resolution otherwise works, so
     # without this note a click on VS Code or Slack finding no element
     # would read as a resolver bug rather than a known, diagnosable gap.
+    # Pinned to X11: `org.a11y.Status.IsEnabled` is a signal on the
+    # accessibility bus, so this note is Linux's (see `_atspi`) and asking the
+    # host made the assertion depend on where the suite runs.
     monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: False)
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert made.resolves_elements
     assert any("org.a11y.Status.IsEnabled" in warning for warning in made.warnings)
 
 
 def test_no_chromium_note_when_measured_on(monkeypatch):
     monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: True)
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert not any("IsEnabled" in warning for warning in made.warnings)
 
 
@@ -1610,7 +1623,7 @@ def test_no_chromium_note_when_it_cannot_be_measured(monkeypatch):
     # None means the question could not be asked (no gdbus, no bus) -- not
     # a reason to warn about a desktop-specific gap that may not apply.
     monkeypatch.setattr("pyguitest.session.assistive_technology_enabled", lambda: None)
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert not any("IsEnabled" in warning for warning in made.warnings)
 
 
@@ -1626,7 +1639,7 @@ def test_no_at_bridge_is_noted_even_though_the_tree_answers(monkeypatch):
     appeared in the tree at all.
     """
     monkeypatch.setenv("NO_AT_BRIDGE", "1")
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert made.resolves_elements
     assert made.bridge_disabled
     assert any("NO_AT_BRIDGE" in warning for warning in made.warnings)
@@ -1634,7 +1647,7 @@ def test_no_at_bridge_is_noted_even_though_the_tree_answers(monkeypatch):
 
 def test_no_bridge_note_when_the_variable_is_unset(monkeypatch):
     monkeypatch.delenv("NO_AT_BRIDGE", raising=False)
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert not made.bridge_disabled
     assert not any("NO_AT_BRIDGE" in warning for warning in made.warnings)
 
@@ -1643,7 +1656,7 @@ def test_no_bridge_note_when_the_variable_is_switched_off(monkeypatch):
     # "0" is how a shell turns it back off again, and reads as unset here --
     # the toolkits treat it that way too.
     monkeypatch.setenv("NO_AT_BRIDGE", "0")
-    made = element_resolver()
+    made = element_resolver(windows=False, macos=False)
     assert not made.bridge_disabled
     assert not any("NO_AT_BRIDGE" in warning for warning in made.warnings)
 
@@ -1967,6 +1980,30 @@ class TestPlatformWordingInNotes:
         monkeypatch.setattr(platforms.sys, "platform", "win32")
         assert resolver_module._scope_phrase(False) == "on the recorded display"
 
+    def test_macos_notes_name_no_display_either(self, monkeypatch):
+        # The second half of the same fix: `AXUIElementCopyElementAtPosition`
+        # and `CGWindowList` answer about the machine's own desktop, with no X
+        # server in the question, so "the recorded display" sent a Mac reader
+        # after machinery their machine does not have.
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "darwin")
+        phrase = resolver_module._scope_phrase()
+        assert "display" not in phrase
+        assert phrase == "in this recording"
+
+    def test_an_xquartz_recording_on_a_mac_keeps_the_display(self, monkeypatch):
+        # The other way round, and the reason this asks the backend rather than
+        # the host: `xrecord` on a Mac captures the X clients drawn into
+        # XQuartz, which is a recording of a display like any other.
+        import pyguitest_recorder.platforms as platforms
+        from pyguitest_recorder.windows import resolver as resolver_module
+
+        monkeypatch.setattr(platforms.sys, "platform", "darwin")
+        assert resolver_module._scope_phrase(False, False) == "on the recorded display"
+        assert resolver_module._scope_phrase(False, True) == "in this recording"
+
 
 class TestTheUwpProcessSplit:
     """A Store app's window and its widgets are owned by different processes.
@@ -2166,6 +2203,72 @@ def test_a_combo_box_is_recovered_as_its_popups_owner():
     assert made._menu_owner is combo
 
 
+def test_a_listview_cells_bare_text_is_recovered_as_its_row():
+    # Measured live: a SysListView32 row in report view publishes both the row
+    # itself (a real `invoke`/`select`) and, hit-tested more precisely, the
+    # cell's own text -- whose only action is the universal MSAA-bridge
+    # fallback `uia.py`'s `_CLICK_IS_AN_EXPAND` was written for. Recorded
+    # as-is, the click had no working route: `gui.element(role=Role.TEXT,
+    # name="Gamma").click()` raised the same `(-2146233079, ...)` HRESULT the
+    # combo box bug did, on a plain native control with no .NET in it anywhere.
+    # pid matches `FakeWindow`'s default and the point matches
+    # `ElementSession`'s default extents -- both are what `_belongs`/`_covers`
+    # need to keep the element rather than dropping it before this is ever
+    # reached.
+    row = FakeElement(
+        "list item",
+        "Gamma",
+        pid=1234,
+        actions=("do default action", "invoke", "select"),
+    )
+    text = FakeElement(
+        "text", "Gamma", pid=1234, parent=row, actions=("do default action",)
+    )
+    made = DesktopResolver(session=ElementSession(element=text), windows=True)
+    assert made.resolve(140, 130).element.role == "list item"
+
+
+def test_a_text_leaf_with_a_real_action_of_its_own_is_not_second_guessed():
+    # The signature is structural -- role "text" and *only* the bogus action --
+    # so a text element that genuinely offers something real is left alone.
+    row = FakeElement("list item", "Gamma", pid=1234)
+    text = FakeElement(
+        "text",
+        "Gamma",
+        pid=1234,
+        parent=row,
+        actions=("do default action", "invoke"),
+    )
+    made = DesktopResolver(session=ElementSession(element=text), windows=True)
+    assert made.resolve(140, 130).element.role == "text"
+
+
+def test_a_bare_text_leaf_with_no_list_item_parent_is_left_alone():
+    # Deliberately as narrow as `_CLICK_IS_AN_EXPAND`: only the one shape that
+    # has been measured recovers, not a general "find something clickable"
+    # walk that would also decide the answer for roles nobody has checked.
+    group = FakeElement("group", "", pid=1234)
+    text = FakeElement(
+        "text", "Gamma", pid=1234, parent=group, actions=("do default action",)
+    )
+    made = DesktopResolver(session=ElementSession(element=text), windows=True)
+    assert made.resolve(140, 130).element.role == "text"
+
+
+def test_the_bare_text_leaf_recovery_is_windows_only():
+    # AT-SPI has no equivalent quirk measured, and `_past_a_bare_text_leaf` is
+    # gated in `_live_at` for that reason -- a text leaf on Linux is reported
+    # exactly as the accessible tree gives it.
+    row = FakeElement(
+        "list item", "Gamma", pid=1234, actions=("do default action", "invoke")
+    )
+    text = FakeElement(
+        "text", "Gamma", pid=1234, parent=row, actions=("do default action",)
+    )
+    made = DesktopResolver(session=ElementSession(element=text), windows=False)
+    assert made.resolve(140, 130).element.role == "text"
+
+
 def test_a_toplevel_name_with_trailing_whitespace_is_not_another_toplevel():
     # `_identify` strips the window's title; the path entry it is compared
     # against has to be stripped the same way, or a trailing space refuses an
@@ -2173,3 +2276,137 @@ def test_a_toplevel_name_with_trailing_whitespace_is_not_another_toplevel():
     made = popup_resolver()
     element = ElementRef(role="button", name="Save", path=(("frame", "Target "),))
     assert made._other_toplevel_of(element, WindowRef(title="Target")) is None
+
+
+class TestTheMacPlatformInNotes:
+    """A Mac recording describes itself in macOS's terms, not Linux's.
+
+    The same rule Windows needed, one platform over, and the residue the macOS
+    capture work left behind: the session a Mac asked for was `x11` + `atspi`,
+    so no context opened at all, and the notes that *did* come out named
+    `$DISPLAY`, an accessibility bus and `NO_AT_BRIDGE` -- three pieces of
+    machinery a Mac has never had. These strings end up in the generated
+    script's own footer, read by whoever is sitting at the Mac.
+
+    The `ELEMENT_GEOMETRY` note is the one worth the most: without the
+    Accessibility grant it is the note a Mac recording carries, and reading it
+    as a broken package rather than an unticked pane is the difference between
+    a five-minute fix and a bug report.
+    """
+
+    def test_the_recording_decides_the_session_type(self):
+        made = DesktopResolver(session=None, windows=False, macos=True)
+        assert made._session_type() == "DARWIN"
+        # And the recording wins over the machine this suite happens to run on.
+        assert made._on_macos() is True
+        assert made._on_windows() is False
+
+    def test_an_xquartz_recording_on_a_mac_is_x11s(self):
+        # `xrecord` captures X clients: X11's window list, X11's pids and a
+        # display to name. See `DesktopResolver.macos`.
+        made = DesktopResolver(session=None, windows=False, macos=False)
+        assert made._session_type() == "X11"
+
+    def test_an_element_from_no_window_names_the_accessibility_api(self):
+        made = DesktopResolver(
+            session=FakeSession(window=None), elements=False, windows=False, macos=True
+        )
+        made.session.window = None
+        made._resolves_elements = True
+        made._element = lambda x, y: ElementRef(role="panel", name="", pid=4242)
+        assert made.resolve(100, 100).element is None
+        assert any("in this recording" in warning for warning in made.warnings)
+        assert any("Accessibility API" in warning for warning in made.warnings)
+        assert not any("recorded display" in warning for warning in made.warnings)
+
+    def test_the_bridge_variable_is_not_read_on_a_mac(self, monkeypatch):
+        # `NO_AT_BRIDGE` is read by GTK's and Qt's AT-SPI bridges, so there is
+        # nothing on a Mac for it to silence -- and a note about a bridge that
+        # is not on the machine is worse than the silence it replaced.
+        monkeypatch.setenv("NO_AT_BRIDGE", "1")
+        made = DesktopResolver(
+            session=FakeSession(), elements=False, windows=False, macos=True
+        )
+        made._warn_if_bridge_disabled()
+        assert made.warnings == []
+        assert made.bridge_disabled is False
+
+    def test_the_bridge_variable_is_still_read_on_x11(self, monkeypatch):
+        monkeypatch.setenv("NO_AT_BRIDGE", "1")
+        made = DesktopResolver(
+            session=FakeSession(), elements=False, windows=False, macos=False
+        )
+        made._warn_if_bridge_disabled()
+        assert made.bridge_disabled is True
+
+    def test_chromium_invisibility_is_not_noted_off_linux(self, monkeypatch):
+        # `org.a11y.Status.IsEnabled` is a signal on the accessibility bus.
+        # Neither UI Automation nor the Accessibility API has it, so the note
+        # would name a bus that is not on the machine.
+        monkeypatch.setattr(
+            "pyguitest.session.assistive_technology_enabled", lambda: False
+        )
+        windows = DesktopResolver(
+            session=ElementSession(window=FakeWindow(title="Target", pid=77)),
+            elements=True,
+            windows=True,
+        )
+        for made in (mac_element_resolver(), windows):
+            assert not any("IsEnabled" in warning for warning in made.warnings)
+
+
+def mac_element_resolver(**kwargs):
+    """An element resolver for a recording of a Mac's own desktop.
+
+    Explicit rather than a flag on `element_resolver`, because `windows` and
+    `macos` are the resolver's to know and not `ElementSession`'s -- they
+    travel from the capture backend (see `Recorder._open_resolver_for`), and a
+    fake session that accepted them would hide a mistake there.
+    """
+    session = ElementSession(window=FakeWindow(title="Target", pid=77), **kwargs)
+    return DesktopResolver(session=session, elements=True, windows=False, macos=True)
+
+
+def test_a_mac_without_the_accessibility_grant_is_told_so():
+    # Without the grant the session still lists windows -- that half is ungated
+    # -- while ELEMENT_GEOMETRY is missing. Naming the pane is the whole
+    # difference between an actionable note and a reader hunting for a backend
+    # that is working perfectly. Measured on macOS 26.7.
+    made = mac_element_resolver(capabilities=("WINDOW_LIST",))
+    assert made.resolve(130, 130).element is None
+    warning = next(w for w in made.warnings if "ELEMENT_GEOMETRY" in w)
+    assert "Accessibility" in warning
+    assert "System Settings" in warning
+
+
+def test_the_grant_hint_is_macos_only():
+    # No other platform's note grows a sentence about a pane it does not have.
+    assert resolver_module._missing_capability_hint(False) == ""
+    assert "Accessibility" in resolver_module._missing_capability_hint(True)
+
+
+def test_a_scaled_screen_on_a_mac_is_not_a_unit_mismatch():
+    """`Screen.scale` is DPI/96 on macOS: a panel fact, not a unit mismatch.
+
+    AX extents, `CGWindowList` and the event tap all report points there, so a
+    scaled display must not switch off the checks that keep a toolkit's
+    nonsense rectangles out of a recording -- which is what believing the DPI
+    convention would do, on every Mac. The live virtual display this was
+    checked against answers 0.75.
+    """
+    made = fitting_resolver(extents=(0, 0, 1920, 1080), scale=0.75, macos=True)
+    assert made._scaled is False
+    assert made.resolve(100, 100).element is None
+    assert (
+        hit_resolver(extents=(0, 0, 252, 25), scale=0.75, macos=True)
+        .resolve(155, 131)
+        .element
+        is None
+    )
+
+
+def test_the_same_screen_is_still_skipped_on_x11():
+    # The behaviour macOS is being exempted from, kept honest here.
+    made = fitting_resolver(extents=(0, 0, 1920, 1080), scale=2.0, macos=False)
+    assert made._scaled is True
+    assert made.resolve(100, 100).element is not None

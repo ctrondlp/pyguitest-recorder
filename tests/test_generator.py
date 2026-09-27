@@ -2377,3 +2377,44 @@ class TestNoForeignPlatformVocabulary:
 
         monkeypatch.setattr(platforms.sys, "platform", "linux")
         assert "UI Automation" in self._script("SessionType.WIN32")
+
+
+class TestTheReplayAsksForTheOptInInputBackend:
+    """A Mac recording has to name the input backend to be replayable there.
+
+    `pyguitest.connect()` composes the Accessibility read backend alone on macOS:
+    `macquartz` is registered `opt_in`, because constructing it asks for the
+    PostEvent grant, and ADR 003/004 make that the caller's decision rather than
+    something a bare `connect()` does on their behalf. A generated script *is*
+    the caller -- it recorded input and exists to replay it -- and without the
+    name its own `require(KEY_EVENT, ...)` preamble raised
+    `CapabilityUnsupported: KEY_EVENT is unsupported on
+    macos+capture:screencapture` on the machine it was recorded on. Found by a
+    live record-replay round trip on a granted macOS 26.7 VM.
+    """
+
+    def _connect_line(self, session_type):
+        recording = Recording(environment=Environment(session_type=session_type))
+        recording.add(Click(timestamp=1.0, target=Target(x=20, y=30)))
+        return next(
+            line.strip()
+            for line in generate(recording).splitlines()
+            if "pyguitest.connect" in line
+        )
+
+    def test_a_macos_script_names_the_input_backend_first(self):
+        assert self._connect_line("SessionType.DARWIN") == (
+            'with pyguitest.connect(backend=["macquartz", "macos"]) as gui:'
+        )
+
+    def test_every_other_platform_leaves_connect_alone(self):
+        for session_type in ("SessionType.X11", "SessionType.WIN32", ""):
+            assert (
+                self._connect_line(session_type) == "with pyguitest.connect() as gui:"
+            ), session_type
+
+    def test_regenerating_a_macos_recording_on_linux_still_names_it(self, monkeypatch):
+        import pyguitest_recorder.platforms as platforms
+
+        monkeypatch.setattr(platforms.sys, "platform", "linux")
+        assert "macquartz" in self._connect_line("SessionType.DARWIN")

@@ -3,6 +3,273 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.6.0] — 2026-09-26
+
+### Added
+
+- **`macos`: capture on a Mac through a `CGEventTap`.** The third capture backend,
+  and the one ADR 004 in the pyguitest checkout orders after its Accessibility read
+  path: a listen-only tap on the HID tap, whose callback is translated into the same
+  `RawEvent`s XRecord and the Windows hooks produce. Pointer, buttons, drags, scroll,
+  keys and modifiers are all covered, keys are named with X11 keysyms (`Return`,
+  `Super_L`, `bracketleft`) so the rest of the pipeline -- `stopkey`, `normalize` and
+  the generator's `send_keys` strings -- needs no Mac-specific spellings, and scroll
+  passes `kCGScrollWheelEventDeltaAxis1`/`2` straight through so a recorded scroll
+  replays with the same sign through `Session.scroll(dy=)`.
+- **The permission question is asked, not inferred.** `unavailable_reason()` creates
+  and releases a probe tap, because that is the whole answer: measured on macOS 26.7,
+  `CGEventTapCreate` returns a live tap on a machine whose only grant is Accessibility
+  and `NULL` without one, TCC composing `kTCCServiceListenEvent` from Accessibility
+  rather than filing a row of its own. The sentence a reader gets names that pane.
+- **`backend = "auto"` on a Mac means the tap**, not `xrecord`, for the reason it means
+  `win32` on Windows rather than an X server that happens to be running: XQuartz is an
+  X server, and recording its clients would be a fraction of the desktop with no error
+  to show for it. `backend = "macos"` is also accepted by name.
+- **A `macos` extra**, pointing at `pyguitest[macos]` rather than naming PyObjC's
+  distributions a second time, so the requirement cannot drift from the library's.
+
+### Changed
+
+- **The `pyguitest` floor moves to 0.14.0** — the release whose Accessibility backend
+  the macOS resolver reads windows and elements through, and whose `macquartz` key
+  vocabulary the tap's names are derived from. `PROFILE` moves with it: the header's
+  `Profile: pyguitest-0.14` is what tells a reader which API a generated script was
+  written for, and what `--regenerate` re-renders against. The reasoning is in
+  `pyproject.toml` beside the earlier bumps.
+- The package description, keywords and `--display` help name macOS, which had been
+  X11 and Windows only since the win32 backend landed.
+
+### Fixed
+
+- **A tap the window server switches off was ignored.** `kCGEventTapDisabledByTimeout`
+  and `kCGEventTapDisabledByUserInput` are not mask bits and are not in `_TAPPED`, so the
+  callback handed them to `_translate`, which answered `None` -- and a disabled tap is
+  not called again, so a recording that hit one would have gone on capturing nothing at
+  all, with no error and nothing in the log. `_re_enable` answers both now, and only
+  while the run is live. Measured over five live runs on a granted macOS 26.7 Mac: what
+  actually arrives is the user-input one, once, after `stop()` had disabled the tap
+  itself, with every event already delivered -- 48 of 48 posted events, including across
+  a three-second gap between two bursts. The guard is what that measurement buys, since
+  putting the tap back during teardown would fight the teardown it is part of.
+
+- **Every special key recorded the window server's control code as typed text.** A
+  `Recorder` run against a live Mac desktop -- the first, see below -- captured `Left` as
+  `'\x1c'`, `Return` as `'\r'`, the forward delete as `'\x7f'`, the function keys as
+  `'\x10'`, and AppKit's private-use range (`U+E000`-`U+F8FF`) for the keys it has no
+  character for. `CGEventKeyboardGetUnicodeString` answers for *every* key event, and a
+  control code is not text: carried through, `'\x1c'` reaches the generator as typed text,
+  and a script that types `'\x1c'` types nothing like a Left arrow. Measured over the
+  113-event control sequence: `_typed` now refuses anything below space, the forward-delete
+  code and the private-use range, so every special key carries `text=''` and only real
+  characters carry text -- the rule `x11`'s `_printable` already applied to X11's own
+  control codes.
+
+- **A generated script could not replay on the Mac it was recorded on.** The header's
+  `pyguitest.connect()` had no backend list, and on a Mac the default ordering answers with
+  the Accessibility read path: `macquartz` is `opt_in` and sits second in the band order on
+  purpose, so the script failed its own `require(Capability.KEY_EVENT)` before posting a
+  single key. `_connect(state)` names `["macquartz", "macos"]` on macOS and leaves every
+  other platform on the bare call, in the generated header and in `--regenerate` both.
+
+- **A Mac recording had no window or element context at all.** The context the
+  resolver asks pyguitest for is composed per platform -- `win32` + `uia` on Windows,
+  `x11` + `atspi` everywhere else -- and macOS was still on "everywhere else" after the
+  capture backend landed. A Mac has neither an X server nor an accessibility bus, so
+  `connect` raised, the resolver was built with no session, and every click in a
+  recording came out `window: null, element: null` behind a note reading *"no pyguitest
+  session on $DISPLAY (backend 'atspi' cannot drive this session); clicks will carry
+  bare coordinates"* -- a display and a bus a Mac does not have, on top of losing the
+  names the tool exists to produce. A Mac now asks for **`macos`**, the one backend
+  there that answers both halves (`WINDOW_AT_POINT` and `ELEMENT_GEOMETRY` out of the
+  same session), so `Recorder._context_backends` names one backend on that platform
+  instead of a pair. Measured on the same granted macOS 26.7 Mac, before and after:
+  `probe_context` went from `windows: False elements: False` with that note to
+  `windows: True elements: True` with **no notes at all**, and a live record → replay
+  round trip now generates `gui.expect_window('e2e_doc.txt', timeout=10)` with
+  window-relative coordinates, where the pre-fix run's script had a bare `gui.click()`
+  and the comment "nothing resolved a window for this point when it was recorded".
+- **Notes a Mac reads are written for a Mac.** Six of them named machinery only Linux
+  has, and every one was unreachable before the fix above and would have been visible
+  afterwards: "on the recorded display" is now "in this recording" (three call sites,
+  including the stacked-window sentence, which no longer says "on this display"),
+  `NO_AT_BRIDGE` and `org.a11y.Status.IsEnabled` are Linux-only notes behind a new
+  `DesktopResolver._atspi`, the session type the wording reads is built as `DARWIN`,
+  and `--no-element-context`'s help no longer promises AT-SPI. The one note that had
+  to be *added*: a session with no `ELEMENT_GEOMETRY` on a Mac names the Accessibility
+  grant, because without it the window half still answers and a reader would otherwise
+  go looking for a backend that is working perfectly.
+- **A stray `DISPLAY` no longer reaches a Mac recording's header.** Installing XQuartz
+  puts `DISPLAY` into the login environment, so a Mac recording its own desktop would
+  have carried a display it recorded nothing from -- the mirror image of the Windows
+  bug the same code already fixed for Xming and VcXsrv. `xrecord` on a Mac keeps it,
+  for the reason it does on Windows: that recording really is of an X display.
+- **`Screen.scale` on macOS no longer switches the geometry corroboration off.** The
+  scale is DPI/96 wherever it is reported, and on a Mac that is a property of the
+  panel rather than a statement about coordinates -- the live machine's display answers
+  **0.75**. AX extents, `CGWindowList` and the event tap all report points there, so
+  the containment checks that reject a toolkit's nonsense rectangles now run on a Mac
+  instead of being skipped as uncomparable. `_any_screen_scaled` says so, and
+  `test_a_scaled_screen_on_a_mac_is_not_a_unit_mismatch` pins it against the X11
+  behaviour it is exempted from.
+- **A Windows hook Windows removed behind the recording's back is noticed now, and the
+  recording says so.** `WH_KEYBOARD_LL`/`WH_MOUSE_LL` are dropped silently when a
+  callback misses `LowLevelHooksTimeout` (300ms by default), and that was the one
+  failure this backend could only *document*: the hook stops being called, and the
+  callback -- the only part of the process the platform speaks to -- cannot notice its
+  own absence. The session can. `GetLastInputInfo` is maintained for idle detection
+  whether or not a hook exists, so `Win32CaptureBackend._unseen_input_seconds` compares
+  "time since the system last saw input" with "time since a callback last ran", and the
+  difference between those two ages *is* the input that went unrecorded. A heartbeat
+  asks once a second and records the answer as `hook_lost_seconds`, which the recorder
+  turns into a note on the recording (`_hook_lost_note`) naming the mechanism, the size
+  of the gap and what to try next -- instead of a script with a hole in it reading as
+  complete. It says *may* be missing rather than naming a cause, because input on a
+  desktop these hooks cannot see (a UAC prompt, the lock screen, a dropped RDP session)
+  advances the same clock in the same way. Proved live by
+  `scripts/win32-hook-health-check.py`: on a real Windows 11 desktop the control run saw
+  the hooks fire and reported nothing, and 2.7s after the mouse hook was removed behind
+  the backend's back the heartbeat said so. Periodic re-installation is still not
+  attempted -- whether re-installing restores a silently-removed hook is unmeasured, and
+  this heartbeat is what would verify it -- so the state is *reported* rather than
+  guessed at.
+- **`scripts/win32-live-capture-check.py` was cutting the end off its own recording, and
+  blaming the generator for it.** The drive's whole sequence takes about 92 seconds --
+  fixed settling sleeps plus pyguitest's -- and the watchdog that exists to stop a *hung*
+  drive was set to 90, so it fired during a healthy run. The probe's last click never
+  reached the hook, and the run reported the consequence three steps later: *"the generated
+  script does not name role=Role.TREE_ITEM, name=\"Q1\""*, which reads as a resolver or
+  generator defect and is neither. The backstop is 180 seconds now, it prints why it fired,
+  and a run it fires in says so in its own list of problems. The same run also had nowhere
+  to keep the session JSON -- `round_trip` writes one to a temporary directory and deletes
+  it -- so there was no raw stream to compare the finished recording against, which is the
+  only thing that tells "the hook never saw it" apart from "the analyzer dropped it". A new
+  `--save-session PATH` writes exactly what the command line's flag writes, raw stream
+  included.
+- **A `MacosCaptureBackend` stopped right after starting could leave its tap thread
+  parked forever.** `start()` created the tap and returned as soon as the capture
+  thread had been asked to run; the thread itself only learns its own run loop's
+  identity (`CFRunLoopGetCurrent()`) once it actually starts executing, and `stop()`
+  reads that same `self._loop`/`self._source` to unwind it. A `stop()` landing in the
+  gap between those two moments found `None` for both, so it disabled the tap (input
+  stopped arriving) but had no run loop to tell `CFRunLoopRun()` to return -- the
+  thread stayed blocked in it, `thread.join(timeout=2.0)` always timed out, and the
+  daemon thread leaked for the rest of the process. Found by code review rather than a
+  live run: the window is a race, not a reliable repro, and `win32`'s own `_ready.wait()`
+  pattern already existed for the identical problem there. `start()` now blocks on the
+  same kind of event until the capture thread has recorded its run loop (or failed
+  trying to), which is what closes the window rather than narrowing it. Verified live on
+  the same granted macOS 26.7 Mac: 30 back-to-back `start()`/`stop()` cycles with no work
+  between them -- the exact shape that used to race -- held the worst `stop()` to 7ms and
+  left the thread count exactly where it started, and a capture backend built the same
+  way still delivered real injected motion events (`macquartz` posted, the tap read them
+  back) once running.
+- **`hook_lost_seconds` could report a gap from a recording that already ended.** Nothing
+  reset it between one `Win32CaptureBackend.start()`/`stop()` cycle and the next on the
+  same object, and `_watch_health` returns for good the moment it finds a gap -- so a
+  backend reused for a second recording after its hooks were dropped once would carry
+  that stale answer forward and never check again, reporting a hole in a recording whose
+  hooks never missed a beat. `choose_backend` builds a fresh backend per `Recorder.start()`
+  today, so this was not yet reachable through the CLI, but `start()` resets the field now
+  rather than leaving a trap for the next caller that reuses one. Verified live on Windows
+  11: one backend run through two cycles, mouse hook removed by hand with real injected
+  motion in both -- the first correctly reported `hook_lost_seconds = 2.01s`, and the
+  second, with the hooks intact, started at `None` and stayed there through two more
+  seconds of real motion, instead of carrying the first cycle's answer forward.
+- **A recorded click on a `SysListView32` row could come out with no working route on
+  Windows, and which of two symptoms it showed was down to luck.** Report-view list
+  rows publish two accessibles at the same point: the row itself (role "list item",
+  with a real `invoke`/`select`), and the cell's own text, hit-tested more precisely at
+  the exact centre, whose action list flip-flops between empty and a bogus "do default
+  action" -- the same universal MSAA-bridge fallback pyguitest's `uia._CLICK_IS_AN_EXPAND`
+  was written for a combo box. Empty, `click_by_pointer`'s coordinate fallback reached it
+  fine; offered-and-refused, the click ladder's loud-failure policy correctly reported it
+  as a failure, since a published route refusing is supposed to be reported rather than
+  silently downgraded -- so the same recorded line, `gui.element(role=Role.TEXT,
+  name="Gamma").click()`, worked or raised `(-2146233079, ...)` depending on which
+  accessible the shim felt like answering with that run. `DesktopResolver._live_at` now
+  recognises the shape structurally -- a "text" element whose actions are *exactly*
+  `["do default action"]`, with a "list item" parent -- and names the row instead,
+  before anything is ever invoked, so a recording writes `gui.element(role=Role.LIST_ITEM,
+  name="Gamma").click()` and never hands the flaky text leaf to the shim at all.
+  Windows-only, and scoped as narrowly as the combo-box fix it parallels: a text element
+  that genuinely offers a real action, or has no list-item parent, is left exactly as it
+  was. `docs/developers/status.md` has the two live runs that found it and the one that
+  closed it.
+
+### Live
+
+Everything above is fake-driven on CI, and the capture path has now been run against a
+live window server too: on a granted macOS 26.7 Mac, over SSH, with a child process
+posting through `pyguitest.backends.macquartz` -- the tap skips the installing process's
+own events, so the source has to be another process. Nine events translated, including
+text (`(1, 'a')` for a letter and `(1, '\x7f')` for the forward delete), scroll at the
+sign it was posted with, and every one reporting `injected=False`, which is what that
+field is on a platform with no injected bit to read. `CGEventKeyboardGetUnicodeString`
+is no longer the unverified call, and the three pyguitest-side bugs this found --
+fifteen key names the tap emits that `macquartz` could not press, the `Delete`/`delete`
+collision, and a replayed modifier being captured as a *release* -- are all fixed in the
+0.14.0 this repository's floor names. `docs/developers/status.md` carries the numbers.
+
+**Then a whole session: recorded, generated, replayed, and recorded again.** Same Mac,
+same day, with the same arrangement of a child process posting through `macquartz`. A
+113-event sequence covering every special-key family, the modifier chords and every
+pointer verb ended by posting the stop chord, which is the live test of stop recognition
+through a tap. It normalised to 35 events, the generated script replayed cleanly through
+`connect(backend=["macquartz", "macos"])`, and that replay was captured by a second run
+through the same tap. The two generated scripts are 98 lines each and differ in 13: one
+`gui.wait(0.16)` and its comment, which the replay's own tighter pacing did not warrant,
+and five `gui.wait()` values that moved by 0.01-0.02 s. Remove the waits and the two
+bodies are identical -- including `gui.drag((454, 204), (554, 234))`, `gui.scroll(dy=-3)`,
+`gui.scroll(dy=5)`, `gui.scroll(dx=3)` at the magnitudes and signs that were posted, and
+`^(a)`, `%(+({Up}))`, `%(^(+(a)))` for the chords. Both runs normalised to the same 35
+events, which is why the scripts match at all: the raw streams differ in four ways a
+reader should know about. Layout-independent typing posts every character on keycode 0, so
+a tap reads `key_press 'a' 'b'` where the recording has `key_press 'b' 'b'` -- the text is
+right in both, and that keysym is `macquartz.type_text`'s documented trade. Modifier
+transitions arrive in a different order inside a burst. A chord's own key carries its
+letter in the replay, where the recording read `''` because the control code was refused.
+And the replay's `drag` interpolates 38 motion events where the sequence posted 7, which
+is most of the 113-versus-141 raw difference.
+
+The macOS context was checked on the same granted macOS 26.7 Mac over SSH the capture
+work used, with the pre-fix recorder and its own generated script kept for comparison
+(`~/before/`): `probe_context`, a `Recorder` run against an open TextEdit window, and
+that script replayed and re-recorded through the tap. What the run cost, measured on
+that machine: `windows()` 15 ms, `window_at()` 11 ms, `element_at()` 1 ms,
+`active_window()` 12 ms and `focused()` **190 ms** at the median -- the last of which
+is why a Mac recording that resolves its text targets falls seconds behind live input
+and says so in a note. pyguitest's `screens()` was broken on a real Mac the whole time
+(see pyguitest's own `0.14.0`), which is what the run's environment block
+reported as `capability probe failed: CGGetActiveDisplayCount`; with that fixed, the
+recorder's screen block now arrives on macOS too.
+
+The Windows side was re-run against a real Windows 11 desktop on the same day, twice:
+`scripts/win32-hook-health-check.py` (new, and the live half of the heartbeat above)
+passed -- the control run saw the injected motion with no gap reported, and the gap was
+reported 2.7s after the hook was removed by hand -- and
+`scripts/win32-live-capture-check.py` recorded the probe window's full control set,
+generated a script, validated it clean and found it re-rendered identically, with **no
+hook-loss note** in either run, which is the heartbeat not crying wolf under a real
+desktop's input. Its replay half stopped on a combo box, reproducibly, and that turned out
+to be pyguitest's to fix: `uia.Element.click` had no route for a control whose click *is*
+an expand, and pyguitest 0.14.0 gives it one -- see that package's CHANGELOG and
+`docs/validation.md`. The check was re-run the same day with that in place, and with the
+two bugs above fixed so the capture is whole: **the replay passes the dropdown line** and
+carries on through the recorded sequence, stopping further in at a `SysListView32` cell
+whose only advertised action is the same MSAA shim that then declares none. That one is
+recorded, named and left open rather than papered over -- what to render for an element
+whose only action is a shim is this package's decision -- and
+`docs/developers/status.md` has the details.
+
+### Not yet done
+
+Human input. Nothing a person did has been through the tap: every event measured here was
+posted, which is not the same as arriving from HID, and provenance and modifier-flag
+behaviour are exactly where the two could differ. One gap sits beside it, recorded in
+`docs/developers/status.md`: a recording made on a Mac still resolves no window or element
+for its clicks, so it names bare coordinates where a Linux or Windows recording names
+`Window`/`Element`.
+
 ## [0.5.0] — 2026-09-24
 
 ### Fixed

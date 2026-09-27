@@ -200,6 +200,37 @@ button.setAccessibleDescription("Write the document to disk")
 </object>
 ```
 
+The same naming, on Windows and macOS:
+
+```xml
+<!-- WPF (XAML) -->
+<Button AutomationProperties.Name="Save" Content="&#xE74E;" />
+```
+
+```csharp
+// WPF (code-behind)
+AutomationProperties.SetName(saveButton, "Save");
+
+// WinForms
+saveButton.AccessibleName = "Save";
+saveButton.AccessibleDescription = "Write the document to disk";
+```
+
+```swift
+// AppKit (Cocoa)
+saveButton.setAccessibilityLabel("Save")
+saveButton.setAccessibilityHelp("Write the document to disk")
+
+// SwiftUI
+Button("Save", action: save)
+    .accessibilityLabel("Save")
+```
+
+Standard WinForms and WPF controls, and standard AppKit controls
+(`NSButton`, `NSTextField`, and the rest), are automation-visible with no
+extra step at all — the properties above are for the same icon-only case
+GTK and Qt need them for, where there is no visible text to fall back on.
+
 ### Form fields: connect the label to the field
 
 A text field almost never carries its own name. The name is sitting next to
@@ -349,6 +380,8 @@ modern desktop, two windows side by side may not agree.
 | A **native Wayland** client | The `xdg_toplevel` app id — one string, conventionally your reverse-DNS application id | `Gtk.Application(application_id=...)`, `QGuiApplication::setDesktopFileName`, or your toolkit's equivalent |
 | An **X11** client, on a real X session | `WM_CLASS`, specifically the **class** half | The toolkit sets it from your program/application name; `xprop WM_CLASS` shows what you actually shipped |
 | An **X11 client under XWayland** (an X11 app in a Wayland session) | `WM_CLASS` again — XWayland clients are X11 clients, and the compositor reports them that way | Same as above |
+| A **Windows** window | The window's **class name** (`GetClassName`) — one string per window, and usually toolkit-generated rather than something you choose (`Notepad`, `Chrome_WidgetWin_1`) | Not normally developer-set; a custom Win32 class name comes from `RegisterClassEx`'s `lpszClassName`. WPF and WinForms generate their own and do not expose a way to override it |
+| A **macOS** window | The owning application's **display name** (`kCGWindowOwnerName`, e.g. `TextEdit`) — one name per *process*, shared by every window it owns, not a per-window id the way the rows above are | `CFBundleName` or `CFBundleDisplayName` in `Info.plist`; the executable's own name for a binary with no bundle |
 
 The XWayland row is the one that surprises people: in a single Wayland
 session, native clients are identified by their Wayland app id and XWayland
@@ -375,6 +408,16 @@ it is set and identical on every run.
 Set neither and the property is simply absent — it is optional in ICCCM — so
 tools report an empty app id and your window can only be found by the title
 you were just told not to rely on.
+
+Windows and macOS have no equivalent gap — a window always has a class name,
+and a process always has some name CoreGraphics can read — but both are
+coarser than a Wayland app id or an X11 class. A Windows class name is
+usually shared by every window your toolkit creates rather than chosen per
+application, and a macOS process name says nothing about *which* window of
+several you are looking at. Neither platform gives you the reverse-DNS-style
+per-application id Wayland does; the title, or the element tree scoped by
+`pid` (see [section 6](#6-report-positions-in-screen-coordinates)), is what
+tells two windows of the same application apart on either of them.
 
 ## 6. Report positions in screen coordinates
 
@@ -503,7 +546,7 @@ Your application can be doing everything right and still be invisible, because
 the accessibility bridge is switched off. Worth knowing before you go looking
 for a bug in your own code.
 
-### If the tree comes back empty
+### If the tree comes back empty, on Linux
 
 - **GTK apps need `toolkit-accessibility` on.** GNOME sessions set it; KDE
   sessions don't. With it off, nothing reports a problem — queries just come
@@ -523,6 +566,28 @@ for a bug in your own code.
 Each of those looks exactly like an application with no accessible widgets, so
 `pyguitest inspect` coming back empty is worth reading as a question about the
 desktop before it is read as one about your code.
+
+### If the tree comes back empty, on Windows or macOS
+
+Neither platform has a system-wide bridge to switch on — UI Automation and
+Accessibility are always live, so an empty tree there points somewhere more
+specific:
+
+- **Windows: a custom-drawn or raw Win32 control has no automation peer.**
+  Standard WinForms and WPF controls are UI-Automation-visible by
+  construction; an owner-drawn Win32 control, or a WPF `FrameworkElement`
+  that only overrides rendering, publishes nothing until it implements one
+  (`AutomationPeer` in WPF; `IAccessible`/UIA provider interfaces for raw
+  Win32) — the same "container with no children" gap section 3 describes
+  for GTK and Qt.
+- **macOS: a bare `NSView` subclass is invisible the same way.** Standard
+  AppKit controls (`NSButton`, `NSTextField`, and the rest) implement
+  `NSAccessibilityProtocol` automatically; a view that only overrides
+  `drawRect:` does not, and has to adopt the protocol itself — or set
+  `isAccessibilityElement = true` plus a label and role — before it shows up
+  at all. Electron and Chromium's `--force-renderer-accessibility` applies
+  here too; the flag is not Linux-specific, only the *default* of publishing
+  nothing until asked is shared with the GNOME/KDE case above.
 
 ## How to check your own work
 
@@ -624,5 +689,16 @@ Taken from toolkit documentation rather than verified here: the GTK 3/4 and Qt
 API calls and UI-file syntax, and the Qt environment variables. They're the
 standard forms, but check them against your toolkit version before treating a
 failure as your application's fault.
+
+**Everything about Windows and macOS in this document is taken from platform
+documentation the same way, and none of it has had the live check the
+GNOME/KDE/X11 claims above got.** The WPF, WinForms, and AppKit/SwiftUI API
+calls, the `GetClassName`/`kCGWindowOwnerName` app-id mechanisms, and the
+custom-control causes of an empty tree are all standard, documented behavior
+— but pyguitest's own
+[validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md)
+is the record of what a real Windows and macOS session actually served, and
+this document's specific advice for those two platforms has not yet had that
+same real-hardware check. Treat it as a starting point, not a measurement.
 
 </details>

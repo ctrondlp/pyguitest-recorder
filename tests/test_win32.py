@@ -21,6 +21,7 @@ accessors unpatched for the next test.
 
 import ctypes
 import threading
+import time
 
 import pytest
 
@@ -100,6 +101,17 @@ class FakeUser32:
         self.unhooked = []
         self.next_calls = []
         self.tounicode_flags = []
+        self.last_input_at = 0.0
+        """When the session last saw input, in `GetTickCount` milliseconds.
+
+        Either a number or a callable returning one, because both shapes are
+        useful: a fixed number is a session whose input stopped at a known
+        moment, and a callable is one whose input is arriving *now* -- see
+        `GetLastInputInfo`.
+        """
+        self.last_input_fails = False
+        """Whether `GetLastInputInfo` refuses, which the real one does."""
+
         self._next_handle = 1
         self.quit_event = threading.Event()
 
@@ -146,6 +158,29 @@ class FakeUser32:
         self.quit_event.wait(timeout=5.0)
         return 0
 
+    def GetLastInputInfo(self, info_ptr):
+        """The session's own last-input time, as the system keeps it.
+
+        The one reading that is not this process's opinion: it advances for
+        input whatever hook chain is installed, which is what makes a removed
+        hook visible at all (see `win32._unseen_input_seconds`).
+
+        The `cbSize` check is not extra credit -- the real function returns
+        FALSE unless the caller sets it to the structure's own size, and a fake
+        that answered anyway would hide exactly the kind of mistake the fake in
+        pyguitest's macOS tests hid (see that module's `_QUARTZ_NEEDED`).
+        """
+        if self.last_input_fails:
+            return 0
+        info = ctypes.cast(
+            info_ptr, ctypes.POINTER(win32_module._LASTINPUTINFO)
+        ).contents
+        if info.cbSize != ctypes.sizeof(win32_module._LASTINPUTINFO):
+            return 0
+        value = self.last_input_at
+        info.dwTime = int(value() if callable(value) else value) & 0xFFFFFFFF
+        return 1
+
     def PeekMessageW(self, *_args):
         return 0
 
@@ -162,8 +197,21 @@ class FakeUser32:
 
 
 class FakeKernel32:
-    def GetCurrentThreadId(self):
+    def __init__(self, ticks=0.0) -> None:
+        self.ticks = ticks
+        """`GetTickCount`'s milliseconds-since-boot, moved by hand.
+
+        A test that wants a session to look idle holds this still; one that
+        wants input to be arriving advances it -- and the difference between it
+        and `FakeUser32.last_input_at` *is* the heartbeat's answer, which is why
+        both are plain numbers rather than anything clock-shaped.
+        """
+
+    def GetCurrentThreadId(self) -> int:
         return 4321
+
+    def GetTickCount(self) -> int:
+        return int(self.ticks) & 0xFFFFFFFF
 
 
 def patch_windows(monkeypatch, fake_user32=None, fake_kernel32=None, stub_desktop=True):
@@ -1297,3 +1345,155 @@ class TestTheInteractiveDesktopCheck:
         with pytest.raises(CaptureUnavailable, match="interactive window station"):
             made.start()
         assert fake.hooked == []  # nothing was installed to see nothing with
+
+
+class TestTheHookHealthHeartbeat:
+    """Finding a hook Windows removed without saying so.
+
+    Windows removes a low-level hook whose callback misses
+    `LowLevelHooksTimeout` and tells nobody: the hook is simply not called
+    again, and the callback -- the only part of this process the platform
+    speaks to -- cannot notice its own absence. The session's own last-input
+    time can, because the system keeps it whether or not any hook exists, and
+    the difference between it and this backend's last callback is exactly the
+    input that went unrecorded (see `_unseen_input_seconds`).
+
+    The live half of this is `scripts/win32-hook-health-check.py`: a real hook,
+    on a real desktop, removed behind the backend's back -- which is the only
+    way to produce a removal at all, since provoking one honestly takes a
+    callback stalled past the timeout.
+    """
+
+    def _patched(self, monkeypatch, *, ticks=0.0, now=None):
+        """A backend over fakes, with `time.monotonic` under a test's control."""
+        fake = FakeUser32()
+        kernel = FakeKernel32(ticks=ticks)
+        patch_windows(monkeypatch, fake_user32=fake, fake_kernel32=kernel)
+        clock = {"t": 100.0 if now is None else now}
+        monkeypatch.setattr(win32_module.time, "monotonic", lambda: clock["t"])
+        return Win32CaptureBackend(), fake, kernel, clock
+
+    def test_a_healthy_hook_reports_no_gap(self, monkeypatch):
+        # The system's last input and this backend's last callback are the same
+        # instant: a hook that is working trails by microseconds, so this is 0
+        # whatever the sampling rate happens to be.
+        made, fake, kernel, _clock = self._patched(monkeypatch, ticks=10_000.0)
+        made._last_event = 100.0
+        fake.last_input_at = 10_000.0  # input arrived just now, and was seen
+        assert made._unseen_input_seconds() == pytest.approx(0.0, abs=0.01)
+
+    def test_input_the_hooks_never_saw_is_measured(self, monkeypatch):
+        # The hook stopped being called six seconds ago and input has gone on
+        # arriving, so six seconds of it is missing -- which is the number the
+        # note on the recording carries.
+        made, fake, kernel, _clock = self._patched(monkeypatch, ticks=10_000.0)
+        made._last_event = 93.5  # now is 100.0, so the last callback was 6.5s ago
+        fake.last_input_at = 9_500.0  # the system saw input 0.5s ago
+        assert made._unseen_input_seconds() == pytest.approx(6.0)
+
+    def test_an_idle_session_is_not_a_lost_hook(self, monkeypatch):
+        # Nobody has touched anything since the hooks went in, so both ages are
+        # the same and there is nothing to report. A recorder asked to sit and
+        # wait is the ordinary case, and reporting a gap here would make the
+        # note worthless.
+        made, fake, kernel, _clock = self._patched(monkeypatch, ticks=90_000.0)
+        made._last_event = 40.0  # 60s ago, the same instant as the input below
+        fake.last_input_at = 30_000.0
+        assert made._unseen_input_seconds() == pytest.approx(0.0, abs=0.01)
+
+    def test_the_tick_count_may_wrap_without_inventing_a_gap(self, monkeypatch):
+        # `GetTickCount` is 32-bit and wraps after 49.7 days of uptime. Both
+        # sides wrap together, so a machine that has been up that long must not
+        # be reported as having lost forty-nine days of input.
+        made, fake, kernel, _clock = self._patched(monkeypatch, ticks=200.0)
+        made._last_event = 99.75  # a quarter of a second ago
+        fake.last_input_at = 2**32 - 50  # 50ms before that wrap
+        assert made._unseen_input_seconds() == pytest.approx(0.0, abs=0.01)
+
+    def test_a_refused_query_is_no_answer_rather_than_a_healthy_hook(self, monkeypatch):
+        made, fake, kernel, _clock = self._patched(monkeypatch)
+        fake.last_input_fails = True
+        assert made._unseen_input_seconds() is None
+
+    def test_the_heartbeat_records_the_gap_and_stops(self, monkeypatch):
+        # The loop itself, on a shortened interval. A session whose input is
+        # arriving *now* while this backend's last callback is five seconds old
+        # is what a removed hook looks like from here.
+        monkeypatch.setattr(win32_module, "HOOK_HEALTH_INTERVAL", 0.01)
+        made, fake, kernel, _clock = self._patched(monkeypatch)
+        made._last_event = time.monotonic() - 5.0
+        kernel.ticks = 1_000.0  # pinned, so the system's last input stays "now"
+        fake.last_input_at = 1_000.0
+        thread = threading.Thread(target=made._watch_health)
+        thread.start()
+        thread.join(timeout=3.0)
+        assert not thread.is_alive(), "the heartbeat did not stop after answering"
+        assert made.hook_lost_seconds == pytest.approx(5.0, abs=0.5)
+
+    def test_a_working_hook_is_never_reported(self, monkeypatch):
+        # The other side of it, and the reason the comparison is between two
+        # *ages* rather than two clocks: a hook that keeps firing keeps the
+        # difference at zero however long the recording runs.
+        monkeypatch.setattr(win32_module, "HOOK_HEALTH_INTERVAL", 0.01)
+        made, fake, kernel, _clock = self._patched(monkeypatch)
+        made._last_event = time.monotonic()
+        kernel.ticks = 1_000.0
+
+        def input_arriving_now():
+            """The session's last input, always as old as the last callback."""
+            return kernel.ticks - (time.monotonic() - made._last_event) * 1000.0
+
+        fake.last_input_at = input_arriving_now
+        thread = threading.Thread(target=made._watch_health, daemon=True)
+        thread.start()
+        time.sleep(0.15)  # many intervals, all of them healthy
+        made._health_stop.set()
+        thread.join(timeout=3.0)
+        assert made.hook_lost_seconds is None
+
+    def test_both_callbacks_stamp_the_heartbeat(self, monkeypatch):
+        # The only thing the callbacks are asked to do for this, and it has to
+        # be both of them: a keyboard hook that died while the mouse hook went
+        # on being called is still input nobody recorded.
+        fake = FakeUser32(text="a")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        assert made._last_event == 0.0
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        after_key = made._last_event
+        assert after_key > 0.0
+        mouse, _info = mouse_lparam()
+        made._on_mouse_event(HC_ACTION, WM_MOUSEMOVE, mouse)
+        assert made._last_event >= after_key
+
+    def test_a_non_action_code_does_not_stamp_it(self, monkeypatch):
+        # `HC_ACTION` is what says the message carries data; anything else must
+        # reach `CallNextHookEx` untouched, and is not evidence of anything.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(-1, WM_KEYDOWN, lparam)
+        assert made._last_event == 0.0
+
+    def test_start_runs_the_heartbeat_and_stop_ends_it(self, monkeypatch):
+        # Wired into the pump thread's own lifetime rather than into `start`'s:
+        # a heartbeat that outlived the hooks would go on measuring the gap the
+        # teardown itself makes.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        try:
+            assert made._health_thread is not None
+            assert made._health_thread.is_alive()
+        finally:
+            made.stop()
+        assert made._health_stop.is_set()
+        assert made.hook_lost_seconds is None
+
+    def test_stop_before_start_leaves_nothing_to_end(self):
+        made = Win32CaptureBackend()
+        made.stop()
+        assert made.hook_lost_seconds is None

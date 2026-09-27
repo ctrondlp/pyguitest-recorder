@@ -16,7 +16,7 @@ dynamic = ["version"]
 # before deciding whether this runs on their machine. "X11" rather than "Linux
 # and BSD" alone because recording is X11/XWayland or native Windows and never
 # ordinary Wayland -- see docs/developers/architecture.md.
-description = "Record desktop GUI activity on X11, XWayland and Microsoft Windows, and generate pyguitest test scripts"
+description = "Record desktop GUI activity on X11, XWayland, macOS and Microsoft Windows, and generate pyguitest test scripts"
 readme = "README.md"
 requires-python = ">=3.10"
 # GPL-2.0-or-later, matching pyguitest. Not only for consistency: the
@@ -39,8 +39,8 @@ keywords = [
     "gui-recorder", "record-and-replay", "gui-testing", "test-automation",
     "desktop-automation", "ui-testing",
     "code-generation", "test-generation", "pyguitest",
-    "linux", "freebsd", "windows", "win32",
-    "x11", "xrecord",
+    "linux", "freebsd", "windows", "win32", "macos",
+    "x11", "xrecord", "cgeventtap",
     "accessibility", "atspi", "at-spi",
 ]
 
@@ -75,6 +75,12 @@ classifiers = [
     # that could not reach (AltGr, dead keys, elevated windows) is listed in
     # docs/developers/status.md.
     "Operating System :: Microsoft :: Windows",
+    # macOS capture (`macos` extra, over pyguitest's own macquartz/Quartz
+    # event tap) landed after the two above; classifiers are sidebar filters
+    # PyPI does not search, so leaving this out kept the package invisible to
+    # anyone browsing by platform even after "macos" appeared in keywords and
+    # the description.
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     # The versions CI actually runs; 3.14 is added here when the matrix adds
     # it, not before.
@@ -165,7 +171,13 @@ dependencies = [
     # `actions`, both new in that release. An older pyguitest installed
     # against this floor would let a recording generate calls that do not
     # exist on it, the exact failure this floor exists to prevent.
-    "pyguitest>=0.12.0",
+    # 0.14.0 raises it for the same reason on a third platform: it is the release
+    # whose `macos` backend exists at all, which is what the macOS capture backend
+    # resolves windows and elements through, and whose `macquartz` key vocabulary the
+    # tap's names are derived from. Under an older pyguitest a macOS recording would
+    # capture and analyze, then generate a script naming a backend the installed
+    # library does not have.
+    "pyguitest>=0.14.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
@@ -174,6 +186,10 @@ dependencies = [
 # XRecord capture. python-xlib speaks the wire protocol in pure Python, which
 # is the same reason pyguitest's X11 backend uses it.
 x11 = ["python-xlib>=0.33"]
+# Event-tap capture on macOS. PyObjC's Quartz, reached through pyguitest's own extra
+# so that the two cannot drift: the tap's key names are derived from `macquartz`'s
+# table, and a second copy of the requirement here would be a second version of it.
+macos = ["pyguitest[macos]"]
 # Element resolution at record time; the reason a recording can name a widget
 # instead of a coordinate.
 # No version here: the base dependency above sets the floor, and a second copy
@@ -261,8 +277,20 @@ sqlite_cache = false
 
 [[tool.mypy.overrides]]
 # python-xlib, pyguitest and PyGObject ship no stubs; gi is only reachable
-# through the optional element resolver.
-module = ["Xlib.*", "pyguitest.*", "gi.*", "gi.repository.*", "tomli"]
+# through the optional element resolver. Quartz and CoreFoundation are in the
+# same position for the other platform: PyObjC has no stubs here, and the two
+# Mac-only modules are imported late (inside functions, so this package still
+# imports on Windows and Linux) which is exactly why mypy needs telling rather
+# than the import being moved to module scope.
+module = [
+    "Xlib.*",
+    "pyguitest.*",
+    "gi.*",
+    "gi.repository.*",
+    "tomli",
+    "Quartz",
+    "CoreFoundation",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

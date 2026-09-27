@@ -7,14 +7,17 @@ accessible element generates `gui.button("Save").click()`, which survives the
 window moving, the theme changing and the layout being redesigned, where a
 recorded coordinate survives none of them.
 
-Capture is X11-only, and that is a property of the platform rather than a
-missing feature. See `backends.base` for why.
+Capture is not one platform's property: `xrecord` reads X11's event stream, the
+low-level Windows hooks read theirs, and `macos` taps CGEvent at the HID tap.
+Which streams a platform publishes is the platform's business — no ordinary
+Wayland client can observe another client's input at all — and `backends.base`
+is where that is argued.
 """
 
 from .config import Settings
 from .model import Event, Recording
 from .recorder import Recorder
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = ["Event", "Recorder", "Recording", "Settings", "__version__"]

@@ -13,7 +13,11 @@
 [capture]
 # display = ":0"          # unset means $DISPLAY
 screen = 0
-backend = "auto"          # "auto" or "xrecord"
+backend = "auto"          # "auto", "xrecord", "win32" or "macos". "auto" picks the
+                          # platform's own backend: win32 on Windows, macos on macOS,
+                          # xrecord everywhere else -- including a Mac running XQuartz,
+                          # where naming "xrecord" is how you ask for the X server
+                          # instead of the desktop.
 # Both of these are chords: "Escape", "ctrl+Escape", "ctrl+shift+F1". They
 # match exactly, so binding ctrl+F1 leaves ctrl+shift+F1 to the application.
 stop_key = "Escape"       # key that ends a recording
