@@ -11,6 +11,7 @@ them against the real code, rather than grepping for words:
 
 * the pyguitest floor in the prose equals the one in ``pyproject.toml``
 * the sample ``Profile:`` line names the generator's own ``PROFILE``
+* the example wait every page quotes is the scaling the analyzer applies
 * no page calls an ``expect_*`` helper in the pre-0.2.0 free-function form
 * the default check key the docs name is the one ``Settings`` actually has
 * every relative link, and every anchor in a page's own contents, resolves
@@ -25,6 +26,7 @@ making them.
 import re
 from pathlib import Path
 
+from pyguitest_recorder.analyzer import SyncOptions
 from pyguitest_recorder.cli import build_parser
 from pyguitest_recorder.config import Settings
 from pyguitest_recorder.generator import PROFILE
@@ -99,6 +101,24 @@ def test_rendered_profile_line_names_the_generator_profile():
             seen += 1
             assert stated == PROFILE, f"{page} shows Profile: {stated}"
     assert seen, "no page shows what a generated file's header looks like"
+
+
+def test_the_documented_timeout_example_is_the_scaling_the_analyzer_applies():
+    """The pages show 3.8s above ``timeout=11.4``, which reads as a bug.
+
+    Both numbers are the analyzer's own arithmetic -- the pause the recording
+    observed, then that pause scaled up -- and both are prose a reader copies,
+    so this derives the second from the first rather than matching words.
+    """
+    options = SyncOptions()
+    derived = round(
+        min(max(options.min_timeout, 3.8 * options.factor), options.max_timeout), 1
+    )
+    assert derived == 11.4, "the scaling no longer produces the example's number"
+    for page in ("README.md", "docs/getting-started.md"):
+        text = _read(page)
+        assert "the recording waited 3.8s here" in text, f"{page} lost the example"
+        assert "timeout=11.4" in text, f"{page} lost the example's timeout"
 
 
 def test_no_page_calls_a_helper_the_old_way():

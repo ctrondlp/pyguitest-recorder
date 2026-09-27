@@ -39,8 +39,8 @@ keywords = [
     "gui-recorder", "record-and-replay", "gui-testing", "test-automation",
     "desktop-automation", "ui-testing",
     "code-generation", "test-generation", "pyguitest",
-    "linux", "freebsd", "windows", "win32", "macos",
-    "x11", "xrecord", "cgeventtap",
+    "linux", "bsd", "freebsd", "windows", "win32", "macos",
+    "x11", "xrecord", "cgeventtap", "xwayland",
     "accessibility", "atspi", "at-spi",
 ]
 
@@ -48,10 +48,7 @@ keywords = [
 # setuptools>=77 rejects the distribution if both are present. Same reason
 # pyguitest's list omits one.
 classifiers = [
-    # "Record more real applications" is still an open item. Every piece
-    # works end to end, but the coverage 4-Beta claims is not one this tree
-    # can make yet; pyguitest is 4-Beta because it can.
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     # Capture is XRecord on Linux, so this classifier is about that mechanism
     # specifically, not a claim that recording is X11-only overall -- win32
@@ -177,7 +174,15 @@ dependencies = [
     # tap's names are derived from. Under an older pyguitest a macOS recording would
     # capture and analyze, then generate a script naming a backend the installed
     # library does not have.
-    "pyguitest>=0.14.0",
+    # 0.15.0 raises it once more, and this step is not a missing method: it is the
+    # release the generator was last validated against end to end, on all three
+    # platforms, and this floor is the version the output was checked against
+    # rather than the oldest that might work -- the convention every step above
+    # already follows. Nothing emitted here needs what 0.15.0 added, so a script
+    # generated against this floor still replays under 0.14.0; what does not hold
+    # under an older install is any claim that this package's own output was
+    # verified there.
+    "pyguitest>=0.15.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

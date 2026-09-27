@@ -11,6 +11,7 @@ import re
 
 import pytest
 
+from pyguitest_recorder.analyzer import SyncOptions
 from pyguitest_recorder.generator import GeneratorOptions, generate, validate
 from pyguitest_recorder.generator import python as generator_module
 from pyguitest_recorder.model import (
@@ -1414,6 +1415,42 @@ def test_the_header_names_the_session_the_way_a_reader_would():
     assert "Compositor" not in source
 
 
+def test_the_header_says_what_a_timeout_is_in():
+    # A wait carries two numbers that disagree on purpose -- the comment above
+    # it reports the pause the recording took, the call allows three times that
+    # -- and read together with nothing to explain them they look like a bug.
+    # The README's own example was read exactly that way, so the unit and the
+    # scaling travel with the file.
+    source = full(KeyStroke(key="Return"))
+    assert (
+        "Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)"
+        in source
+    )
+
+
+def test_the_header_timeout_line_states_the_scaling_the_analyzer_applies():
+    # Those three numbers are prose, so nothing else would notice the analyzer
+    # moving out from under them: `factor` is the 3x and `max_timeout` the cap,
+    # and the floor is the `min_timeout` the CLI hands the analyzer -- the same
+    # `Settings.default_timeout` it hands the generator, which is what makes one
+    # setting the floor on both sides (`cli._sync_options` and
+    # `cli._generator_options`).
+    options = SyncOptions()
+    assert GeneratorOptions().default_timeout == options.min_timeout
+    source = full(KeyStroke(key="Return"))
+    assert f"{options.factor:g}x the wait the recording observed" in source
+    assert f"floor {options.min_timeout:g}s" in source
+    assert f"cap {options.max_timeout:g}s" in source
+
+
+def test_the_header_timeout_line_follows_a_configured_floor():
+    # Derived from the options rather than hardcoded: `default_timeout` is a
+    # setting, and a script generated under a longer one must not advertise a
+    # ten-second floor.
+    source = full(KeyStroke(key="Return"), default_timeout=30.0)
+    assert "floor 30s, cap 120s" in source
+
+
 @pytest.mark.needs_ruff
 def test_the_header_can_be_switched_off_entirely():
     source = full(KeyStroke(key="Return"), include_header=False)
@@ -2177,10 +2214,11 @@ def test_a_run_stops_where_the_window_moved_underneath_it(window):
 
 
 def test_an_older_pyguitest_falls_back_to_teleports(monkeypatch, window):
-    # The method is newer than the release this package's floor names. Emitting
-    # it anyway would produce a script that imports cleanly and then fails at
-    # replay, which is the failure validate() exists to prevent -- so the
-    # recording still renders, as teleports, and the caller is warned.
+    # The method is not on every pyguitest this package can meet -- the test
+    # drives the case by emptying the installed method set. Emitting it anyway
+    # would produce a script that imports cleanly and then fails at replay,
+    # which is the failure validate() exists to prevent -- so the recording
+    # still renders, as teleports, and the caller is warned.
     monkeypatch.setattr(generator_module, "_session_methods", lambda: frozenset())
     source = render(*moves(window, (200, 200), (260, 240)), motion="natural")
     assert "move_mouse_naturally(" not in source

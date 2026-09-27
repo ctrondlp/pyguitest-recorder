@@ -40,14 +40,15 @@ def _macquartz():
 
     Also asserts the one attribute the cross-repository checks below read.
     `_key_name` is what 0.14.0 added -- the step `_keycode`, `press_key` and
-    `release_key` all resolve a name through -- and 0.14.0 is the floor
-    `pyproject.toml` declares. A machine holding an older pyguitest should be
-    told that rather than get an `AttributeError` out of a test about a key
-    table it never claimed to have.
+    `release_key` all resolve a name through -- and it sits below the floor
+    `pyproject.toml` declares, so a machine this far behind should be told
+    that rather than get an `AttributeError` out of a test about a key table
+    whose release it never installed.
     """
     macquartz = pytest.importorskip("pyguitest.backends.macquartz")
     assert hasattr(macquartz, "_key_name"), (
-        "the installed pyguitest predates 0.14.0, the floor in pyproject.toml"
+        "no `_key_name` on the installed pyguitest: it arrived in 0.14.0, and "
+        "pyproject.toml's floor is newer than that"
     )
     return macquartz
 
