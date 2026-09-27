@@ -244,8 +244,8 @@ with no change to what the recorder generated. Seeing this error there now means
 the element had no *rectangle* to aim at either — it is not showing, or the
 backend reports none — and the message says so; `Session.click_element(element)`
 is the same call spelled for an element taken straight from a backend. Both are
-in pyguitest's `[Unreleased]` until they get a live pass. On a released pyguitest
-older than that, a no-action element fails at replay, so edit that one line of
+in pyguitest 0.14.0, with a live pass still to come. On a pyguitest older than
+that, a no-action element fails at replay, so edit that one line of
 the generated script to the coordinate pair the recording carries —
 `gui.move_mouse(x, y)` then `gui.click()`, which is what the generator renders
 for a click that has no element at all — or act on the control as above.

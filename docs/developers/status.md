@@ -381,7 +381,7 @@ ladder, not this package's: a combo box publishes `ExpandCollapsePattern` and no
 Invoke/Toggle/Legacy routes `uia.Element.click` walked, while its MSAA shim *advertised* a
 default action and then raised .NET's `InvalidOperationException` from it.
 
-**pyguitest 0.14.1 fixes exactly that** (`uia._CLICK_IS_AN_EXPAND`, a combo box routed
+**pyguitest 0.14.0 fixes exactly that** (`uia._CLICK_IS_AN_EXPAND`, a combo box routed
 through its own ExpandCollapse before the shim), and the check was re-run the same day with
 it in place and with the two check bugs below fixed. **The replay now passes the dropdown
 line** and carries on through the recorded sequence, stopping further in at
@@ -401,11 +401,10 @@ above needs: the element stays the locator, its rectangle is read fresh, and the
 generator-side change. The loud-failure policy is untouched, which is the point of the
 shape: the pointer is reached only where an element published *nothing*, never where a
 published route refused, so a combo box's ExpandCollapse refusal is still reported.
-**It is in pyguitest's `[Unreleased]` rather than a release**, because it is a
-public-contract change on every platform and wants its own live pass -- this check on
-Windows, and a live session on a Mac -- before it is cut. Until that release exists this
-repository's `pyguitest>=` floor stays at 0.14.0, and this file says which released version
-the check above was measured against.
+**It ships in pyguitest 0.14.0 with its own live pass still outstanding**, because it
+is a public-contract change on every platform and wants one -- this check on Windows, and
+a live session on a Mac. This repository's `pyguitest>=` floor is that same 0.14.0, and
+this file says which version the check above was measured against.
 
 **Two bugs in this script, found by that session and fixed.** The watchdog that exists to
 stop a *hung* drive was set to 90 seconds while a healthy drive takes about 92: it fired
@@ -450,7 +449,7 @@ half is in that repository's `docs/validation.md`, beside the runs it belongs to
 |---|---|
 | **Windows hook loss (High)** | **Fixed and measured.** Detected through the session's own last-input time and reported on the recording: 2.7s after a hook was removed by hand, live on Windows 11. See the section above. Re-installation is still deliberately unimplemented, and is now verifiable. |
 | **Windows double-click on a collapsed tree row (High)** | **Already fixed**, and by the review's own standard: a double click on an expandable row renders as a toggle decided *at replay* (`collapse()` if the row is open when the script runs, `expand()` if it is not), so the stale state read decides nothing. The review was reading the 2026-09-24 status entry, before that landed in 0.6.0. Visible again in the script today's live run generated. |
-| **Record -> replay -> state verification as a release gate (item 11)** | **macOS: run twice today**, compared event by event (see the sections above), and re-run again after pyguitest 0.14.1 with the same figures (80 differing event lines, 23 script lines). **Windows: the replay now runs through the recorded sequence** and reaches its later steps, stopping at a `SysListView32` cell whose only advertised action is the MSAA shim that declares none -- see above. The two bugs found in the check itself that day are fixed, so a standing gate is now a matter of that one rendering decision. |
+| **Record -> replay -> state verification as a release gate (item 11)** | **macOS: run twice today**, compared event by event (see the sections above), and re-run again after pyguitest 0.14.0 with the same figures (80 differing event lines, 23 script lines). **Windows: the replay now runs through the recorded sequence** and reaches its later steps, stopping at a `SysListView32` cell whose only advertised action is the MSAA shim that declares none -- see above. The two bugs found in the check itself that day are fixed, so a standing gate is now a matter of that one rendering decision. |
 | **AltGr and dead keys against a real non-US layout (Medium)** | **Partly, and honestly so.** Unit-tested (the AltGr fake-Control fold-back and the dead-key distinction are pinned in `tests/test_win32.py`) and unmeasured against a real German or French layout, which needs a machine whose layout is that -- not reachable from this session. The backend's docstring already draws the line at plain Shift and CapsLock, as X11's does. |
 | **UAC/UIPI boundaries (Medium)** | **Documented, and now with a diagnostic behind it.** A non-elevated hook still cannot reach a higher-integrity process, which stays the documented product boundary. What is new is the reading that catches the desktop it cannot see: input on a UAC prompt or the lock screen advances the session's last-input clock with no callback, so the recording carries "about Ns of input may be missing". Same-integrity-level workflows remain the only way to record an elevated application. |
 | **Adversarial accessibility trees (item 10)** | **The pyguitest half is closed, 2026-09-26; this half was already pinned, and is now named rather than assumed.** pyguitest gained one adversarial-tree class per platform -- `tests/test_uia_backend.py::TestTreesThatLie` and `tests/test_macos_backend.py::TestTreesThatLie` -- for the combinations this row used to call untested: every child reported at `(0, 0)`, one name in two windows of one process, a popup that closes between the capture and the read, a condition a provider answers with more than was asked, a parent chain that loops, a title that is not text, and the node and depth budgets a merely enormous tree has to stop at. Writing them found three defects in its own read paths -- a NULL element-array slot wrapped as a real element and handed to a caller inside a search's answer, a non-string name reaching a compiled-regex filter as a `TypeError` instead of "no match", and a macOS tree reporting an ancestor as its child walked into itself so one widget came back as twelve matches -- all three fixed (pyguitest's CHANGELOG). The four named combinations are pinned here too, spread over the suite rather than gathered into one class: the `(0, 0)` toolkit in `test_resolver.py::test_an_element_that_does_not_cover_the_point_is_refused`, with the cover check's slack and its scaled-screen exemption in the two tests beside it; duplicated names in `test_generator.py::test_two_same_named_buttons_are_scoped_by_their_dialog` and `test_a_check_on_an_ambiguous_element_is_scoped_too`; one process owning several windows in the toplevel-path tests and `TestProcessAncestry`; and a popup whose rectangle exists only while it is open in `test_a_press_consumed_after_its_popup_closed_is_still_named_for_the_item` and `test_a_menu_that_is_closed_claims_no_points`. What stays genuinely uncovered is a *real* toolkit lying -- the GTK4 `(0, 0)` finding was one, and a fake can only reproduce the lie it was told about -- plus a third platform's tree: a live-run item rather than a test-writing one. |
@@ -1072,9 +1071,9 @@ attempt did add that instrumentation -- `GetForegroundWindow`,
 and the foreground thread's, and the tab control's own `TCM_GETCURSEL` read
 back directly (ground truth independent of UI Automation) -- placed around
 `_verify_replay`'s `_select_tab(gui, title, "List")` call. It never fired: two
-consecutive live runs on this box (pyguitest 0.14.1, editable-installed from
-the sibling checkout, which currently also carries the still-unreleased
-`click_by_pointer` fallback described in pyguitest's own `[Unreleased]`) both
+consecutive live runs on this box (pyguitest 0.14.0, editable-installed from
+the sibling checkout, which also carries the `click_by_pointer` fallback that
+0.14.0 cuts) both
 failed one step earlier and at the identical line both times --
 `gui.element(role=Role.TEXT, name="Gamma").click()`, inside the *replayed
 script's own subprocess*, with
