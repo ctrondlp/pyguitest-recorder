@@ -3,6 +3,35 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.7.0] — 2026-09-27
+
+### Changed
+
+- **`Development Status :: 4 - Beta`, up from `3 - Alpha`.** The classifier had
+  carried its own comment withholding the promotion on coverage -- every piece
+  working end to end, the note said, was not the same as the coverage `4 - Beta`
+  claims -- and that note is retired with the change. What the row claims is what the
+  0.6.0 entry below describes: a capture backend on each of Linux, Windows and macOS,
+  and the resolver and `SysListView32` click fixes those live runs landed against.
+  pyguitest's own list has carried `4 - Beta` for the same reason.
+- **The keyword list was missing two names the metadata around it already uses.**
+  `xwayland` joins `x11` and `macos` — an XWayland session is exactly what this
+  records, and the description names it — and `bsd` joins `freebsd`, which the
+  classifiers list as a supported platform.
+- **`PROFILE` moves to `pyguitest-0.15`, and the floor does not.** The header a
+  generated script carries is a claim about the API its calls were checked against,
+  so it follows the pyguitest this generator was last validated against; pyguitest's
+  0.15.0 is that release. The floor in `pyproject.toml` stays at 0.14.0 because
+  nothing this generator emits needs 0.15.0 -- the 0.14.0 floor is about the
+  Accessibility backend the macOS resolver reads through and the `macquartz` key
+  vocabulary, neither of which moved -- and a script generated here still runs under
+  0.14.0. That split is deliberate rather than overlooked: the header describes a
+  check, the floor describes a requirement, and only one of them changed. Landing
+  it wants pyguitest 0.15.0 *published*, not merely tagged: CI here installs
+  pyguitest from PyPI like every other job, so until that release exists the
+  profile test compares the header against 0.14.x and goes red for a reason that
+  has nothing to do with this change.
+
 ## [0.6.0] — 2026-09-26
 
 ### Added

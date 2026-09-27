@@ -39,8 +39,8 @@ keywords = [
     "gui-recorder", "record-and-replay", "gui-testing", "test-automation",
     "desktop-automation", "ui-testing",
     "code-generation", "test-generation", "pyguitest",
-    "linux", "freebsd", "windows", "win32", "macos",
-    "x11", "xrecord", "cgeventtap",
+    "linux", "bsd", "freebsd", "windows", "win32", "macos",
+    "x11", "xrecord", "cgeventtap", "xwayland",
     "accessibility", "atspi", "at-spi",
 ]
 
@@ -48,10 +48,7 @@ keywords = [
 # setuptools>=77 rejects the distribution if both are present. Same reason
 # pyguitest's list omits one.
 classifiers = [
-    # "Record more real applications" is still an open item. Every piece
-    # works end to end, but the coverage 4-Beta claims is not one this tree
-    # can make yet; pyguitest is 4-Beta because it can.
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     # Capture is XRecord on Linux, so this classifier is about that mechanism
     # specifically, not a claim that recording is X11-only overall -- win32

@@ -87,13 +87,20 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.14"
+PROFILE = "pyguitest-0.15"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
 checked against, not with this package's own version. It is what tells a
 reader of a two-year-old generated script which API it was written for, and
 what `--regenerate` re-renders against when that API has moved on.
+
+0.15.0 is the release whose `WINDOW_CAPTURE` reaches macOS, so the three
+platforms this recorder captures on are the three whose native per-window
+capture the library now has. Nothing this generator emits needs it -- the
+floor in `pyproject.toml` stays where it is for that reason, and a script
+generated here still runs under 0.14.0 -- but the header is a claim about what
+was checked, and the check was against this.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
