@@ -27,19 +27,21 @@ pip install 'pyguitest-recorder[macos]'              # macOS
 
 pyguitest-recorder --doctor              # can this machine record? why not?
 pyguitest-recorder -o login_test.py      # record until Escape, Escape
-python3 login_test.py                    # replay it
+python3 login_test.py                    # replay it (python on Windows)
 ```
 
 > ⚠️ **Keyboard capture sees every application's keystrokes**, not only the one
 > you are recording — including your password manager. That is what X11's
-> RECORD extension and Windows' low-level input hooks both do, and it is why
-> this tool exists at all. Close what you would not want in a file, and read
-> [Privacy](#privacy) before recording anything that touches a login.
+> RECORD extension, Windows' low-level input hooks and macOS's event tap all
+> do, and it is why this tool exists at all. Close what you would not want in a
+> file, and read [Privacy](#privacy) before recording anything that touches a
+> login.
 
-Recording needs X11, XWayland, or native Windows; under a Wayland session it
-reaches XWayland clients and nothing else, and says so rather than producing a
-file with silent gaps.
-[Why that is permanent](docs/developers/architecture.md#why-wayland-has-no-capture-backend).
+Recording needs X11 or XWayland on a Linux desktop, native Windows, or macOS.
+On Linux that means no Wayland session will do: the recorder reaches XWayland
+clients and nothing else, and says so rather than producing a file with silent
+gaps.
+[Why that is permanent](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md#why-wayland-has-no-capture-backend).
 
 Three flags carry most of the value:
 
@@ -53,9 +55,9 @@ Recording stops on **Escape pressed twice**, not only Ctrl-C — a recorder you
 can only stop from its own terminal is one you cannot stop while driving a
 full-screen application. **Ctrl+1** records a check on whatever the pointer is
 over. Both are rebindable; see
-[docs/recipes.md](docs/recipes.md#rebinding-the-stop-and-check-keys).
+[docs/recipes.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/recipes.md#rebinding-the-stop-and-check-keys).
 
-[docs/getting-started.md](docs/getting-started.md) walks through all of this
+[docs/getting-started.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/getting-started.md) walks through all of this
 properly.
 
 ## What comes out
@@ -65,7 +67,7 @@ properly.
 
 Profile:     pyguitest-0.15
 Recorded on: x11 (mutter)
-Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)
+Timeouts:    seconds; the wait the recording observed, rounded up (floor 10s, cap 300s)
 """
 
 import pyguitest
@@ -118,9 +120,9 @@ instead. A coordinate that works beats a named element that does not. Every
 such refusal is written into the generated file's docstring, because "why is
 this script all coordinates?" is the first thing its reader asks. The rules,
 and the GTK4 measurements behind them, are in
-[docs/developers/architecture.md](docs/developers/architecture.md#when-it-refuses-to-name-an-element);
+[docs/developers/architecture.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md#when-it-refuses-to-name-an-element);
 the fix when the answer is your own application is
-[docs/testable-guis.md](docs/testable-guis.md).
+[docs/testable-guis.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md).
 
 **Typed text is the exception, and gets named anyway.** A run of typing asks
 the toolkit what has *focus* rather than what is under the pointer — focus
@@ -158,20 +160,25 @@ the recorded events themselves saw:
 | Nothing observable changed | `wait_for_idle(win.pid)` |
 | None of the above | `gui.wait(...)`, and a comment saying why |
 
-So a 3.8-second gap becomes
+So a 12.4-second gap becomes
 
 ```python
-# the recording waited 3.8s here for 'Save As' to open
-saveas = gui.wait_for_window("Save As", timeout=11.4)
+# the recording waited 12.4s here for 'Save As' to open
+saveas = gui.wait_for_window("Save As", timeout=13)
 ```
 
-`timeout` is in seconds, and it is deliberately not the 3.8s the comment
-reports: it is three times that wait, floored at ten seconds and capped at two
-minutes, because replay is a different machine — what the recording took once
-is not what it will take again. The comment is what happened; the timeout is
-what the script allows. Every generated file says the same in its header, and
-the number is a plain literal to edit when a slower machine needs longer — see
-[troubleshooting.md](docs/troubleshooting.md#the-script-waits-too-long-or-not-long-enough).
+`timeout` is in seconds, and it is the wait that comment reports, rounded up to
+the next whole second — 12.4 becomes 13 — floored at ten seconds and capped at
+five minutes. Nothing is multiplied on the way out: read the number and you are
+reading how long the recording itself waited, which is what lets the comment and
+the call be checked against each other instead of looking like a bug.
+
+The trade is deliberate. Headroom for a slower machine used to be baked into
+every number, which also hid how long each wait was; now a replay machine much
+slower than the one that recorded surfaces as a timeout rather than being
+absorbed. Every generated file says the same in its header, and the number is a
+plain literal when it needs raising — see
+[troubleshooting.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/troubleshooting.md#the-script-waits-too-long-or-not-long-enough).
 
 Inference runs when a script is generated, not when a recording is made — so
 `--regenerate` re-analyzes an old recording under whatever rules exist now,
@@ -202,7 +209,7 @@ newer, as the install section explains. They name what was wrong instead of
 raising a bare
 `AssertionError`, and each retries until its timeout so a check cannot race a
 redraw. Full table in
-[docs/recipes.md](docs/recipes.md#checks-what-makes-it-a-test).
+[docs/recipes.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/recipes.md#checks-what-makes-it-a-test).
 
 ## Install
 
@@ -239,7 +246,7 @@ pyguitest-recorder --doctor
 ```
 
 To run without installing anything, put `src/` on the import path —
-[every flag works identically](docs/recipes.md#running-without-installing):
+[every flag works identically](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/recipes.md#running-without-installing):
 
 ```sh
 PYTHONPATH=src python3 -m pyguitest_recorder --doctor
@@ -288,8 +295,9 @@ title drifts still be found; earlier versions lack `element_at`/`extents` and
 
 ## Privacy
 
-Keyboard capture through XRecord sees **every application's keystrokes**, not
-only the one you are recording — including your password manager.
+Keyboard capture — XRecord on X11 and XWayland, a low-level input hook on
+Windows, an event tap on macOS — sees **every application's keystrokes**, not
+only the one you are recording, including your password manager.
 
 - Text typed into an AT-SPI password field is detected and never written into
   the generated script; it gets `os.environ["SECRET_1"]` instead. A check
@@ -307,7 +315,7 @@ on Linux and the BSDs, `%APPDATA%\pyguitest-recorder\config.toml` on Windows,
 since `~/.config` is neither conventional nor discoverable there. Either way
 `~/.pyguitest-recorder.toml` is read if the first is absent. Precedence is
 defaults → file → command line. See
-[config.example.toml](config.example.toml).
+[config.example.toml](https://github.com/ctrondlp/pyguitest-recorder/blob/main/config.example.toml).
 
 ## Status
 
@@ -326,29 +334,39 @@ asterisk: the mechanism passed on its own, and the single most complex full
 run did not reproduce it — left open rather than claimed fixed.
 `scripts/win32-live-capture-check.py` is the Windows counterpart of
 `live-capture-check.py`. See
-[docs/developers/status.md](docs/developers/status.md) for what those runs
+[docs/developers/status.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/status.md) for what those runs
 found and fixed, and what is still outstanding.
+
+**macOS is newer still, and has been through the same round trip.** A
+listen-only `CGEventTap` captured real events from a granted macOS 26.7 Mac,
+and a record → generate → replay → re-record cycle on that machine compared two
+recordings event by event: pointer, buttons, scroll, chords and typed text all
+came back, with windows and elements resolving for both halves of a click.
+What no live run has shown yet is a person's own keyboard — the tap skips the
+installing process's own events, so every check so far posted them from a
+separate process, and no real hardware key has been through it.
+`scripts/` has no macOS counterpart of the two live-check scripts above.
 
 The per-part verification table, and the known gaps — no UI yet, two
 recordings of a real desktop application (one on GhostBSD, one of Windows 11
 Notepad), and what GTK4 hit-testing costs — are in
-[docs/developers/status.md](docs/developers/status.md).
+[docs/developers/status.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/status.md).
 
 ## Documentation
 
-- [docs/getting-started.md](docs/getting-started.md) — from nothing to a test
+- [docs/getting-started.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/getting-started.md) — from nothing to a test
   you can run
-- [docs/recipes.md](docs/recipes.md) — every flag that matters, by the task it
+- [docs/recipes.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/recipes.md) — every flag that matters, by the task it
   serves
-- [docs/troubleshooting.md](docs/troubleshooting.md) — "why is my script all
+- [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/troubleshooting.md) — "why is my script all
   coordinates?", and the rest
-- [docs/testable-guis.md](docs/testable-guis.md) — how to build a GUI that can
+- [docs/testable-guis.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md) — how to build a GUI that can
   be tested at all; written to be handed to application developers
-- [docs/developers/architecture.md](docs/developers/architecture.md) and
-  [docs/developers/status.md](docs/developers/status.md) — why Wayland has no
+- [docs/developers/architecture.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md) and
+  [docs/developers/status.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/status.md) — why Wayland has no
   capture backend, the element-resolution rules, and what has actually been run
 
 ## License
 
 GPL-2.0-or-later, the same as [pyguitest](https://github.com/ctrondlp/pyguitest)
-— which this imports at run time and generates source for. See [LICENSE](LICENSE).
+— which this imports at run time and generates source for. See [LICENSE](https://github.com/ctrondlp/pyguitest-recorder/blob/main/LICENSE).

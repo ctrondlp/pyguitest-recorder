@@ -4,17 +4,27 @@ From nothing to a test you can run, in about five minutes. The short version
 is four commands; the rest of this page explains what each one did.
 
 ```sh
-pip install 'pyguitest-recorder[x11,atspi]'
+pip install 'pyguitest-recorder[x11,atspi]'          # Linux, XWayland
+pip install pyguitest-recorder 'pyguitest[windows]'  # Windows
+pip install 'pyguitest-recorder[macos]'              # macOS
+
 pyguitest-recorder --doctor              # can this machine record?
 pyguitest-recorder -o login_test.py      # record; press Escape twice to stop
-python3 login_test.py                    # replay it
+python3 login_test.py                    # replay it (python on Windows)
 ```
 
-> **Before your first recording:** keyboard capture uses X11's RECORD
-> extension, which sees **every application's keystrokes** — not only the one
-> you are recording. Close your password manager and anything else you would
-> not want in a file. [Privacy](#privacy-read-this-before-the-first-recording)
-> below is the full picture.
+The first line is the only one that changes by platform; the command itself
+is the same on all three. `python3` on the last line is the interpreter you
+installed into — `python` on Windows, and `py -3` from a Command Prompt if
+`python` is not on your `PATH`.
+
+> **Before your first recording:** keyboard capture goes through the platform's
+> own mechanism — X11's RECORD extension, a low-level input hook on Windows, an
+> event tap on macOS — and sees **every application's keystrokes**, not only
+> the one you are recording. Close your password manager and anything else you
+> would not want in a file.
+> [Privacy](#privacy-read-this-before-the-first-recording) below is the full
+> picture.
 
 ## 1. Can this machine record?
 
@@ -22,9 +32,9 @@ python3 login_test.py                    # replay it
 pyguitest-recorder --doctor
 ```
 
-Recording needs X11, XWayland, or native Windows — no ordinary Wayland
-compositor will ever allow it, which is a property of the platform, not a
-missing feature; see
+Recording needs X11 or XWayland on a Linux desktop, native Windows, or macOS.
+On Linux, no ordinary Wayland compositor will ever allow it — a property of the
+platform, not a missing feature; see
 [developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
 for why. Under a Wayland session the recorder reaches XWayland clients and
 nothing else, and says so rather than producing a file with silent gaps.
@@ -44,6 +54,21 @@ sudo dnf install python3-gobject python3-pyatspi at-spi2-core
 # Debian / Ubuntu
 sudo apt install python3-gi python3-pyatspi gir1.2-atspi-2.0
 ```
+
+**On macOS there is one grant, it has no package, and it is not the pane the
+name suggests.** `CGEventTapCreate` answers only when the application
+responsible for this process is listed under **System Settings → Privacy &
+Security → Accessibility** — that is Terminal, your IDE, or the `sshd`
+identity for a session reached over SSH, not the virtualenv path. TCC
+composes its Input Monitoring row from that grant rather than keeping a
+second one, so **Input Monitoring says "No Items" on a machine where
+recording works**, which is measured on macOS 26 rather than inferred; go
+looking there and you will be told to grant something that is already
+granted. A grant is recorded against a binary and applies to processes
+started after it was made, so quit the recorder and start it again rather
+than recording into the same terminal. `--doctor` reports the refusal
+verbatim when a tap cannot be created, and element resolution is off until
+the grant is in place. Nothing on Linux or Windows needs any of this.
 
 ## 2. Record something
 
@@ -70,7 +95,7 @@ redirect works too.
 
 Profile:     pyguitest-0.15
 Recorded on: x11 (mutter)
-Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)
+Timeouts:    seconds; the wait the recording observed, rounded up (floor 10s, cap 300s)
 """
 
 import pyguitest
@@ -124,14 +149,15 @@ become `sleep(3)`. Each pause is asked what it was waiting for and answered
 from what the events themselves saw:
 
 ```python
-# the recording waited 3.8s here for 'Save As' to open
-saveas = gui.wait_for_window("Save As", timeout=11.4)
+# the recording waited 12.4s here for 'Save As' to open
+saveas = gui.wait_for_window("Save As", timeout=13)
 ```
 
-`timeout` is in seconds, and not the 3.8s the comment reports: it is three
-times the wait the pause actually took, floored at ten seconds and capped at
-two minutes, because the replay is not the machine that recorded it. The
-comment is what happened; the timeout is what the script allows.
+`timeout` is in seconds, and it is the wait the comment reports, rounded up to
+the next whole second — 12.4 becomes 13. A pause under ten seconds still becomes
+`timeout=10`, because ten seconds is the floor, and five minutes is the ceiling
+on any one wait. The comment is what happened; the timeout is what the script
+allows, and the two now say the same thing.
 
 If a script came out as coordinates and you expected names,
 [troubleshooting.md](troubleshooting.md#why-is-my-script-all-coordinates) is

@@ -14,8 +14,8 @@ dynamic = ["version"]
 # Names the platforms for the same reason pyguitest's does: PyPI searches this
 # field at the same x5 boost as `keywords`, and it is the one line a user reads
 # before deciding whether this runs on their machine. "X11" rather than "Linux
-# and BSD" alone because recording is X11/XWayland or native Windows and never
-# ordinary Wayland -- see docs/developers/architecture.md.
+# and BSD" alone because recording is X11/XWayland on Linux and never ordinary
+# Wayland -- see docs/developers/architecture.md.
 description = "Record desktop GUI activity on X11, XWayland, macOS and Microsoft Windows, and generate pyguitest test scripts"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,10 +31,10 @@ authors = [{ name = "Dennis K. Paulsen" }]
 # normalisation means each keyword added costs the others a little.
 #
 # No "wayland", deliberately, and it is the one omission worth a line:
-# capture is XRecord or win32, so there is no Wayland session this can record
-# at all. A caller searching for a Wayland recorder would be answered by a
-# package that cannot be one. The README says why; the metadata does not
-# claim otherwise.
+# capture is XRecord, a CGEventTap or win32, so there is no Wayland session
+# this can record at all. A caller searching for a Wayland recorder would be
+# answered by a package that cannot be one. The README says why; the metadata
+# does not claim otherwise.
 keywords = [
     "gui-recorder", "record-and-replay", "gui-testing", "test-automation",
     "desktop-automation", "ui-testing",
@@ -206,6 +206,14 @@ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 homepage = "https://github.com/ctrondlp/pyguitest-recorder"
 repository = "https://github.com/ctrondlp/pyguitest-recorder"
 issues = "https://github.com/ctrondlp/pyguitest-recorder/issues"
+# The two the README links to most often, given PyPI their own sidebar
+# entries rather than leaving them reachable only through a URL in the prose:
+# the docs index for someone who landed on the index page, and the changelog
+# for someone deciding whether to upgrade. pyguitest declares both; without
+# them this package's PyPI page offered fewer routes into its own docs than
+# the package it depends on does.
+documentation = "https://github.com/ctrondlp/pyguitest-recorder/tree/main/docs"
+changelog = "https://github.com/ctrondlp/pyguitest-recorder/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pyguitest-recorder = "pyguitest_recorder.cli:main"

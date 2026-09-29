@@ -50,19 +50,45 @@ def test_a_pause_before_a_new_window_becomes_a_wait_for_that_window():
     waits = [e for e in out if isinstance(e, WaitForWindow)]
     assert [w.window.app_id for w in waits] == ["org.x.Editor", "org.x.Editor.Dialog"]
     assert not [e for e in out if isinstance(e, Pause)]
-    # The timeout is headroom over what was actually observed, not the gap.
+    # Under the floor, so the floor is what it gets: the 2.4s the recording
+    # took is not the number the wait is allowed.
     assert waits[-1].timeout == 10.0
     assert "waited 2.4s here" in waits[-1].note
 
 
-def test_a_long_wait_gets_a_timeout_scaled_to_what_it_took():
+def test_a_long_wait_is_allowed_the_seconds_it_actually_took():
+    # The number in the call is the pause in the comment beside it, so the two
+    # can be read against each other. Nothing is multiplied in between.
     events = [
         click(1.0),
         Pause(timestamp=1.1, seconds=25.0),
         click(30.0, window=DIALOG),
     ]
     out = infer_synchronization(events)
-    assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 75.0
+    assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 25.0
+
+
+def test_a_wait_is_rounded_up_to_the_next_whole_second():
+    events = [
+        click(1.0),
+        Pause(timestamp=1.1, seconds=12.4),
+        click(14.0, window=DIALOG),
+    ]
+    out = infer_synchronization(events)
+    assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 13.0
+
+
+def test_float_noise_in_a_pause_does_not_cost_the_script_a_second():
+    # Timestamps are floats, so twelve seconds of pause can arrive as
+    # 12.000000000000002s. Taken literally, the rounding would read that as
+    # past twelve and hand the wait thirteen.
+    events = [
+        click(1.0),
+        Pause(timestamp=1.1, seconds=12.000000000000002),
+        click(14.0, window=DIALOG),
+    ]
+    out = infer_synchronization(events)
+    assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 12.0
 
 
 def test_the_timeout_is_capped_however_long_the_user_took():
@@ -70,6 +96,15 @@ def test_the_timeout_is_capped_however_long_the_user_took():
     options = SyncOptions(max_timeout=120.0)
     out = infer_synchronization(events, options)
     assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 120.0
+
+
+def test_the_default_ceiling_is_five_minutes():
+    # The number a caller gets without asking: a pause that really did take ten
+    # minutes is cut back to five, and `max_timeout` is the only thing that
+    # decides it.
+    events = [click(1.0), Pause(timestamp=1.1, seconds=600.0), click(602.0, DIALOG)]
+    out = infer_synchronization(events)
+    assert [w.timeout for w in out if isinstance(w, WaitForWindow)][-1] == 300.0
 
 
 def test_a_pause_before_a_new_element_becomes_a_wait_for_that_element():

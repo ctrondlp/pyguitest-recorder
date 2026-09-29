@@ -8,7 +8,9 @@ wins, and no end-to-end test would notice the difference.
 import pytest
 
 from pyguitest_recorder.cli import (
+    _generator_options,
     _stop_progress_message,
+    _sync_options,
     _trimmed_events,
     build_parser,
     main,
@@ -355,6 +357,23 @@ def test_bad_config_is_reported(tmp_path, capsys):
     assert "unknown setting" in capsys.readouterr().err
 
 
+def test_a_non_finite_timeout_factor_flag_is_reported_not_crashed(tmp_path, capsys):
+    # argparse's plain type=float accepts "inf" as readily as an ordinary
+    # number; unvalidated, it would reach math.ceil() in the analyzer instead
+    # of being refused here, before a capture backend ever opens.
+    code = main(
+        [
+            "--timeout-factor",
+            "inf",
+            "--config",
+            str(_empty(tmp_path)),
+            "--doctor",
+        ]
+    )
+    assert code == 2
+    assert "timeout_factor" in capsys.readouterr().err
+
+
 def test_doctor_reports_without_touching_the_desktop(tmp_path, capsys):
     main(["--doctor", "--config", str(_empty(tmp_path))])
     out = capsys.readouterr().out
@@ -392,6 +411,32 @@ def test_sync_inference_can_be_turned_off(saved, tmp_path, capsys):
         ]
     )
     assert "1 events (1 observed, 0 inferred)" in capsys.readouterr().err
+
+
+def test_the_generator_and_the_analyzer_agree_on_what_one_wait_may_take():
+    # A generated file's `Timeouts:` line is a claim about the waits in it, so
+    # every number on it has to be the one the analyzer applied: the floor is
+    # one setting handed to both sides, and the cap and factor are the
+    # analyzer's own, which the generator used to answer with literals instead
+    # -- a header advertising five minutes, or a plain rounding, over numbers
+    # actually cut back or multiplied by something else.
+    sync, generated = _sync_options(Settings()), _generator_options(Settings())
+    assert generated.default_timeout == sync.min_timeout
+    assert generated.max_timeout == sync.max_timeout
+    assert generated.factor == sync.factor
+
+
+def test_max_timeout_and_timeout_factor_settings_reach_both_sides():
+    # `max_timeout` and `timeout_factor` exist so a caller can change the cap
+    # or the multiplier without hand-editing every generated file; that is
+    # only true if both settings actually reach the analyzer and the header
+    # that describes it, not just one or the other.
+    settings = Settings(max_timeout=45.0, timeout_factor=2.5)
+    sync, generated = _sync_options(settings), _generator_options(settings)
+    assert sync.max_timeout == 45.0
+    assert sync.factor == 2.5
+    assert generated.max_timeout == 45.0
+    assert generated.factor == 2.5
 
 
 def _empty(tmp_path):
@@ -752,3 +797,16 @@ class TestDoctorOnWindows:
         out = capsys.readouterr().out
         assert "display:           n/a (Windows has no X display)" in out
         assert "elevation:" in out
+
+
+def test_help_names_the_three_modes():
+    """Recording is what happens with no flag, and `--help` never said so.
+
+    `--doctor` and `--regenerate` are flags rather than subcommands, so the
+    listing is a wall of options in which the tool's whole purpose -- record
+    a GUI interaction -- is the one mode a reader cannot find. The epilog is
+    where the three are named together.
+    """
+    help_text = build_parser().format_help()
+    assert "--regenerate" in help_text and "--doctor" in help_text
+    assert "with no flag it records" in help_text

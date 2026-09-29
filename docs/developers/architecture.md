@@ -16,37 +16,45 @@ compositor, and no backend added later changes that: injection on Wayland took
 portals, libei and per-compositor IPC, but observation is the thing compositors
 exist to prevent.
 
-X11's RECORD extension and Windows' low-level input hooks are the two
-exceptions, which is why they are the two capture backends this tool has.
-Neither is subject to the permission model its own platform otherwise enforces
-for input: X11 has none to speak of, and Windows has no equivalent of a
-Wayland compositor's refusal or macOS's Input Monitoring grant either — a
-low-level hook simply works, silently, for any process on the desktop. Under a
-Wayland session `xrecord` reaches XWayland clients and nothing else — and says
-so in the recording and in the generated script's header, rather than
-producing a file with silent gaps. `win32` carries its own honest limit
-instead: a hook that misses Windows' own `LowLevelHooksTimeout` is unhooked
-without any error reaching this process, so a Windows recording can in
-principle have a gap nothing here can detect — see
-`pyguitest_recorder/backends/win32.py`'s own module docstring for what that
-means and why raw input, Microsoft's documented alternative, is not what this
-backend uses yet.
+X11's RECORD extension, Windows' low-level input hooks and macOS's
+`CGEventTap` are the exceptions — one per platform, which is why they are the
+three capture backends this tool has. Neither of the first two is subject to
+the permission model its own platform otherwise enforces for input: X11 has
+none to speak of, and Windows has no equivalent of a Wayland compositor's
+refusal or of a Mac's grant — a low-level hook simply works, silently, for any
+process on the desktop. The Mac's is the one that asks, and it is the reason
+`macos.py` asks the window server by creating a probe tap rather than a
+preflight: `CGEventTapCreate` answers with a live tap when the grant is there
+and `NULL` when it is not, and on macOS 26.7 the grant that answer composes
+from is Accessibility. Under a Wayland session
+`xrecord` reaches XWayland clients and nothing else — and says so in the
+recording and in the generated script's header, rather than producing a file
+with silent gaps. `win32` carries its own honest limit instead: a hook that
+misses Windows' own `LowLevelHooksTimeout` is unhooked without any error
+reaching this process, so a Windows recording can in principle have a gap
+nothing here can detect — see `pyguitest_recorder/backends/win32.py`'s own
+module docstring for what that means and why raw input, Microsoft's documented
+alternative, is not what this backend uses yet.
 
-The one part that *is* portable across all three is element resolution:
-AT-SPI answers "what is under this point" identically under X11 and Wayland,
-and pyguitest's UI Automation backend answers the equivalent question on
-Windows. An AT-SPI event-based acquisition layer is the plausible route to a
-Wayland recorder, and the event model here is deliberately free of X11
-vocabulary — `RawEvent.keysym` is spelled the way X11 itself spells it, which
-`win32.py` reproduces by hand rather than borrowing pyguitest's own lower-cased
-internal vocabulary, precisely so this layer stays platform-neutral to
-whatever reads it next.
+The one part that *is* portable across all three is element resolution, which is
+a *read* rather than a subscription: AT-SPI answers "what is under this point"
+identically under X11 and Wayland, pyguitest's UI Automation backend answers the
+equivalent question on Windows, and its Accessibility backend answers it on
+macOS — where it is the only backend that answers both halves,
+`WINDOW_AT_POINT` and `ELEMENT_GEOMETRY`, out of one session, which is why a Mac
+recording resolves its windows and elements through a single backend rather than
+a capture/resolution pair. An AT-SPI event-based acquisition layer is the
+plausible route to a Wayland recorder, and the event model here is deliberately
+free of X11 vocabulary — `RawEvent.keysym` is spelled the way X11 itself spells
+it, which `win32.py` and `macos.py` both reproduce by hand rather than borrowing
+pyguitest's own lower-cased internal vocabulary, precisely so this layer stays
+platform-neutral to whatever reads it next.
 
 ### Recording and replaying are different questions
 
-**Recording** needs X11, XWayland, or native Windows, for the reason above.
-Under a Wayland session that means XWayland clients and nothing else, which
-the recording and the generated script's header both say.
+**Recording** needs X11 or XWayland, native Windows, or macOS, for the reason
+above. On Linux under a Wayland session that means XWayland clients and nothing
+else, which the recording and the generated script's header both say.
 
 **Replaying** is pyguitest's problem, not this tool's, and it goes further —
 pyguitest injects on Wayland through portals, libei and per-compositor IPC.

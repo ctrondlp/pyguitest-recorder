@@ -3,6 +3,144 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.8.0] — 2026-09-28
+
+### Added
+
+- **`max_timeout` and `timeout_factor` settings, with `--max-timeout` and
+  `--timeout-factor` flags.** The analyzer's cap and multiplier on an inferred
+  wait were reachable only by hand-editing a generated file, one script and one
+  wait at a time -- there was no way to change the rule generation-wide for a
+  suite that consistently needs more headroom (CI hardware slower across the
+  board) or less (a wait that should fail fast rather than sit out a
+  five-minute guess). Both are ordinary `Settings` fields now, threaded through
+  `cli._sync_options` and `cli._generator_options` the same way `default_timeout`
+  already was, so the generated header's `Timeouts:` line reads whichever
+  values were actually applied rather than the defaults. Raising `timeout_factor`
+  above 1 reopens the one thing the rounding change below closed -- a wait's two numbers no longer
+  agreeing -- so the header now states which rule is in force: "rounded up" at
+  the default, "`Nx` the wait the recording observed, rounded up" away from it,
+  rather than a fixed sentence that would otherwise misdescribe numbers a raised
+  factor no longer matches. Both are rejected at construction if set to
+  anything `math.ceil()` in the analyzer cannot use -- `inf` and `nan`, which a
+  plain `type=float` CLI flag accepts as readily as an ordinary number, and
+  zero or a negative value, which produced a non-positive `timeout=` or
+  silently collapsed every inferred wait to the floor with no error at all.
+  Checked wherever a value can arrive from, config file or command line,
+  before a capture backend ever opens -- and named rather than replaced with
+  the default, since a caller's mistake should be reported, not hidden.
+
+### Changed
+
+- **Timeouts in a generated script now read as the seconds they are.** A wait is no
+  longer multiplied on the way out -- `SyncOptions.factor` drops from 3 to 1 -- and is
+  instead rounded up to the next whole second, so a 3.8-second pause becomes
+  `timeout=10` (the floor, which is what a short wait always got) and a 12.4-second one
+  becomes `timeout=13`. Nothing sits between the number in the call and the comment
+  above it any more, which is the point: the two used to disagree on purpose, and a
+  reader taking that at face value had found a bug that was not there. The 0.7.0 entry
+  below documents the 3x as the policy of the release before this one; the header line,
+  the README, `docs/getting-started.md` and `docs/troubleshooting.md` all describe the
+  rule that exists now. What the 3x bought was blanket tolerance for a replay machine
+  slower than the one that recorded, and it bought it silently -- which is also the only
+  reason a timeout was ever unreadable. That tolerance is now a timeout that surfaces,
+  and the floor is where the remaining headroom lives: `min_timeout` is ten seconds for
+  the hesitation a person leaves in a recording, not for machine speed. The `Timeouts:`
+  line a generated file's header carries now reads `seconds; the wait the recording
+  observed, rounded up (floor 10s, cap 300s)` -- unless the analyzer was run under a
+  custom `SyncOptions`, which that line has never reflected and still does not: a caller
+  who raises `factor` gets a header claiming a rounding its numbers no longer have.
+- **The ceiling on a single wait moves from two minutes to five.** `max_timeout` is the
+  cap the analyzer puts on any one wait it writes, applied after the floor: a 25-second
+  pause is `timeout=25`, and a ten-minute one is cut back to 300. Two minutes was the
+  wrong number to cut back to -- a desktop under load, a window drawing slowly because
+  the machine running the suite is the machine being recorded, is a wait that would have
+  passed had the cap not overridden it. With the multiplier gone there is no headroom
+  left for the cap to override, so it is purely a limit on a pause that was genuinely
+  that long in the recording. It is close to free: a `wait_*` returns the moment its
+  condition holds, so a ceiling is only ever spent by a wait that was going to expire
+  anyway. The one rule it lengthens with no observed gap behind it is `idle`, whose
+  `wait_for_idle` is a guess -- a wrong inference now takes five minutes to fail instead
+  of two, and `--no-idle-inference` remains the switch for callers who would rather not
+  pay it.
+- **Element and idle waits state the cadence they check at.** `wait_for_element` now
+  carries `interval=0.5` and `wait_for_idle` `interval=0.2`, pyguitest's own defaults
+  written into the file rather than left implicit, so the cadence the numbers beside
+  them were tuned against is visible where those numbers are and cannot move under a
+  later pyguitest release. Window waits take none, because `Session.expect_window` has
+  no such parameter: whether the wait it makes is answered by an event feed or by a poll
+  is pyguitest's decision, and it makes it on two things at once. The feed exists on five
+  backends -- GNOME Shell, KWin, niri, sway and Windows -- and two of the three platforms
+  this recorder captures on are not among them: an `AXObserver` on macOS is a later phase,
+  and no X11 session has a `WINDOW_EVENTS` backend at all, so a window wait polls at
+  pyguitest's own default on both. An `app_id` wait polls on *every* backend, feed or no
+  feed, and that is the form this generator writes on XWayland. An earlier draft of this
+  entry said the feed answered window waits on "a backend offering `WINDOW_EVENTS`" and
+  left it there, which reads as the rule rather than as the exception it is -- the same
+  wrong sentence had also been written into `_WAIT_INTERVAL`'s own docstring, and the two
+  are corrected together.
+
+### Fixed
+
+- **The README's links were dead on PyPI, and the sdist carried none of the pages they
+  name.** The package page is where most people meet this tool, and every `docs/...`
+  cross-reference in its README was relative. PyPI serves that one rendered file and no
+  repository files beside it, so each one was a 404 there while working exactly as intended
+  in a checkout -- which is why it went unnoticed. They are absolute URLs now,
+  `[project.urls]` gained the `documentation` and `changelog` entries pyguitest already
+  declared (two routes the PyPI sidebar was missing), and this package gained the
+  `MANIFEST.in` it had never had at all: setuptools infers README, LICENSE,
+  `pyproject.toml` and `tests/` and infers nothing else, so `docs/`,
+  `config.example.toml` and `scripts/` existed in the repository and in no sdist, which
+  a distro packager finds out by running this suite out of one. `tests/test_docs.py` now
+  holds all three: the README may carry no relative file link, every absolute link into
+  this repository must name something that exists, and every page these tests read has to
+  be covered by `MANIFEST.in`.
+
+- **`--help` now names the three modes, one of which is not a flag.** Recording is what
+  happens when no flag is given, and `--doctor` and `--regenerate` are flags rather than
+  subcommands, so the listing offered forty options and never stated what the tool does by
+  default: the one thing a reader opens `--help` for was the one thing it did not answer.
+  An epilog says it, and `tests/test_cli.py` holds the three names to the parser.
+
+- **`docs/getting-started.md` taught one platform's install and said nothing about the
+  only permission that stops a macOS recording.** Its quickstart install line was
+  Linux-only, so a Windows or macOS reader was handed a command with the wrong extras on
+  the first line of the page; all three are shown now, and the replay line names the
+  interpreter each platform has rather than assuming `python3` is on every `PATH`. The page
+  also had nothing to say about the grant, which is the one thing that beats every package
+  on macOS: it is Accessibility, TCC composes `kTCCServiceListenEvent` from it rather than
+  keeping a row of its own, so **Input Monitoring says "No Items" on a machine where
+  recording works** -- measured on macOS 26, and now written down beside `--doctor`,
+  including the fact that a grant applies to processes started after it was made.
+
+- **Unsupported keyword arguments in generated scripts are now reported as
+  `INVALID`.** `validate()` held every `gui.*` call to the installed
+  `Session`'s method names and stopped there -- so a call to a method that *does* exist,
+  carrying an argument it no longer takes, went out unchallenged. The name is right, the
+  file compiles, and the failure waits for a replay machine to reach that line: `interval=`
+  on a wait that dropped the parameter, or a `within=` spelled for a factory that never had
+  one. It now reads each emitted keyword against the installed signature as well, which is
+  the same check one release later and the quiet half of an API moving --
+  `tests/test_generator.py` writes `cadence=1.0` into a `wait_for_element` call and expects
+  the complaint, and holds `_WAIT_INTERVAL`/`_IDLE_INTERVAL` to the defaults of the two
+  calls they are written into, since both of those sentences were prose until now. The check
+  covers `gui.<factory>(...).<method>(...)` as well as `gui.<method>(...)` -- an Element
+  method call missing its own signature check would have been the same quiet failure one
+  level down -- and a `*args` parameter's name (`require(*capabilities)`) is no longer
+  accepted as a keyword, since Python refuses one regardless of whether the name matches.
+  The keywords are read off `Session` and `Element` themselves rather than off a list, so no
+  part of this can fall behind the library it is checking.
+- **The header's `cap` is now the ceiling the analyzer applied, rather than a literal.**
+  The `Timeouts:` line stated `cap 300s` as a string while the floor beside it was derived
+  from the options, so raising `SyncOptions.max_timeout` -- the number the analyzer cuts a
+  long wait back with -- left every generated file advertising a ceiling its own timeouts
+  were no longer held to, and the test that appeared to hold the two together compared the
+  literal against the dataclass default and could only pass. The cap travels the way the
+  floor does now: `cli._generator_options` asks the analyzer's own options for it, and
+  `tests/test_generator.py` and `tests/test_cli.py` hold the generator's default and the
+  CLI's wiring to `SyncOptions` respectively.
+
 ## [0.7.0] — 2026-09-27
 
 ### Changed

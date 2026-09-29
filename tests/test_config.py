@@ -139,6 +139,35 @@ def test_missing_explicit_file_is_an_error(tmp_path):
         load_settings(tmp_path / "absent.toml")
 
 
+@pytest.mark.parametrize("name", ["timeout_factor", "max_timeout"])
+@pytest.mark.parametrize(
+    "value", [0.0, -1.0, float("inf"), float("-inf"), float("nan")]
+)
+def test_a_non_finite_or_non_positive_timeout_setting_is_rejected(name, value):
+    # Both feed math.ceil() in the analyzer with nothing else checking them
+    # first: inf/nan raises OverflowError/ValueError mid-recording, after
+    # capture already happened, and zero or negative produces a nonsensical
+    # timeout with no error at all. Caught at construction instead, so it is
+    # rejected wherever it can arrive from: a config file, or the command line.
+    with pytest.raises(ConfigError, match=name):
+        Settings(**{name: value})
+
+
+def test_an_invalid_timeout_setting_in_a_config_file_is_rejected(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("max_timeout = 0.0\n")
+    with pytest.raises(ConfigError, match="max_timeout"):
+        load_settings(path)
+
+
+def test_an_invalid_timeout_setting_from_the_command_line_is_rejected():
+    # The command line is the other place these can arrive from, and it is
+    # not caught by validating only what a config file parses -- Settings()
+    # rejects it at construction regardless of caller.
+    with pytest.raises(ConfigError, match="timeout_factor"):
+        Settings().merged(timeout_factor=float("inf"))
+
+
 def test_command_line_overrides_the_file():
     settings = Settings(locators="absolute", motion_threshold=25)
     merged = settings.merged(locators="element", display=None)

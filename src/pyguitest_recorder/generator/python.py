@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import inspect
 import keyword
 import math
 import re
@@ -257,6 +258,32 @@ the person was reading, or thinking, or answering the door, and replaying
 that faithfully would only make the script slow.
 """
 
+_WAIT_INTERVAL = 0.5
+_IDLE_INTERVAL = 0.2
+"""How often a generated wait asks its question, in seconds.
+
+Stated in the file rather than left to pyguitest's defaults, so that the
+cadence the numbers beside it were tuned against is visible where they are
+and cannot move under them. The two are named per call rather than shared
+because they answer different costs: every check an element wait makes is an
+accessibility-tree walk, which is reason enough not to tighten it, while
+`wait_for_idle` reads a process's CPU and can afford a fifth of a second. Both
+values are the defaults of the calls they are written into
+(`Session.wait_for_element`, `Session.wait_for_idle`).
+
+Window waits take no interval, because `Session.expect_window` has no such
+parameter -- there is no cadence here for this generator to state. Whether the
+wait it makes is answered by an event feed or by a poll is pyguitest's own
+business, and it depends on two things at once: the backend, and whether the
+wait names a title or an `app_id`. A title wait is answered by `WINDOW_EVENTS`
+where the desktop offers one -- GNOME Shell, KWin, niri, sway and Windows --
+and polls everywhere else, macOS and every X11 session included; an `app_id`
+wait, which is what this generator writes on XWayland, polls on all of them.
+The feed is the exception rather than the rule, which is why no one number
+belongs in the file: where the wait polls, the cadence is pyguitest's default
+to choose, and it chooses it per call.
+"""
+
 _COORDINATE_CLICK_SETTLE = 0.5
 """Seconds inserted between two coordinate clicks `normalize.py` recorded as
 separate, back to back, with nothing rendered in between.
@@ -388,6 +415,28 @@ class GeneratorOptions:
     comments: bool = True
     function_name: str = "main"
     default_timeout: float = 10.0
+    max_timeout: float = 300.0
+    """Ceiling on one wait, mirroring the analyzer's own.
+
+    The `Timeouts:` line's `cap` names the ceiling the waits in this file were
+    actually cut back to, and the ceiling the analyzer applies is
+    `SyncOptions.max_timeout` -- so `cli._generator_options` hands this the same
+    value it handed the analyzer rather than letting the header describe a
+    default the numbers below it may never have been held to. The value here is
+    the analyzer's own default, for a caller who builds these options directly;
+    `tests/test_generator.py` holds the two together so it cannot drift.
+    """
+    factor: float = 1.0
+    """Multiplier the analyzer applied, mirroring `SyncOptions.factor`.
+
+    Read the same way `max_timeout` is, and for the same reason: the header's
+    `Timeouts:` line describes the numbers below it, and those numbers came
+    from `SyncOptions.factor`, not from this dataclass's own default, whenever
+    a caller ran the analyzer under a custom one. While this is 1 the line
+    reads "rounded up"; away from 1 it names the multiplier instead, since a
+    line claiming rounding while the numbers were multiplied is the exact
+    "looks like a bug" failure this release's rounding change existed to remove.
+    """
     redact_sensitive: bool = True
     include_header: bool = True
 
@@ -1742,7 +1791,10 @@ class PythonGenerator:
             if scope is not None:
                 within = self._ancestor_var(scope, state)
                 args += f", within={within}"
-        state.lines.append(f"gui.wait_for_element({args}, timeout={event.timeout:g})")
+        state.lines.append(
+            f"gui.wait_for_element({args}, timeout={event.timeout:g}, "
+            f"interval={_WAIT_INTERVAL:g})"
+        )
         # Waiting for an element means the window under the pointer just
         # changed, so where the pointer was says nothing about where it is.
         state.pointer = None
@@ -1763,7 +1815,10 @@ class PythonGenerator:
             return
         name = self._window_var(event.window, state)
         state.capabilities.add("WINDOW_PID")
-        state.lines.append(f"gui.wait_for_idle({name}.pid, timeout={event.timeout:g})")
+        state.lines.append(
+            f"gui.wait_for_idle({name}.pid, timeout={event.timeout:g}, "
+            f"interval={_IDLE_INTERVAL:g})"
+        )
 
     # -- locators ------------------------------------------------------------
 
@@ -2056,6 +2111,8 @@ class PythonGenerator:
                     state,
                     self.options.header,
                     floor=self.options.default_timeout,
+                    cap=self.options.max_timeout,
+                    factor=self.options.factor,
                 )
             )
         out.extend(_imports(state, self.options))
@@ -2246,6 +2303,20 @@ def _warning_suppression(options: GeneratorOptions) -> list[str]:
     return lines
 
 
+def _timeout_rule(factor: float) -> str:
+    """The `Timeouts:` line's own description of how a wait's number was built.
+
+    Two true sentences, chosen by whether there is anything left to multiply
+    by: at `factor == 1` nothing was, and the number is the wait itself,
+    rounded up; away from 1, `_timeout` in `analyzer/sync.py` multiplies before
+    it rounds, so the line has to say so rather than describe a rounding the
+    numbers were not actually held to.
+    """
+    if factor == 1.0:
+        return "the wait the recording observed, rounded up"
+    return f"{factor:g}x the wait the recording observed, rounded up"
+
+
 def _secret_bindings(state: _State) -> list[str]:
     """Render environment lookups standing in for redacted input."""
     if not state.secrets:
@@ -2259,7 +2330,13 @@ def _secret_bindings(state: _State) -> list[str]:
 
 
 def _header(
-    recording: Recording, state: _State, custom: str = "", *, floor: float
+    recording: Recording,
+    state: _State,
+    custom: str = "",
+    *,
+    floor: float,
+    cap: float,
+    factor: float,
 ) -> list[str]:
     """Render the module docstring describing where the recording came from.
 
@@ -2269,12 +2346,20 @@ def _header(
     able to drop by accident; `include_header = false` is how you drop it on
     purpose.
 
-    `floor` is the one number in the `Timeouts:` line the header cannot work
-    out for itself: the `min_timeout` the analyzer ran with, which is the same
-    `Settings.default_timeout` the CLI hands both sides. The other two numbers
-    in that line are the recorder's own scaling (`SyncOptions.factor` and
-    `max_timeout`), so a caller who ran the analyzer with a custom
-    `SyncOptions` reads the defaults here rather than its own.
+    `floor`, `cap` and `factor` are the three numbers the `Timeouts:` line
+    cannot work out for itself, and all three are meant to be the analyzer's
+    own: the `min_timeout` the waits in this file were rounded up to, the
+    `max_timeout` they were cut back to, and the `factor` they were multiplied
+    by before that rounding. The floor comes from `Settings.default_timeout`,
+    which the CLI hands the analyzer and the generator both; the cap and factor
+    are asked of the analyzer's options in `cli._generator_options`, so a
+    caller who ran it under a custom `SyncOptions` reads their own numbers
+    rather than the defaults. `factor` decides which of two sentences the line
+    uses -- see `_timeout_rule` -- since a line claiming a rounding the numbers
+    were not actually held to is the exact "looks like a bug" failure this
+    release's rounding change existed to remove; `tests/test_generator.py` checks
+    both sentences and holds every number to the analyzer's, rather than
+    trusting the prose.
     """
     env = recording.environment
     # Escaped, not rejected: this text is spliced straight into the module's
@@ -2305,15 +2390,18 @@ def _header(
         f"{('(' + parenthetical + ')') if parenthetical else ''}".rstrip(),
         f"Capture:     {env.capture_backend or 'unknown'}",
         f"pyguitest:   {env.pyguitest_version or 'unknown'}",
-        # A wait's two numbers disagree on purpose: the comment above it
-        # reports the pause the recording actually took ("the recording waited
-        # 3.8s here") and the call beside it allows three times that. Nothing
-        # else in the file says so, and read together without it the pair looks
-        # like a bug -- the README's own example was read exactly that way.
-        # `tests/test_generator.py` holds these three numbers to the scaling
-        # `SyncOptions` actually applies.
-        f"Timeouts:    seconds; 3x the wait the recording observed "
-        f"(floor {floor:g}s, cap 120s)",
+        # At the default factor (1) a wait's two numbers do not disagree: the
+        # comment above it reports the pause the recording actually took ("the
+        # recording waited 12.4s here") and the call beside it allows at least
+        # that long, rounded up to the next whole second. Nothing else in the
+        # file says what the unit is, and read together without it the pair
+        # reads as a bug -- the README's own example was read exactly that way.
+        # The floor is the one number a short pause does not explain and the
+        # cap is the one a very long pause does not, which is what this line is
+        # for. `tests/test_generator.py` holds every number here to the
+        # analyzer's, rather than trusting the prose.
+        f"Timeouts:    seconds; {_timeout_rule(factor)} "
+        f"(floor {floor:g}s, cap {cap:g}s)",
     ]
     lines.extend(d for d in detail if d)
     if env.xwayland:
@@ -2352,8 +2440,9 @@ def _connect(state: _State) -> str:
     to replay it -- and a bare `connect()` there composes the Accessibility read
     backend alone, so the script's own `require(KEY_EVENT, ...)` preamble raised
     `CapabilityUnsupported: KEY_EVENT is unsupported on
-    macos+capture:screencapture` on the very machine it was recorded on. Measured
-    on a granted macOS 26.7 VM: a live round trip could not be replayed until the
+    macos+capture:screencapture. Run `pyguitest doctor` to see what this
+    desktop is missing.` on the very machine it was recorded on. Measured on a
+    granted macOS 26.7 VM: a live round trip could not be replayed until the
     input backend was named.
 
     Named in precedence order -- input first, then the element and window
@@ -2498,18 +2587,23 @@ def generate(recording: Recording, options: GeneratorOptions | None = None) -> s
 
 
 def validate(source: str) -> list[str]:
-    """Check generated source compiles and only calls methods pyguitest has.
+    """Check generated source compiles and only calls the API pyguitest has.
 
-    Returns the list of problems; empty means the file is safe to offer for
-    export. This is the step that stops the recorder shipping a script naming
-    a function that does not exist -- the failure the design document's own
-    example made.
+    Returns the list of problems; empty means nothing here would fail before a
+    replay machine even started. This is the check that catches a script
+    naming a function that does not exist -- the failure the design document's
+    own example made -- and the one that catches a call to a method that does
+    exist but would refuse the arguments written beside it, which is the same
+    failure one release later and a quieter one. It reports rather than
+    withholds: `cli._emit` writes the script either way and prints each
+    problem as `INVALID: ...` with a non-zero exit, so a caller wanting the
+    file kept back until it is clean has to act on the return value itself.
     """
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
         return [f"syntax error at line {exc.lineno}: {exc.msg}"]
-    return _unknown_api(tree) + _unbound_names(tree)
+    return _unknown_api(tree) + _unknown_keywords(tree) + _unbound_names(tree)
 
 
 def _unknown_api(tree: ast.AST) -> list[str]:
@@ -2538,6 +2632,102 @@ def _unknown_api(tree: ast.AST) -> list[str]:
             if node.attr not in element_names:
                 problems.append(f"pyguitest.Element has no method {node.attr!r}")
     return problems
+
+
+def _unknown_keywords(tree: ast.AST) -> list[str]:
+    """Report keyword arguments the installed pyguitest would refuse.
+
+    A name that is gone is the loud half of an API moving; a *parameter* a
+    method no longer takes is the quiet one, because the call still resolves and
+    the file still compiles. `interval=` on a wait that dropped it, or a
+    `within=` spelled for a factory that never had one, reaches the reader as a
+    script that raises TypeError on the line it happens to reach -- and only if
+    it reaches it. Checked on both `gui.<method>(...)` and
+    `gui.<factory>(...).<method>(...)`, the same two shapes `_unknown_api`
+    already knows how to find.
+
+    Asked of the installed `Session`'s and `Element`'s own signatures, so there
+    is no list here to keep up to date as pyguitest grows, and checked
+    name-wise rather than value-wise: whether the number handed over is a sane
+    cadence is not this function's business (see `_WAIT_INTERVAL`).
+    """
+    session_accepted = _session_keywords()
+    element_accepted = _element_keywords()
+    if not session_accepted and not element_accepted:
+        return []
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        if isinstance(func.value, ast.Name) and func.value.id == "gui":
+            holder, accepted = "Session", session_accepted
+        elif element_accepted and _is_element_call(func.value):
+            holder, accepted = "Element", element_accepted
+        else:
+            continue
+        # None means the method takes `**kwargs`, so anything written beside it
+        # is accepted, or that it is not a method at all -- which is a problem
+        # `_unknown_api` is already reporting.
+        allowed = accepted.get(func.attr)
+        if allowed is None:
+            continue
+        problems.extend(
+            f"pyguitest.{holder}.{func.attr}() takes no keyword argument {kw.arg!r}"
+            for kw in node.keywords
+            if kw.arg is not None and kw.arg not in allowed
+        )
+    return problems
+
+
+def _session_keywords() -> dict[str, frozenset[str] | None]:
+    """The keyword names each installed `Session` method accepts, by name."""
+    return _keyword_signatures("Session")
+
+
+def _element_keywords() -> dict[str, frozenset[str] | None]:
+    """The keyword names each installed `Element` method accepts, by name."""
+    return _keyword_signatures("Element")
+
+
+def _keyword_signatures(attribute: str) -> dict[str, frozenset[str] | None]:
+    """The keyword names each installed pyguitest export's methods accept."""
+    try:
+        import pyguitest
+    except ImportError:  # pragma: no cover - pyguitest is a hard dependency
+        return {}
+    holder = getattr(pyguitest, attribute, None)
+    if holder is None:  # pragma: no cover - both names are documented exports
+        return {}
+    excluded_kinds = frozenset(
+        (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.POSITIONAL_ONLY)
+    )
+    accepted: dict[str, frozenset[str] | None] = {}
+    for name in _public_names(attribute):
+        member = getattr(holder, name, None)
+        if not callable(member):
+            continue
+        try:
+            parameters = inspect.signature(member).parameters
+        except (TypeError, ValueError):  # pragma: no cover - C-level callables
+            accepted[name] = None
+            continue
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            accepted[name] = None
+            continue
+        # *args and positional-only parameters are dropped rather than kept:
+        # neither can ever be passed by keyword, so keeping the name would let
+        # `require(capabilities=1)` -- `require(*capabilities)` refuses that
+        # keyword outright, which is exactly the shape worth reporting -- read
+        # as "the name matches" and pass unchallenged.
+        accepted[name] = frozenset(
+            p.name
+            for p in parameters.values()
+            if p.name != "self" and p.kind not in excluded_kinds
+        )
+    return accepted
 
 
 def _is_element_call(node: ast.AST) -> bool:
