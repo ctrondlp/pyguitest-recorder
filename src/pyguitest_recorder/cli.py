@@ -323,10 +323,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         settings, source = load_settings(args.config)
+        settings = settings.merged(**_overrides(args))
     except ConfigError as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 2
-    settings = settings.merged(**_overrides(args))
     if args.debug:
         _report_settings(settings, source)
     if args.doctor:

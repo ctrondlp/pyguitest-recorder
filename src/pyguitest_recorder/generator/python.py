@@ -2589,12 +2589,15 @@ def generate(recording: Recording, options: GeneratorOptions | None = None) -> s
 def validate(source: str) -> list[str]:
     """Check generated source compiles and only calls the API pyguitest has.
 
-    Returns the list of problems; empty means the file is safe to offer for
-    export. This is the step that stops the recorder shipping a script naming
-    a function that does not exist -- the failure the design document's own
-    example made -- and the one that stops it shipping a call to a method that
-    does exist but would refuse the arguments written beside it, which is the
-    same failure one release later and a quieter one.
+    Returns the list of problems; empty means nothing here would fail before a
+    replay machine even started. This is the check that catches a script
+    naming a function that does not exist -- the failure the design document's
+    own example made -- and the one that catches a call to a method that does
+    exist but would refuse the arguments written beside it, which is the same
+    failure one release later and a quieter one. It reports rather than
+    withholds: `cli._emit` writes the script either way and prints each
+    problem as `INVALID: ...` with a non-zero exit, so a caller wanting the
+    file kept back until it is clean has to act on the return value itself.
     """
     try:
         tree = ast.parse(source)

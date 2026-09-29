@@ -357,6 +357,23 @@ def test_bad_config_is_reported(tmp_path, capsys):
     assert "unknown setting" in capsys.readouterr().err
 
 
+def test_a_non_finite_timeout_factor_flag_is_reported_not_crashed(tmp_path, capsys):
+    # argparse's plain type=float accepts "inf" as readily as an ordinary
+    # number; unvalidated, it would reach math.ceil() in the analyzer instead
+    # of being refused here, before a capture backend ever opens.
+    code = main(
+        [
+            "--timeout-factor",
+            "inf",
+            "--config",
+            str(_empty(tmp_path)),
+            "--doctor",
+        ]
+    )
+    assert code == 2
+    assert "timeout_factor" in capsys.readouterr().err
+
+
 def test_doctor_reports_without_touching_the_desktop(tmp_path, capsys):
     main(["--doctor", "--config", str(_empty(tmp_path))])
     out = capsys.readouterr().out

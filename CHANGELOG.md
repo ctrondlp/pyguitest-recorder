@@ -21,7 +21,14 @@ was released.
   agreeing -- so the header now states which rule is in force: "rounded up" at
   the default, "`Nx` the wait the recording observed, rounded up" away from it,
   rather than a fixed sentence that would otherwise misdescribe numbers a raised
-  factor no longer matches.
+  factor no longer matches. Both are rejected at construction if set to
+  anything `math.ceil()` in the analyzer cannot use -- `inf` and `nan`, which a
+  plain `type=float` CLI flag accepts as readily as an ordinary number, and
+  zero or a negative value, which produced a non-positive `timeout=` or
+  silently collapsed every inferred wait to the floor with no error at all.
+  Checked wherever a value can arrive from, config file or command line,
+  before a capture backend ever opens -- and named rather than replaced with
+  the default, since a caller's mistake should be reported, not hidden.
 
 ### Changed
 
@@ -107,8 +114,8 @@ was released.
   recording works** -- measured on macOS 26, and now written down beside `--doctor`,
   including the fact that a grant applies to processes started after it was made.
 
-- **A generated script that would raise `TypeError` on the first line that ran is now
-  refused instead of written.** `validate()` held every `gui.*` call to the installed
+- **Unsupported keyword arguments in generated scripts are now reported as
+  `INVALID`.** `validate()` held every `gui.*` call to the installed
   `Session`'s method names and stopped there -- so a call to a method that *does* exist,
   carrying an argument it no longer takes, went out unchallenged. The name is right, the
   file compiles, and the failure waits for a replay machine to reach that line: `interval=`

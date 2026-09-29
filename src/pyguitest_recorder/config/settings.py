@@ -11,6 +11,7 @@ is read as a fallback for people who prefer a single dotfile.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from dataclasses import dataclass, fields
@@ -26,7 +27,12 @@ __all__ = ["Settings", "config_paths", "load_settings", "ConfigError"]
 
 
 class ConfigError(Exception):
-    """The configuration file could not be read, or names something unknown."""
+    """The configuration is unusable.
+
+    Unreadable, names something unknown, or holds a value nothing downstream
+    can act on -- wherever it came from, a config file or the merged command
+    line.
+    """
 
 
 @dataclass
@@ -225,6 +231,31 @@ class Settings:
     output: str | None = None
     session_file: str | None = None
     debug: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject a `timeout_factor` or `max_timeout` the analyzer cannot use.
+
+        Both reach `math.ceil()` in `analyzer/sync.py`'s `_timeout` with
+        nothing else in between: `inf` or `nan` -- which argparse's plain
+        `type=float` accepts as readily as an ordinary number -- raises
+        `OverflowError`/`ValueError` there, mid-recording and before
+        `--save-session` has written anything, losing the whole session
+        rather than just refusing a flag. Zero or negative is worse for being
+        quiet: `max_timeout <= 0` produces a non-positive `timeout=` on every
+        inferred wait, and `timeout_factor <= 0` silently collapses every one
+        of them to the floor with no error at all. Checked here, at
+        construction, so both `load_settings()` (a config file) and
+        `Settings.merged()` (the command line) reject the bad value before a
+        capture backend ever opens, rather than after -- and named rather
+        than replaced, since substituting the default for a value someone
+        actually set would hide the mistake instead of reporting it.
+        """
+        for name in ("timeout_factor", "max_timeout"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigError(
+                    f"{name} must be a finite number greater than 0, got {value!r}"
+                )
 
     def merged(self, **overrides: Any) -> Settings:
         """Return a copy with the non-None overrides applied."""
