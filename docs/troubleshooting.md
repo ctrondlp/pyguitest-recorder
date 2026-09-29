@@ -252,7 +252,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.15.0 or newer is required
+older than the recording expects. **pyguitest 0.15.1 or newer is required
 outright** — the floor the generated code is verified against. Generated
 scripts may call `Element.expand()`/`.collapse()` or read `.selectable`
 directly (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and
@@ -262,11 +262,13 @@ under `motion = "natural"` or `"recorded"` move the pointer with
 imports on Windows at all, and 0.14.0 is the one a macOS recording needs:
 before it there is no `macos` backend for the recording's windows and
 elements to be resolved through, and no `macquartz` key vocabulary for its
-key names to be translated through. 0.15.0 is where the floor stands now:
-nothing generated here needs what it added, and it is simply the release the
-output was last verified against, so a 0.14.0 install has to move up to run
-this recorder even though a script it already generated replays there.
-Older floors matter as well:
+key names to be translated through. 0.15.0 was where the floor stood with
+nothing generated here actually needing what it added -- simply the release
+the output was last verified against. 0.15.1 is a real need: a script under
+`locators = "element"` (the default) scopes its search with
+`gui.window_element(title)`, and an older pyguitest there could resolve that
+call to a shell-owned decoration proxy instead of the real window on a real
+GNOME/Mutter desktop, found live. Older floors matter as well:
 `gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough

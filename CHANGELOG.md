@@ -29,6 +29,33 @@ was released.
   Checked wherever a value can arrive from, config file or command line,
   before a capture backend ever opens -- and named rather than replaced with
   the default, since a caller's mistake should be reported, not hidden.
+- **Every threshold setting under `[analyzer]` now says what it does.**
+  `motion_threshold`, `click_interval`, `double_click_interval`, `text_idle`
+  and `pause_threshold` carried no docstring at all -- `hover_threshold` and
+  the stop/check-key settings beside them did, so these five were the only
+  ones in that section a reader had to go find the analyzer code to
+  understand. Each now names the exact behavior it gates (click-vs-drag and
+  double-click-merge distance for `motion_threshold`; the "held for N.Ns"
+  comment threshold for `click_interval`; the merge window for
+  `double_click_interval`; the split-into-two-runs gap for `text_idle`; the
+  noise-vs-wait cutoff for `pause_threshold`).
+- **A settings-time conflict is now rejected rather than silently misbehaving,
+  in four more specific ways, on top of the `timeout_factor`/`max_timeout`
+  check above.** `Settings.__post_init__` now also refuses `default_timeout`
+  the same way (it reaches the same arithmetic and was never checked), a
+  `max_timeout` set below `default_timeout` (every inferred wait would
+  silently clamp to the cap regardless of what was observed, defeating the
+  floor with no error), `motion = "recorded"` or `"verbatim"` without
+  `record_motion` (nothing was ever captured to render as a route, so every
+  move renders as a plain teleport with no sign the setting did anything), a
+  `check_key` that is, chord for chord, the same as `stop_key` (the stop key
+  is consumed before normalization ever sees it, so pressing `check_key` in
+  that case can never reliably record a check -- it either breaks the stop
+  sequence, or completes it and never arrives), and a non-empty `header`
+  paired with `include_header = False` (the generator only ever reads
+  `header` from inside the block that flag turns off, so a licence or ticket
+  number set there was silently never written to any generated script -- the
+  exact opposite of what `header`'s own docstring promises).
 
 ### Changed
 
@@ -140,6 +167,31 @@ was released.
   floor does now: `cli._generator_options` asks the analyzer's own options for it, and
   `tests/test_generator.py` and `tests/test_cli.py` hold the generator's default and the
   CLI's wiring to `SyncOptions` respectively.
+
+- **`element_context = False` silently defeated `locators = "element"` (the
+  default) with no explanation anywhere in the recording.** Turning off
+  element resolution at capture time makes every event's `element` field
+  `None`, so a generator asking for named locators has nothing left to
+  prefer and every click and text entry falls back to a bare coordinate --
+  correct, but previously undiagnosed: the header's own note mechanism
+  already covered a resolver that *failed* to find elements, and said
+  nothing when a user had turned it off on purpose but forgotten the
+  generator was still asking for names. `Recorder._open_session` now adds an
+  "element context off" note whenever this combination occurs, the same way
+  it already does for `window_context`.
+
+- **`window_context = False` was a silent no-op on macOS whenever
+  `element_context` stayed on (the default) -- confirmed live, every click
+  still carried a window.** `DesktopResolver._window()` looked up the window
+  under a point unconditionally; on Windows and Linux a session composed
+  without the window half simply cannot answer that query, so the setting
+  worked there by accident of session composition rather than by being
+  checked. macOS composes one backend for both halves, and that backend
+  answers window queries regardless of `window_context` -- so with element
+  resolution left on, nothing changed. A new `DesktopResolver.resolve_windows`
+  field (wired from `Settings.window_context`) now gates the one place
+  `_window()` is called from, on every platform, so the setting is honest
+  everywhere rather than correct by coincidence on two of three.
 
 ## [0.7.0] — 2026-09-27
 

@@ -70,6 +70,53 @@ def test_clicks_far_apart_do_not_merge(press, release):
     assert len(clicks) == 2
 
 
+def test_motion_threshold_moves_the_click_versus_drag_boundary(press, release):
+    # A press and release 5px apart is well inside the default 8px tolerance
+    # and reads as a click. Nothing in the suite ever varies this threshold,
+    # so a regression that hard-coded the default instead of reading the
+    # option would pass every other test here.
+    events = drain(
+        Normalizer(),
+        [press(1.0, x=100, y=100), release(1.05, x=105, y=100)],
+    )
+    assert [type(e).__name__ for e in events] == ["Click"]
+    events = drain(
+        Normalizer(options=NormalizerOptions(motion_threshold=3)),
+        [press(1.0, x=100, y=100), release(1.05, x=105, y=100)],
+    )
+    assert [type(e).__name__ for e in events] == ["Drag"]
+
+
+def test_click_interval_gates_whether_a_long_hold_is_noted(press, release):
+    # click_interval decides nothing about click-vs-drag -- only whether a
+    # held-but-not-moved click is worth a note. A 0.3s hold is unremarkable
+    # at the 0.5s default and silently passes; lowering the option must make
+    # the same hold worth flagging, or the setting does nothing at all.
+    events = drain(Normalizer(), [press(1.0, x=100, y=100), release(1.3, x=100, y=100)])
+    assert events[0].note == ""
+    events = drain(
+        Normalizer(options=NormalizerOptions(click_interval=0.1)),
+        [press(1.0, x=100, y=100), release(1.3, x=100, y=100)],
+    )
+    assert "held for 0.3s" in events[0].note
+
+
+def test_double_click_interval_widens_the_merge_window(press, release):
+    # Two clicks 0.6s apart stay separate under the 0.4s default -- the
+    # boundary `test_two_slow_clicks_stay_separate` already checks. Widening
+    # `double_click_interval` past that gap must turn the same pair into one
+    # double click, or the option is only read for its default value.
+    raws = [press(1.0), release(1.02), press(1.6), release(1.62)]
+    events = drain(Normalizer(), raws)
+    clicks = [e for e in events if isinstance(e, Click)]
+    assert [c.count for c in clicks] == [1, 1]
+    events = drain(
+        Normalizer(options=NormalizerOptions(double_click_interval=1.0)), raws
+    )
+    clicks = [e for e in events if isinstance(e, Click)]
+    assert [c.count for c in clicks] == [2]
+
+
 def test_press_move_release_is_a_drag(press, release):
     motion = RawEvent(kind="motion", timestamp=1.05, x=300, y=300)
     events = drain(
@@ -969,3 +1016,21 @@ def test_hover_detection_can_be_switched_off():
         Normalizer(options=options), [motion(1.0, 65, 47), motion(1.9, 400, 400)]
     )
     assert events == []
+
+
+def test_hover_threshold_custom_value_gates_short_rests():
+    # Both existing hover tests only ever exercise the 0.3s default or the
+    # 0 = off case, so a threshold hard-coded at 0.3 instead of read from
+    # the option would still pass all of them. A rest just under a raised
+    # threshold must be silently dropped; one just over it must still be
+    # reported, the same as the default does at its own boundary.
+    options = NormalizerOptions(hover_threshold=0.6)
+    short = drain(
+        Normalizer(options=options), [motion(1.0, 65, 47), motion(1.5, 400, 400)]
+    )
+    assert short == []
+    long = drain(
+        Normalizer(options=options), [motion(1.0, 65, 47), motion(1.7, 400, 400)]
+    )
+    assert len(long) == 1
+    assert long[0].dwell == pytest.approx(0.7)

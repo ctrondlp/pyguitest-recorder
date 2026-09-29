@@ -139,18 +139,89 @@ def test_missing_explicit_file_is_an_error(tmp_path):
         load_settings(tmp_path / "absent.toml")
 
 
-@pytest.mark.parametrize("name", ["timeout_factor", "max_timeout"])
+@pytest.mark.parametrize("name", ["timeout_factor", "default_timeout", "max_timeout"])
 @pytest.mark.parametrize(
     "value", [0.0, -1.0, float("inf"), float("-inf"), float("nan")]
 )
 def test_a_non_finite_or_non_positive_timeout_setting_is_rejected(name, value):
-    # Both feed math.ceil() in the analyzer with nothing else checking them
-    # first: inf/nan raises OverflowError/ValueError mid-recording, after
+    # All three feed math.ceil() in the analyzer with nothing else checking
+    # them first: inf/nan raises OverflowError/ValueError mid-recording, after
     # capture already happened, and zero or negative produces a nonsensical
     # timeout with no error at all. Caught at construction instead, so it is
     # rejected wherever it can arrive from: a config file, or the command line.
     with pytest.raises(ConfigError, match=name):
         Settings(**{name: value})
+
+
+def test_a_max_timeout_below_default_timeout_is_rejected():
+    # Below the floor, min(ceil(wanted), max_timeout) always returns
+    # max_timeout -- every inferred wait comes out identical regardless of
+    # what the recording actually paused for, with no error to say why.
+    with pytest.raises(ConfigError, match="max_timeout"):
+        Settings(default_timeout=30.0, max_timeout=10.0)
+
+
+def test_a_max_timeout_equal_to_default_timeout_is_allowed():
+    # Collapsing every wait to one number on purpose is unusual but valid --
+    # only strictly below the floor is a mistake this can catch.
+    Settings(default_timeout=10.0, max_timeout=10.0)
+
+
+@pytest.mark.parametrize("motion", ["recorded", "verbatim"])
+def test_motion_recorded_or_verbatim_without_record_motion_is_rejected(motion):
+    # Without record_motion there is no route in the recording for either
+    # value to render -- every move comes out as a plain teleport, silently,
+    # which is not what setting motion asked for.
+    with pytest.raises(ConfigError, match="record_motion"):
+        Settings(motion=motion, record_motion=False)
+
+
+@pytest.mark.parametrize("motion", ["recorded", "verbatim"])
+def test_motion_recorded_or_verbatim_with_record_motion_is_allowed(motion):
+    Settings(motion=motion, record_motion=True)
+
+
+def test_motion_natural_needs_no_record_motion():
+    # "natural" reshapes a move's own two endpoints; it never reads a
+    # recorded route, so it has nothing to be starved of.
+    Settings(motion="natural", record_motion=False)
+
+
+def test_check_key_equal_to_stop_key_is_rejected():
+    # The stop key is consumed before normalization ever sees it, so a press
+    # completing the stop sequence can never register as a check.
+    with pytest.raises(ConfigError, match="stop_key"):
+        Settings(check_key="ctrl+1", stop_key="ctrl+1")
+
+
+def test_check_key_equal_to_stop_key_is_rejected_regardless_of_modifier_case():
+    with pytest.raises(ConfigError, match="stop_key"):
+        Settings(check_key="Ctrl+1", stop_key="ctrl+1")
+
+
+def test_an_empty_check_key_is_exempt_from_the_stop_key_check():
+    # Empty already means "off" on its own terms -- see check_key's docstring.
+    Settings(check_key="", stop_key="ctrl+1")
+
+
+def test_check_key_different_from_stop_key_is_allowed():
+    Settings(check_key="ctrl+1", stop_key="Escape")
+
+
+def test_a_custom_header_with_include_header_false_is_rejected():
+    # _assemble only ever reads self.header from inside `if include_header`,
+    # so with it off the text would be silently dropped from every script.
+    with pytest.raises(ConfigError, match="include_header"):
+        Settings(header="# Copyright 2026 Example Corp", include_header=False)
+
+
+def test_an_empty_header_with_include_header_false_is_allowed():
+    # Nothing to discard -- the ordinary way to ask for a bare script.
+    Settings(header="", include_header=False)
+
+
+def test_a_custom_header_with_include_header_true_is_allowed():
+    Settings(header="# Copyright 2026 Example Corp", include_header=True)
 
 
 def test_an_invalid_timeout_setting_in_a_config_file_is_rejected(tmp_path):

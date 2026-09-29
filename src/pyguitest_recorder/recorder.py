@@ -1090,6 +1090,13 @@ class Recorder:
                 "window context off: the session that opened lists no windows; "
                 "clicks will carry absolute coordinates and no window"
             )
+        if not self.settings.element_context and self.settings.locators == "element":
+            notes.append(
+                "element context off: element_context is disabled, so every "
+                "click and text entry will render with a bare coordinate "
+                "instead of a named locator, even though locators is "
+                '"element" (the default)'
+            )
         return session
 
     def _connect(
@@ -1157,6 +1164,7 @@ class Recorder:
         return DesktopResolver(
             session=session,
             elements=self.settings.element_context,
+            resolve_windows=self.settings.window_context,
             windows=self._on_windows(),
             macos=self._on_macos(),
         )

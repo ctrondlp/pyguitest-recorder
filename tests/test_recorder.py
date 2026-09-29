@@ -214,6 +214,40 @@ class TestOnCheck:
         recorder._consume(self._check_chord())
 
 
+class TestRecordRaw:
+    """`record_raw`: whether the raw capture stream is kept beside the normalized ones.
+
+    `Recording.raw` is the most sensitive thing the recorder can hold -- every
+    keystroke typed into every application, unfiltered by the normalizer's
+    "record intent, not input" rule (see `Recording`'s own docstring). Off is
+    the default for exactly that reason, so a `_consume` that appended to it
+    unconditionally would turn every recording into a keylogger regardless of
+    what the user asked for.
+    """
+
+    def _recorder(self, **settings: Any) -> Recorder:
+        recorder = Recorder(settings=Settings(**settings))
+        recorder._normalizer = Normalizer(resolver=NullResolver(), started=0.0)
+        return recorder
+
+    def _keystroke(self) -> list[RawEvent]:
+        return [
+            RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a"),
+            RawEvent(kind="key_release", timestamp=1.05, keysym="a"),
+        ]
+
+    def test_true_retains_the_raw_events(self):
+        recorder = self._recorder(record_raw=True)
+        recorder._consume(self._keystroke())
+        assert len(recorder.recording.raw) == 2
+        assert recorder.recording.raw[0]["keysym"] == "a"
+
+    def test_false_is_the_default_and_drops_them(self):
+        recorder = self._recorder()
+        recorder._consume(self._keystroke())
+        assert recorder.recording.raw == []
+
+
 def test_stop_key_interval_default_is_loosened_from_the_original_1_0():
     # 1.0 measured live as too tight for a natural press-pause-press cadence
     # with no feedback that the first press registered -- a real capture
@@ -1092,6 +1126,32 @@ class TestASmallerContextThanAskedForSaysWhy:
         assert Recorder(Settings())._open_session("", notes) is None
         assert any("window and element context off" in n for n in notes)
         assert not any("smaller context" in n for n in notes)
+
+    def test_element_context_off_with_default_locators_is_noted(self, monkeypatch):
+        """Turning element resolution off leaves a reason when locators still wants it.
+
+        Without this, `locators = "element"` (the default) quietly rendered
+        every click and text entry as a bare coordinate, with nothing in the
+        recording to say why -- indistinguishable from element resolution
+        having failed on its own.
+        """
+        import pyguitest
+
+        monkeypatch.setattr(pyguitest, "connect", lambda **_kwargs: self._session())
+        notes: list[str] = []
+        made = Recorder(Settings(element_context=False))
+        assert made._open_session("", notes) is not None
+        assert any("element context off" in n for n in notes)
+
+    def test_element_context_off_with_absolute_locators_says_nothing(self, monkeypatch):
+        """No note when coordinates were already asked for on purpose."""
+        import pyguitest
+
+        monkeypatch.setattr(pyguitest, "connect", lambda **_kwargs: self._session())
+        notes: list[str] = []
+        made = Recorder(Settings(element_context=False, locators="absolute"))
+        assert made._open_session("", notes) is not None
+        assert not any("element context off" in n for n in notes)
 
 
 class HookLostBackend(InterruptedBackend):
