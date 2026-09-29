@@ -11,6 +11,7 @@ see [troubleshooting.md](troubleshooting.md).
 - [Keeping secrets out of the script](#keeping-secrets-out-of-the-script)
 - [Forcing coordinates, or forcing elements](#forcing-coordinates-or-forcing-elements)
 - [Turning off inference](#turning-off-inference)
+- [Changing how long an inferred wait is allowed](#changing-how-long-an-inferred-wait-is-allowed)
 - [Putting your own header on the file](#putting-your-own-header-on-the-file)
 - [Quieting warnings you already know about](#quieting-warnings-you-already-know-about)
 - [Recording a specific display](#recording-a-specific-display)
@@ -203,6 +204,25 @@ rule, the one that needs `WINDOW_PID`.
 
 Since inference runs at generation time, `--regenerate` lets you try these
 against an existing recording rather than re-performing it.
+
+## Changing how long an inferred wait is allowed
+
+```sh
+pyguitest-recorder --max-timeout 60        # cut the five-minute ceiling to one
+pyguitest-recorder --timeout-factor 2      # allow twice the observed pause
+```
+
+Both default to the numbers [troubleshooting.md](troubleshooting.md#the-script-waits-too-long-or-not-long-enough)
+describes: a wait is the pause the recording took, rounded up, floored at ten
+seconds and capped at five minutes. `--max-timeout` moves only the cap, which
+is close to free — a `wait_*` returns the moment its condition holds, so a
+higher ceiling only costs a wait that was going to expire anyway.
+`--timeout-factor` above 1 multiplies before that rounding, buying tolerance
+for a replay machine slower than the one that recorded at the cost of the
+`Timeouts:` line's own honesty: away from 1 it names the multiplier in force
+rather than claiming a plain rounding. Both are settings too
+(`max_timeout`, `timeout_factor`), for setting them once in
+[config.example.toml](../config.example.toml) rather than on every invocation.
 
 ## Putting your own header on the file
 

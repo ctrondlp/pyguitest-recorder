@@ -164,6 +164,26 @@ class Settings:
     comments: bool = True
     capability_preamble: bool = True
     default_timeout: float = 10.0
+    max_timeout: float = 300.0
+    """Ceiling on one inferred wait, however long the gap that asked for it.
+
+    A `wait_*` returns the moment its condition holds, so this is only ever
+    spent by a wait that was going to expire anyway -- see
+    `SyncOptions.max_timeout`, which this becomes. Lower it for a suite that
+    would rather fail fast than sit out a five-minute guess; the one rule that
+    routinely reaches it with no observed gap behind it is `infer_idle`.
+    """
+    timeout_factor: float = 1.0
+    """Multiplier between the pause a recording took and the timeout written.
+
+    Becomes `SyncOptions.factor`. 1 is a literal reading: a script's numbers
+    are the seconds the recording actually waited, rounded up, which is what
+    lets the comment above a wait and the call beside it agree instead of
+    reading like a bug. Raising it buys blanket tolerance for a replay machine
+    slower than the one that recorded, at the price of that agreement -- the
+    generated header names whichever rule is actually in force, so a value
+    above 1 does not silently misdescribe itself.
+    """
     format_output: bool = True
     function_name: str = "main"
 

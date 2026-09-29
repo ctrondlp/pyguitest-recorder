@@ -6,6 +6,7 @@ replay -- where it would be somebody's test that broke, not this one.
 """
 
 import ast
+import inspect
 import math
 import re
 
@@ -538,7 +539,28 @@ def test_drag_uses_the_drag_primitive(window):
 @pytest.mark.needs_ruff
 def test_wait_for_element_renders_a_role_constant():
     source = render(WaitForElement(element=ElementRef(role="dialog", name="Save As")))
-    assert 'gui.wait_for_element(role="dialog", name="Save As", timeout=10)' in source
+    expected = (
+        'gui.wait_for_element(role="dialog", name="Save As", timeout=10, interval=0.5)'
+    )
+    assert expected in source
+
+
+def test_the_interval_written_into_a_wait_is_the_one_pyguitest_defaults_to():
+    # `_WAIT_INTERVAL`/`_IDLE_INTERVAL` are pyguitest's own defaults written
+    # into the file deliberately: the timeouts beside them were tuned against
+    # that cadence, and writing it out is what stops a later release moving it
+    # under them. Writing a number out is also how it goes stale, which is the
+    # half this holds -- the claim in `python.py` is that these *are* the
+    # defaults of the calls they are written into.
+    import pyguitest
+
+    for constant, method in (
+        ("_WAIT_INTERVAL", "wait_for_element"),
+        ("_IDLE_INTERVAL", "wait_for_idle"),
+    ):
+        written = getattr(generator_module, constant)
+        parameters = inspect.signature(getattr(pyguitest.Session, method)).parameters
+        assert written == parameters["interval"].default, constant
 
 
 @pytest.mark.needs_ruff
@@ -686,6 +708,82 @@ def test_validate_rejects_a_capability_and_a_role_pyguitest_does_not_have():
     assert validate(source) == ["pyguitest has no Role 'HOLOGRAM'"]
 
 
+def test_validate_rejects_a_keyword_pyguitest_does_not_take():
+    # A method that still exists with an argument it no longer takes is the
+    # quiet half of an API moving: the call resolves, the file compiles, and the
+    # TypeError waits for whichever replay reaches that line. `interval=` is the
+    # keyword this generator's own waits are built on.
+    source = "def f(gui):\n    gui.wait_for_element(name='Save', cadence=1.0)\n"
+    assert validate(source) == [
+        "pyguitest.Session.wait_for_element() takes no keyword argument 'cadence'"
+    ]
+
+
+def test_validate_rejects_a_keyword_that_only_matches_a_var_positional_name():
+    # `Session.require(self, *capabilities)` refuses a `capabilities=` keyword
+    # outright -- Python never lets a *args name be passed by keyword -- so this
+    # is the shape the check exists for. Keeping that name in the accepted set
+    # let it through unreported.
+    source = "def f(gui):\n    gui.require(capabilities=1)\n"
+    assert validate(source) == [
+        "pyguitest.Session.require() takes no keyword argument 'capabilities'"
+    ]
+
+
+def test_validate_rejects_a_keyword_an_element_method_does_not_take():
+    # The Session check's pair: `gui.<factory>(...).<method>(...)` is an
+    # Element method call, not a Session one, and went unchecked until now.
+    source = "def f(gui):\n    gui.button('Save').click(cadence=1.0)\n"
+    assert validate(source) == [
+        "pyguitest.Element.click() takes no keyword argument 'cadence'"
+    ]
+
+
+def test_validate_accepts_the_keywords_the_generator_actually_writes(window):
+    # The pair to the check above, and the reason it can be trusted: the
+    # keywords the generator emits -- `timeout=`, `interval=`, `name=`,
+    # `within=`, `app_id=` -- are all read off the installed `Session` rather
+    # than off a list kept here, so a release that drops one is caught by the
+    # same test that would catch the method going away.
+    import pyguitest
+
+    button = ElementRef(role="push button", name="Save", extents=(1, 2, 3, 4))
+    label = ElementRef(role="label", name="Status", extents=(30, 300, 200, 20))
+    source = render(
+        WindowActivate(window=window),
+        WaitForWindow(window=window, timeout=20),
+        WaitForElement(element=ElementRef(role="dialog", name="Save As")),
+        WaitForIdle(window=window, pid=99, timeout=30),
+        Click(target=Target(x=10, y=20, window=window, element=button)),
+        TextInput(text="Ada"),
+        Assertion(
+            check="text",
+            target=Target(x=60, y=310, window=window, element=label),
+            expected="Saved",
+        ),
+    )
+    checked = 0
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "gui"
+        ):
+            continue
+        parameters = inspect.signature(getattr(pyguitest.Session, func.attr)).parameters
+        for keyword in node.keywords:
+            assert keyword.arg is None or keyword.arg in parameters, (
+                f"Session.{func.attr} has no {keyword.arg}="
+            )
+            checked += 1
+    # The timeouts, the two intervals and the element filters this is here for.
+    assert checked > 2
+    assert validate(source) == []
+
+
 def test_validate_rejects_a_name_nothing_binds():
     # The failure this exists for: `wait_for_idle` used to read a pid off an
     # `app` variable no generated line ever defined. It compiles; it raises
@@ -821,7 +919,7 @@ def test_wait_for_idle_takes_its_pid_from_the_window(window):
     # It used to read `app.pid` off a variable no generated line ever bound,
     # which compiles and then raises NameError on the first run.
     source = render(WaitForIdle(window=window, pid=99, timeout=30))
-    assert "gui.wait_for_idle(example.pid, timeout=30)" in source
+    assert "gui.wait_for_idle(example.pid, timeout=30, interval=0.2)" in source
     assert "example = gui.expect_window(" in source
     assert "Capability.WINDOW_PID" in source
     assert validate(source) == []
@@ -1416,31 +1514,51 @@ def test_the_header_names_the_session_the_way_a_reader_would():
 
 
 def test_the_header_says_what_a_timeout_is_in():
-    # A wait carries two numbers that disagree on purpose -- the comment above
-    # it reports the pause the recording took, the call allows three times that
-    # -- and read together with nothing to explain them they look like a bug.
-    # The README's own example was read exactly that way, so the unit and the
-    # scaling travel with the file.
+    # A wait carries two numbers that agree -- the comment above it reports the
+    # pause the recording took, the call allows that pause rounded up -- and
+    # without the unit and the rule beside them the pair is as unreadable as it
+    # was when they disagreed on purpose. The README's own example was read as a
+    # bug, so both travel with the file.
     source = full(KeyStroke(key="Return"))
     assert (
-        "Timeouts:    seconds; 3x the wait the recording observed (floor 10s, cap 120s)"
-        in source
+        "Timeouts:    seconds; the wait the recording observed, rounded up "
+        "(floor 10s, cap 300s)" in source
     )
 
 
 def test_the_header_timeout_line_states_the_scaling_the_analyzer_applies():
-    # Those three numbers are prose, so nothing else would notice the analyzer
-    # moving out from under them: `factor` is the 3x and `max_timeout` the cap,
-    # and the floor is the `min_timeout` the CLI hands the analyzer -- the same
+    # Those numbers are prose, so nothing else would notice the analyzer moving
+    # out from under them: `max_timeout` is the cap, and the floor is the
+    # `min_timeout` the CLI hands the analyzer -- the same
     # `Settings.default_timeout` it hands the generator, which is what makes one
     # setting the floor on both sides (`cli._sync_options` and
-    # `cli._generator_options`).
+    # `cli._generator_options`). The cap travels the same way -- it is the
+    # analyzer's own, asked for by `cli._generator_options` -- which is why the
+    # assertion below is a comparison rather than a constant. "Rounded up" is the
+    # third claim and the one with the shortest life: it is what
+    # `_Inferencer._timeout` does to every wait it writes only while `factor` is
+    # 1.
     options = SyncOptions()
     assert GeneratorOptions().default_timeout == options.min_timeout
+    assert GeneratorOptions().max_timeout == options.max_timeout
+    assert GeneratorOptions().factor == options.factor
+    assert options.factor == 1.0, "the header claims a rounding, not a multiplier"
     source = full(KeyStroke(key="Return"))
-    assert f"{options.factor:g}x the wait the recording observed" in source
+    assert "rounded up" in source
     assert f"floor {options.min_timeout:g}s" in source
     assert f"cap {options.max_timeout:g}s" in source
+
+
+def test_the_header_names_the_multiplier_when_factor_is_not_1():
+    # A `timeout_factor` setting above 1 makes `_timeout` multiply before it
+    # rounds -- see `analyzer/sync.py` -- so a header that still claimed a
+    # plain rounding would misdescribe its own numbers, the exact "looks like
+    # a bug" failure this release's rounding change existed to remove.
+    source = full(KeyStroke(key="Return"), factor=2.5)
+    assert (
+        "Timeouts:    seconds; 2.5x the wait the recording observed, "
+        "rounded up (floor 10s, cap 300s)" in source
+    )
 
 
 def test_the_header_timeout_line_follows_a_configured_floor():
@@ -1448,7 +1566,16 @@ def test_the_header_timeout_line_follows_a_configured_floor():
     # setting, and a script generated under a longer one must not advertise a
     # ten-second floor.
     source = full(KeyStroke(key="Return"), default_timeout=30.0)
-    assert "floor 30s, cap 120s" in source
+    assert "floor 30s, cap 300s" in source
+
+
+def test_the_header_timeout_line_follows_a_configured_cap():
+    # The cap is a number this line states, so it may not be a literal inside
+    # it: a script generated under a shorter ceiling must not advertise five
+    # minutes, and the ceiling applied is the analyzer's `max_timeout`. It was
+    # the one number on the line written by hand.
+    source = full(KeyStroke(key="Return"), max_timeout=120.0)
+    assert "floor 10s, cap 120s" in source
 
 
 @pytest.mark.needs_ruff

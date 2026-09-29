@@ -11,7 +11,7 @@ them against the real code, rather than grepping for words:
 
 * the pyguitest floor in the prose equals the one in ``pyproject.toml``
 * the sample ``Profile:`` line names the generator's own ``PROFILE``
-* the example wait every page quotes is the scaling the analyzer applies
+* the example wait every page quotes is the arithmetic the analyzer applies
 * no page calls an ``expect_*`` helper in the pre-0.2.0 free-function form
 * the default check key the docs name is the one ``Settings`` actually has
 * every relative link, and every anchor in a page's own contents, resolves
@@ -26,12 +26,24 @@ making them.
 import re
 from pathlib import Path
 
-from pyguitest_recorder.analyzer import SyncOptions
+from pyguitest_recorder.analyzer import SyncOptions, infer_synchronization
 from pyguitest_recorder.cli import build_parser
 from pyguitest_recorder.config import Settings
 from pyguitest_recorder.generator import PROFILE
+from pyguitest_recorder.model import Click, Pause, Target, WaitForWindow, WindowRef
+
+_MAIN = WindowRef(
+    title="Editor", app_id="org.x.Editor", pid=11, geometry=(0, 0, 800, 600)
+)
+_DIALOG = WindowRef(title="Save As", app_id="org.x.Editor.Dialog", pid=11)
 
 _ROOT = Path(__file__).resolve().parent.parent
+
+# The canonical URL for a file in this repository. The README writes its
+# cross-references this way because the same file is the PyPI long
+# description, where a relative link 404s rather than resolving -- so they
+# are checked as URLs, against the tree.
+_REPO = "https://github.com/ctrondlp/pyguitest-recorder/"
 
 _PAGES = (
     "README.md",
@@ -104,21 +116,30 @@ def test_rendered_profile_line_names_the_generator_profile():
 
 
 def test_the_documented_timeout_example_is_the_scaling_the_analyzer_applies():
-    """The pages show 3.8s above ``timeout=11.4``, which reads as a bug.
+    """The pages show 12.4s above ``timeout=13``, and both numbers are the code's.
 
-    Both numbers are the analyzer's own arithmetic -- the pause the recording
-    observed, then that pause scaled up -- and both are prose a reader copies,
-    so this derives the second from the first rather than matching words.
+    A wait is the pause the recording took, rounded up to the next whole second,
+    so the second number is derived here by running the analyzer over the pair of
+    clicks the pages describe rather than by matching words. The floor and the cap
+    the prose quotes are read off the same `SyncOptions` the analyzer defaults to.
     """
+    events = [
+        Click(timestamp=1.0, target=Target(x=10, y=10, window=_MAIN)),
+        Pause(timestamp=1.1, seconds=12.4),
+        Click(timestamp=14.0, target=Target(x=10, y=10, window=_DIALOG)),
+    ]
+    waits = [e for e in infer_synchronization(events) if isinstance(e, WaitForWindow)]
+    assert waits[-1].timeout == 13.0, "the analyzer no longer writes the example"
+
     options = SyncOptions()
-    derived = round(
-        min(max(options.min_timeout, 3.8 * options.factor), options.max_timeout), 1
-    )
-    assert derived == 11.4, "the scaling no longer produces the example's number"
     for page in ("README.md", "docs/getting-started.md"):
         text = _read(page)
-        assert "the recording waited 3.8s here" in text, f"{page} lost the example"
-        assert "timeout=11.4" in text, f"{page} lost the example's timeout"
+        assert "the recording waited 12.4s here" in text, f"{page} lost the example"
+        assert "timeout=13" in text, f"{page} lost the example's timeout"
+        # The header block each page reproduces, in the analyzer's own numbers.
+        assert (
+            f"floor {options.min_timeout:g}s, cap {options.max_timeout:g}s" in text
+        ), f"{page} quotes a floor or cap the analyzer does not apply"
 
 
 def test_no_page_calls_a_helper_the_old_way():
@@ -173,3 +194,70 @@ def test_documented_flags_exist_in_the_parser():
             if flag in _NOT_OURS:
                 continue
             assert flag in known, f"{page} documents {flag}, which the parser lacks"
+
+
+def test_the_readme_needs_no_repository_to_render():
+    """README.md is the PyPI long description, and PyPI serves it alone.
+
+    Every `docs/...` cross-reference in it used to be relative, which is what
+    works in a checkout and a 404 on the index -- invisible to the
+    relative-link check above, whose whole premise is a tree to resolve
+    against. In-page anchors are fine: the headings travel with the file.
+    """
+    for target in _LINK.findall(_read("README.md")):
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        assert target.startswith("#"), (
+            f"README.md links to {target}; PyPI cannot serve that, so the link "
+            "has to be an absolute URL"
+        )
+
+
+def test_absolute_links_into_this_repository_resolve():
+    """The README's cross-references are absolute now, so check those instead.
+
+    `blob/main/<path>` names a file and `tree/main/<dir>` names a directory,
+    and either is a 404 once what it names is renamed or unshipped -- the same
+    question the relative-link test asks of the pages under docs/.
+    """
+    checked = 0
+    for page in _PAGES:
+        for target in _LINK.findall(_read(page)):
+            if not target.startswith(_REPO):
+                continue
+            rest = target[len(_REPO) :].split("#", 1)[0]
+            kind, _, path = rest.partition("/main/")
+            if not path or kind not in ("blob", "tree"):
+                continue
+            checked += 1
+            linked = _ROOT / path
+            assert linked.exists(), f"{page} links to missing {path}"
+            if kind == "tree":
+                assert (linked / "README.md").exists(), (
+                    f"{page} links to the directory {path}, which has no README"
+                )
+    assert checked > 5, "the README's links went unchecked"
+
+
+def test_every_page_these_tests_read_is_shipped_in_the_sdist():
+    """`docs/` was in no MANIFEST.in, so the sdist carried none of it.
+
+    Setuptools infers README, LICENSE, pyproject.toml and tests/, and infers
+    nothing else: the pages this file reads, and every `docs/...` link the
+    README makes, existed in the repository and nowhere else. A packager
+    building from the sdist is who finds that out, by running the suite
+    there. pyguitest has a `--full` sdist self-test for the same failure; this
+    is the cheap version of it, reading the manifest rather than building.
+    """
+    manifest = (_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    for page in _PAGES:
+        directory = Path(page).parent
+        if str(directory) == ".":
+            continue  # setuptools ships the README without being told
+        assert f"recursive-include {directory} *" in manifest, (
+            f"{page} is read by these tests, and {directory}/ is not in MANIFEST.in"
+        )
+    for name in ("config.example.toml", "CHANGELOG.md"):
+        assert f"include {name}" in manifest, (
+            f"{name} is linked by the README and not shipped"
+        )

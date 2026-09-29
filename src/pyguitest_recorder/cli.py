@@ -47,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pyguitest-recorder",
         description="Record GUI activity and generate a pyguitest script.",
+        # The three modes are in the module docstring and nowhere a user
+        # looks: two of them are flags rather than subcommands, so `--help`
+        # lists `--doctor` and `--regenerate` among forty options with no
+        # statement that recording is what happens when you name neither --
+        # which leaves the tool's whole purpose discoverable by running it.
+        epilog=(
+            "No subcommands: with no flag it records, --regenerate re-renders "
+            "a saved recording without touching the desktop, and --doctor "
+            "says whether this machine can record at all."
+        ),
     )
     parser.add_argument("--version", action="version", version=_version_string())
 
@@ -209,6 +219,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="cap on via points under --recorded-motion (32); 0 or less for no cap",
     )
     render.add_argument(
+        "--max-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="ceiling on one inferred wait (300); a wait returns as soon as "
+        "its condition holds, so this only costs a wait that was going to "
+        "expire anyway",
+    )
+    render.add_argument(
+        "--timeout-factor",
+        type=float,
+        default=None,
+        metavar="X",
+        help="multiply an observed pause by X before rounding it up to a "
+        "timeout, instead of reading it literally (1); raises tolerance for "
+        "a slower replay machine at the cost of the header's rounding claim, "
+        "which it then states honestly as a multiplier instead",
+    )
+    render.add_argument(
         "--no-sync-inference",
         dest="sync_inference",
         action="store_false",
@@ -330,6 +359,8 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "locators",
         "motion",
         "max_waypoints",
+        "max_timeout",
+        "timeout_factor",
         "comments",
         "include_header",
         "header",
@@ -353,11 +384,20 @@ def _sync_options(settings: Settings) -> SyncOptions:
         enabled=settings.sync_inference,
         idle=settings.infer_idle,
         min_timeout=settings.default_timeout,
+        max_timeout=settings.max_timeout,
+        factor=settings.timeout_factor,
     )
 
 
 def _generator_options(settings: Settings) -> GeneratorOptions:
-    """Translate settings into generator options."""
+    """Translate settings into generator options.
+
+    The cap and factor are asked of `_sync_options`, which is these same
+    settings read by the rules the analyzer will read them by -- so the
+    header's `Timeouts:` line names the ceiling and multiplier the waits in
+    the file were actually held to rather than the generator's own defaults.
+    """
+    sync = _sync_options(settings)
     return GeneratorOptions(
         locators=settings.locators,
         motion=settings.motion,
@@ -366,6 +406,8 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         capability_preamble=settings.capability_preamble,
         function_name=settings.function_name,
         default_timeout=settings.default_timeout,
+        max_timeout=sync.max_timeout,
+        factor=sync.factor,
         redact_sensitive=settings.redact_sensitive,
         format_output=settings.format_output,
         include_header=settings.include_header,

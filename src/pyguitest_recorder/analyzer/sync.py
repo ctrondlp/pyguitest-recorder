@@ -40,6 +40,7 @@ exist when it is next rendered, and running it twice cannot compound.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..model import (
@@ -90,9 +91,35 @@ class SyncOptions:
     """
 
     min_timeout: float = 10.0
-    max_timeout: float = 120.0
-    factor: float = 3.0
-    """Headroom over the observed gap. A wait that took 4s is given 12s."""
+    """Floor on one wait, however short the pause that asked for it.
+
+    This is where a wait's headroom lives now that `factor` is 1: a pause that
+    took 3.8s becomes `timeout=10`, and the number says nothing about how long
+    the wait itself took. It is ten seconds because it covers the hesitation a
+    person leaves in a recording -- pointing, reading, deciding, reaching for
+    the next click -- and not because the arithmetic wants a second or two.
+    """
+
+    max_timeout: float = 300.0
+    """Ceiling on one wait, however long the gap that asked for it.
+
+    A wait returns as soon as its condition holds, so a ceiling is only ever
+    spent by a wait that was going to expire anyway; five minutes is for a
+    pause that was genuinely that long in the recording. The one rule it
+    lengthens with no observed gap behind it is `idle`, whose `wait_for_idle`
+    is a guess: a wrong guess now takes five minutes to fail where two used
+    to be enough.
+    """
+
+    factor: float = 1.0
+    """Multiplier between the pause observed and the timeout written.
+
+    1 is a literal reading: a wait is allowed what the recording itself took,
+    rounded up to the next whole second, and a script's numbers therefore read
+    as the seconds they are. Raising it buys blanket tolerance for a replay
+    machine slower than the one that recorded -- at the price of every timeout
+    in the file measuring something other than the wait.
+    """
 
 
 def infer_synchronization(
@@ -296,9 +323,17 @@ class _Inferencer:
         )
 
     def _timeout(self, seconds: float) -> float:
-        """How long to allow, given how long it actually took."""
+        """How long to allow, given how long it actually took.
+
+        Rounded up to the next whole second, so that the number reads as the
+        seconds it is: a pause of 11.2s becomes `timeout=12`. The ceiling is
+        applied last, since a pause long enough to reach it is capped whatever
+        the rounding would have said.
+        """
         wanted = max(self.options.min_timeout, seconds * self.options.factor)
-        return round(min(wanted, self.options.max_timeout), 1)
+        # Timestamps are floats, so twelve seconds of pause can arrive as
+        # 12.000000000000002s; the noise must not cost the script a second.
+        return float(min(math.ceil(round(wanted, 3)), self.options.max_timeout))
 
 
 # -- reading the event stream ------------------------------------------------

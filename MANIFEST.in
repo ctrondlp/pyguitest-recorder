@@ -1,0 +1,13 @@
+# The sdist picks up README, LICENSE, pyproject.toml and tests/ on its own.
+# These are the ones setuptools does not infer, and unlike pyguitest's they
+# have never been here at all: the package README's links point at every one
+# of them, `tests/test_docs.py` reads them back, and a packager building from
+# the sdist -- where the tree those links resolve against is the unpacked
+# directory -- is who finds out they are missing rather than shipped.
+include CHANGELOG.md
+include config.example.toml
+# The live-check scripts the README names by path, and the pages it links to.
+recursive-include scripts *
+recursive-include docs *
+prune docs/__pycache__
+global-exclude *.py[cod] __pycache__/*

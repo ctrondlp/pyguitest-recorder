@@ -99,9 +99,10 @@ Two further causes worth knowing, both of which look identical from here:
 
 ## Nothing was captured at all
 
-**Are you on Wayland?** Recording needs X11, XWayland, or native Windows.
-Under a Wayland session the recorder reaches XWayland clients and nothing
-else, so recording a native Wayland application produces nothing —
+**Are you on Wayland?** Recording needs X11 or XWayland on a Linux desktop,
+native Windows, or macOS — and under a Wayland session the recorder reaches
+XWayland clients and nothing else, so recording a native Wayland application
+produces nothing —
 [developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
 explains why this is permanent rather than a gap.
 
@@ -270,10 +271,26 @@ Older floors matter as well:
 
 ## The script waits too long, or not long enough
 
-Timeouts are scaled from what was actually observed during the recording, not
-guessed — a 3.8 second wait becomes `timeout=11.4`. If a machine is much
-slower than the one that recorded it, edit the number; it is a plain literal
-in a plain script.
+Timeouts come from what was actually observed during the recording, not guessed
+— a 12.4 second wait becomes `timeout=13`, a pause under ten seconds still gets
+the ten-second floor, and five minutes is the ceiling on any one wait. Earlier
+versions multiplied each wait up instead — three times it, floor and ceiling
+included — which left the timeout unreadable beside the comment above it and
+quietly absorbed a replay machine slower than the one that recorded. Nothing is
+absorbed now: if that machine needs longer, the number to edit says how long the
+wait took. It is a plain literal in a plain script.
+
+That is the fix for one script. For a whole suite that consistently needs more
+than a plain reading gives — CI hardware slower across the board, or a wait
+you would rather fail fast than sit out — `max_timeout` (`--max-timeout`) and
+`timeout_factor` (`--timeout-factor`) change the rule generation-wide instead
+of every file by hand: `max_timeout` moves the five-minute ceiling, and
+`timeout_factor` above 1 buys the same blanket tolerance the old default did,
+at the same price — a wait's two numbers stop agreeing, and the generated
+header says so, naming the multiplier in force rather than claiming a plain
+rounding it is no longer doing. See
+[config.example.toml](../config.example.toml) to set either from a config
+file, or `pyguitest-recorder --help` for the flags.
 
 If a pause became `gui.wait(...)` with a comment saying why, that means
 nothing observable changed while it waited — no new window, no new element.

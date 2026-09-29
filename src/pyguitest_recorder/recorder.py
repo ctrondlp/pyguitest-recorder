@@ -567,10 +567,11 @@ class Recorder:
     """
 
     _worst_lag: float = field(default=0.0, init=False)
+    """The furthest behind live input consumption ever fell during this run."""
+
     _injected_keys: list[str] = field(default_factory=list, init=False)
     """Keysyms another process synthesised during this run. See
     `_note_injected`."""
-    """The furthest behind live input consumption ever fell during this run."""
 
     _lag_reported_at: float = field(default=0.0, init=False)
     """When `on_lag` was last called, so it is not called per event."""
