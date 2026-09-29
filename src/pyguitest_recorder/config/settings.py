@@ -45,13 +45,74 @@ class Settings:
     backend: str = "auto"
     window_context: bool = True
     element_context: bool = True
+    """Resolve what a click or key landed on, not just where.
+
+    Off means every event's `element` is None regardless of what was under
+    the pointer -- so `locators = "element"` (the default) has nothing left
+    to prefer and every click and text entry falls back to a bare
+    coordinate, silently rather than by naming a wrong target. The recording
+    still says so: a note in the environment block, surfaced by `--debug`
+    and pointed to from a generated script's header. Off is for a desktop
+    where element resolution itself is the problem being worked around (a slow or
+    unreliable accessibility bus), not a way to ask for coordinate output --
+    `locators = "absolute"` is that."""
 
     # -- analyzer --------------------------------------------------------
     motion_threshold: int = 8
+    """Pixels the pointer must travel to count as having moved, not jittered.
+
+    One number, three jobs: it is what tells a press-and-release apart from a
+    drag (the release has to land at least this far from the press for the
+    gesture to become a `Drag`), what a rest has to be left by before it stops
+    counting as the same hover, and how far apart two clicks may land and
+    still be allowed to merge into one double- or triple-click. Too small and
+    a hand that trembles over a button records as a drag of one pixel; too
+    large and a deliberate short drag records as a click that did not move.
+    """
+
     click_interval: float = 0.5
+    """Seconds a click may be held before the script notes how long it was.
+
+    Purely a comment, not a classification: however long a press-and-release
+    lasted at one point is still a `Click`, never a `Drag` (see
+    `motion_threshold` for what does draw that line). Past this many seconds
+    the generated script gets a `# held for N.Ns` note beside it, which is the
+    only visible effect -- lower it to annotate ordinary clicks, raise it to
+    stop noting anything but a genuinely long hold.
+    """
+
     double_click_interval: float = 0.4
+    """Seconds between two clicks (same button, near the same point) that
+    still count as one double- or triple-click rather than two separate ones.
+
+    Measured from the first click's own timestamp to the next press, so three
+    clicks each this far apart chain into one triple-click. Raise it for a
+    slow double-click gesture that keeps recording as two singles; lower it
+    if two genuinely separate clicks are merging into one.
+    """
+
     text_idle: float = 1.5
+    """Seconds of silence inside typing before it splits into two text runs.
+
+    A run of keystrokes with no gap this long between any two of them becomes
+    one `TextInput`; a longer gap ends it and starts a new one on the next
+    keystroke, and also stops that gap from being swallowed by a run it would
+    otherwise still count as part of (see `pause_threshold`, which is what
+    would otherwise report it as a wait).
+    """
+
     pause_threshold: float = 1.0
+    """Seconds of inactivity before a gap becomes an explicit wait.
+
+    Measured from the last real input, not the last thing the script emitted
+    -- a buffered click waiting to see if it becomes a double-click does not
+    itself reset this clock. Below this many seconds a gap is silently
+    dropped as noise between ordinary actions; at or above it, it becomes a
+    `Pause` (or, with `sync_inference` on, something more specific than a bare
+    sleep). Raise it on a desktop whose ordinary clicks are already slow, to
+    stop every one of them from reading as a deliberate wait.
+    """
+
     record_motion: bool = False
     hover_threshold: float = 0.3
     """Seconds the pointer must rest somewhere for that to record as a hover.
@@ -143,6 +204,16 @@ class Settings:
 
     # -- generator -------------------------------------------------------
     locators: Literal["element", "relative", "absolute"] = "element"
+    """Prefer a named element, a window-relative point, or a bare coordinate.
+
+    "element" only reaches as far as a click, a double click, a selection
+    (radio, tab, tree, list, table row) and a text entry -- the actions a
+    named element can stand in for. A drag, a scroll and every pointer move
+    or hover render as coordinates regardless of this setting: a drag's path
+    is drawn from where the pointer actually went, not from what was under
+    it, and the same is true of a scroll's position and of motion in
+    general. See `element_context` for the one way "element" degrades to
+    coordinates everywhere at once, silently but for a recorded note."""
 
     motion: Literal["teleport", "natural", "recorded", "verbatim"] = "teleport"
     """How a pointer move is rendered -- see GeneratorOptions.motion.
@@ -233,29 +304,121 @@ class Settings:
     debug: bool = False
 
     def __post_init__(self) -> None:
-        """Reject a `timeout_factor` or `max_timeout` the analyzer cannot use.
+        """Reject values, and combinations, this package cannot act on.
 
-        Both reach `math.ceil()` in `analyzer/sync.py`'s `_timeout` with
+        Checked here, at construction, so both `load_settings()` (a config
+        file) and `Settings.merged()` (the command line) refuse a bad value
+        or a self-defeating combination before a capture backend ever opens,
+        rather than partway through a recording -- and named rather than
+        replaced, since substituting a default for a value someone actually
+        set would hide the mistake instead of reporting it.
+        """
+        self._validate_timeout_numbers()
+        self._validate_timeout_ordering()
+        self._validate_motion_needs_record_motion()
+        self._validate_check_key_is_not_the_stop_key()
+        self._validate_header_needs_include_header()
+
+    def _validate_timeout_numbers(self) -> None:
+        """Reject a `timeout_factor`, `default_timeout` or `max_timeout` unusable value.
+
+        All three reach arithmetic in `analyzer/sync.py`'s `_timeout` with
         nothing else in between: `inf` or `nan` -- which argparse's plain
         `type=float` accepts as readily as an ordinary number -- raises
         `OverflowError`/`ValueError` there, mid-recording and before
         `--save-session` has written anything, losing the whole session
         rather than just refusing a flag. Zero or negative is worse for being
-        quiet: `max_timeout <= 0` produces a non-positive `timeout=` on every
-        inferred wait, and `timeout_factor <= 0` silently collapses every one
-        of them to the floor with no error at all. Checked here, at
-        construction, so both `load_settings()` (a config file) and
-        `Settings.merged()` (the command line) reject the bad value before a
-        capture backend ever opens, rather than after -- and named rather
-        than replaced, since substituting the default for a value someone
-        actually set would hide the mistake instead of reporting it.
+        quiet: `max_timeout <= 0` or `default_timeout <= 0` produces a
+        non-positive `timeout=` on every inferred wait, and
+        `timeout_factor <= 0` silently collapses every one of them to the
+        floor with no error at all.
         """
-        for name in ("timeout_factor", "max_timeout"):
+        for name in ("timeout_factor", "default_timeout", "max_timeout"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigError(
                     f"{name} must be a finite number greater than 0, got {value!r}"
                 )
+
+    def _validate_timeout_ordering(self) -> None:
+        """Reject a `max_timeout` below `default_timeout`.
+
+        `analyzer/sync.py`'s `_timeout` computes `min(ceil(wanted), max_timeout)`
+        where `wanted` is never less than `default_timeout` (the floor it
+        becomes `SyncOptions.min_timeout` as) -- so with the cap set below the
+        floor, `min()` always returns the cap: every inferred wait in the
+        script comes out identically `max_timeout`, whether the recording
+        paused for a second or a minute, with nothing to say the floor was
+        ever set. `==` is allowed -- that collapses every wait to one number
+        on purpose, which is a valid (if unusual) thing to ask for.
+        """
+        if self.max_timeout < self.default_timeout:
+            raise ConfigError(
+                f"max_timeout ({self.max_timeout!r}) is below default_timeout "
+                f"({self.default_timeout!r}); every inferred wait would be "
+                "clamped to max_timeout regardless of what was observed"
+            )
+
+    def _validate_motion_needs_record_motion(self) -> None:
+        """Reject `motion = "recorded"`/`"verbatim"` with nothing recorded to render.
+
+        Both values render the pointer's own route -- `via` waypoints, or
+        every position with its wait -- and that route only exists in a
+        recording when `record_motion` captured it (see `motion`'s own
+        docstring). Without it there is no error today: `_group_motion`
+        simply finds no multi-point run to draw from, and every move renders
+        exactly as `motion = "teleport"` would -- indistinguishable from the
+        setting having worked, except that the waypoints someone turned this
+        on for are not there.
+        """
+        if self.motion in ("recorded", "verbatim") and not self.record_motion:
+            raise ConfigError(
+                f"motion = {self.motion!r} needs record_motion = True to have "
+                "any route to render; without it every move renders as a "
+                'plain teleport, which is what motion = "teleport" already '
+                "does with no motion capture cost"
+            )
+
+    def _validate_check_key_is_not_the_stop_key(self) -> None:
+        """Reject a `check_key` that is, chord for chord, the `stop_key`.
+
+        The stop key is consumed before normalization ever sees it --
+        `Recorder._stop_sequence`'s own docstring says so -- so a press
+        completing the stop sequence never reaches `check_key` matching in
+        `analyzer/normalize.py`, and a press that does not complete it is
+        only released once the sequence breaks. Set the two chords equal and
+        `check_key` cannot record a check without risking, or requiring,
+        exactly `stop_key_presses` of them to end the recording instead --
+        the setting still parses and neither name is unknown, so nothing
+        else would ever say why the check key seemed not to work. An empty
+        `check_key` is exempt: that already means "off" on its own terms.
+        """
+        from ..analyzer import parse_chord
+
+        if not self.check_key:
+            return
+        if parse_chord(self.check_key) == parse_chord(self.stop_key):
+            raise ConfigError(
+                f"check_key ({self.check_key!r}) is the same chord as "
+                f"stop_key ({self.stop_key!r}); pressing it can never "
+                "reliably record a check"
+            )
+
+    def _validate_header_needs_include_header(self) -> None:
+        """Reject a custom `header` that `include_header = False` would discard.
+
+        `generator/python.py`'s `_assemble` only ever calls `_header` (which is
+        the only place `self.header` is read) inside `if self.options.include_header`
+        -- so with it off, a licence, ticket number or team convention set in
+        `header` is silently never written to any generated script, with
+        nothing to say the text was asked for at all. `header`'s own docstring
+        promises the opposite: that setting it never loses provenance.
+        """
+        if not self.include_header and self.header:
+            raise ConfigError(
+                "header is set but include_header = False would discard it; "
+                "either drop header or leave include_header on"
+            )
 
     def merged(self, **overrides: Any) -> Settings:
         """Return a copy with the non-None overrides applied."""

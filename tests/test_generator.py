@@ -536,6 +536,33 @@ def test_drag_uses_the_drag_primitive(window):
     assert "gui.drag(" in source
 
 
+def test_a_drag_with_a_resolvable_element_still_uses_coordinates(window):
+    """A drag renders from where the pointer went, not what was under it.
+
+    `locators = "element"` (the default here) reaches a click, a selection and
+    a text entry -- not a drag, whose path is drawn from the pointer's own
+    route regardless of this setting (see `Settings.locators`). An element
+    resolving at the endpoints must not change that.
+    """
+    button = ElementRef(role="push button", name="Start")
+    source = render(
+        Drag(
+            start=Target(x=10, y=20, window=window, element=button),
+            end=Target(x=30, y=40, window=window),
+        )
+    )
+    assert "gui.drag(" in source
+    assert "Start" not in source
+
+
+def test_a_scroll_with_a_resolvable_element_still_uses_coordinates(window):
+    """A scroll renders at the pointer's position, not the element under it."""
+    panel = ElementRef(role="panel", name="Sidebar")
+    source = render(Scroll(target=Target(x=1, y=1, window=window, element=panel), dy=3))
+    assert "gui.scroll(dy=3)" in source
+    assert "Sidebar" not in source
+
+
 @pytest.mark.needs_ruff
 def test_wait_for_element_renders_a_role_constant():
     source = render(WaitForElement(element=ElementRef(role="dialog", name="Save As")))
@@ -800,6 +827,39 @@ def test_empty_recording_still_generates_a_valid_module():
     source = generate(Recording(), GeneratorOptions(include_header=False))
     assert validate(source) == []
     assert "pass" in source
+
+
+def test_format_output_false_skips_ruff_and_keeps_the_unformatted_rendering(
+    window, save_button
+):
+    # `_literal` renders through `ast.unparse`, which quotes with single
+    # quotes; `_format` (a `ruff format` shell-out) is what normalizes that to
+    # the project's double-quoted style afterward. Nothing here ever turns
+    # `format_output` off, so a generator that called `_format` unconditionally
+    # would still pass every other test in this file.
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        format_output=False,
+    )
+    assert "gui.button('Save').click()" in source
+    assert 'gui.button("Save").click()' not in source
+    assert validate(source) == []
+
+
+def test_function_name_is_used_for_both_the_definition_and_the_call():
+    # `main` is never varied in any other test, so a generator that hard-coded
+    # `main` at either the `def` or the `if __name__` call site -- rendering
+    # `run_scenario()` calling into an undefined `main` -- would still pass
+    # everything else here. `validate` catches an undefined name, but only if
+    # a test actually asks for a name other than the default.
+    source = generate(
+        Recording(),
+        GeneratorOptions(include_header=False, function_name="run_scenario"),
+    )
+    assert "def run_scenario() -> None:" in source
+    assert "run_scenario()" in source
+    assert "def main(" not in source
+    assert validate(source) == []
 
 
 def test_header_records_the_xwayland_caveat():

@@ -104,6 +104,135 @@ def test_no_check_feedback_flag_is_parsed():
     assert args.announce_checks is False
 
 
+def _fake_recorder(assertion):
+    """A `Recorder` stand-in for `_record()` that never touches a desktop.
+
+    `run()` fires `on_check` itself, the same way a real recorder would the
+    moment a check is recorded, so a test can see whether `_record()` wired
+    the callback up at all -- which is all `announce_checks` controls.
+    """
+
+    class FakeRecorder:
+        unstopped_presses = 0
+
+        def __init__(self, settings):
+            self.settings = settings
+            self.on_stop_progress = None
+            self.on_check = None
+            self.on_lag = None
+
+        def start(self):
+            pass
+
+        def run(self):
+            if self.on_check is not None:
+                self.on_check(assertion)
+            return Recording()
+
+        def stop(self):
+            pass
+
+    return FakeRecorder
+
+
+def test_announce_checks_gates_the_live_check_feedback(tmp_path, capsys, monkeypatch):
+    # Pressing check_key has no other visible effect at all (see
+    # `Settings.announce_checks`'s own docstring), so this line is the only
+    # way anyone finds out a check was recorded while it happens. Existing
+    # coverage only checks that `--no-check-feedback` parses
+    # (test_no_check_feedback_flag_is_parsed); nothing exercises `_record()`
+    # itself, so a build that stopped wiring `on_check` up at all -- or wired
+    # it up unconditionally -- would still pass everything else here.
+    from pyguitest_recorder import cli
+    from pyguitest_recorder.model import Assertion
+
+    assertion = Assertion(check="showing", target=Target(x=0, y=0))
+    monkeypatch.setattr(cli, "Recorder", _fake_recorder(assertion))
+
+    main(["--config", str(_empty(tmp_path)), "-o", str(tmp_path / "on.py")])
+    assert "Check:" in capsys.readouterr().err
+
+    main(
+        [
+            "--no-check-feedback",
+            "--config",
+            str(_empty(tmp_path)),
+            "-o",
+            str(tmp_path / "off.py"),
+        ]
+    )
+    assert "Check:" not in capsys.readouterr().err
+
+
+def test_debug_flag_reports_which_config_file_won_and_a_resolved_value(
+    tmp_path, capsys
+):
+    # `--debug` was only ever checked for parsing; nothing asserted what it
+    # prints. `_report_settings` (cli.py:821-826) is the whole implementation
+    # -- a `config:` line naming the file `load_settings` picked, then every
+    # setting sorted and repr'd -- which is how someone finds out *which*
+    # config file actually won and what a value resolved to, not just that
+    # the flag exists.
+    config = tmp_path / "c.toml"
+    config.write_text("motion_threshold = 25\n")
+    main(["--debug", "--doctor", "--config", str(config)])
+    err = capsys.readouterr().err
+    assert f"config: {config}" in err
+    assert "motion_threshold = 25" in err
+
+
+def test_save_session_writes_a_loadable_recording(tmp_path, window):
+    # test_pipeline.py only has a comment mentioning `--save-session`; nothing
+    # in the suite runs the save path and reads the file back.
+    from pyguitest_recorder import cli
+
+    recording = Recording()
+    recording.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
+    session_path = tmp_path / "session.json"
+    settings = Settings(
+        session_file=str(session_path), output=str(tmp_path / "script.py")
+    )
+    code = cli._emit(recording, settings)
+    assert code == 0
+    loaded = Recording.load(session_path)
+    assert len(loaded.events) == 1
+    assert loaded.events[0].target.x == 10
+
+
+def test_save_session_strips_raw_events_unless_record_raw_is_set(tmp_path, window):
+    # cli.py:623 reads `raw=recording.raw if settings.record_raw else []`.
+    # In the real `_record()` flow `recording.raw` is already empty whenever
+    # `record_raw` was off during capture (recorder.py:821-822), so the two
+    # can never actually disagree there -- but that makes this line easy to
+    # mistake for dead code rather than the thing standing between a saved
+    # session and a keylogger. Forcing recording.raw and settings.record_raw
+    # to disagree here is the only way to prove the *save* path itself still
+    # honours the current settings, not just whatever was true at capture
+    # time.
+    from pyguitest_recorder import cli
+
+    recording = Recording(raw=[{"kind": "key_press", "keysym": "a", "text": "a"}])
+    recording.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
+
+    kept = tmp_path / "kept.json"
+    cli._emit(
+        recording,
+        Settings(
+            session_file=str(kept), record_raw=True, output=str(tmp_path / "a.py")
+        ),
+    )
+    assert Recording.load(kept).raw
+
+    stripped = tmp_path / "stripped.json"
+    cli._emit(
+        recording,
+        Settings(
+            session_file=str(stripped), record_raw=False, output=str(tmp_path / "b.py")
+        ),
+    )
+    assert Recording.load(stripped).raw == []
+
+
 def test_regenerate_writes_a_script_without_recording(saved, tmp_path, capsys):
     out = tmp_path / "script.py"
     code = main(

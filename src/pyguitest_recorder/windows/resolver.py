@@ -385,6 +385,17 @@ class DesktopResolver:
 
     session: Any = None
     elements: bool = True
+    resolve_windows: bool = True
+    """Whether a resolved point may carry a window at all.
+
+    Independent of `session`/`elements`: on most platforms a session composed
+    without the window half simply cannot answer `WINDOW_AT_POINT`, so this
+    stays a no-op there. macOS composes one backend for both halves, and that
+    backend answers window queries regardless -- so with `elements` left on,
+    turning `window_context` off changed nothing there until this existed,
+    confirmed live: every click still carried a window. See `_window`, the one
+    place this is read.
+    """
     ignore_pids: set[int] = field(default_factory=set)
     windows: bool | None = None
     """Whether this recording is of a native Windows desktop. None asks the host.
@@ -1368,7 +1379,7 @@ class DesktopResolver:
         pointer move, which is one of hundreds and is asked again by the next --
         see `resolve_window`.
         """
-        if self.session is None:
+        if self.session is None or not self.resolve_windows:
             return None
         window = self._resolve_window(x, y, screen)
         if window is None and patient:

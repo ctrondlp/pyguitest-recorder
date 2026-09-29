@@ -182,7 +182,17 @@ dependencies = [
     # generated against this floor still replays under 0.14.0; what does not hold
     # under an older install is any claim that this package's own output was
     # verified there.
-    "pyguitest>=0.15.0",
+    # 0.15.1 raises it for a real bug a live Linux/Wayland recording found:
+    # a generated script under `locators = "element"` (the default) calls
+    # `gui.window_element(title)` to scope its search to one window, and on a
+    # real GNOME/Mutter desktop an older pyguitest could resolve that call to
+    # `mutter-x11-frames` -- a shell-owned accessibility proxy publishing the
+    # same title as decoration chrome, not the application -- rather than the
+    # real window, silently returning nothing for every element search scoped
+    # within it. `window_element` now prefers the process pyguitest's own
+    # window list names, so a script generated against this floor gets a
+    # `pyguitest` that resolves the correct one.
+    "pyguitest>=0.15.1",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

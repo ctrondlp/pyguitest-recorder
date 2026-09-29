@@ -204,7 +204,7 @@ gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
 What comes out depends on what was under the pointer — a checkbox gives
 `expect_checked`, a label with something to say gives `expect_text`, anything
 else named gives `expect_showing`. These are pyguitest `Session` methods, so a
-generated script depends on nothing but pyguitest — and it needs 0.15.0 or
+generated script depends on nothing but pyguitest — and it needs 0.15.1 or
 newer, as the install section explains. They name what was wrong instead of
 raising a bare
 `AssertionError`, and each retries until its timeout so a check cannot race a
@@ -265,7 +265,7 @@ On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
 [install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
 carries the full table, including Arch, openSUSE and FreeBSD.
 
-**pyguitest 0.15.0 or newer is required outright** — the floor the generated
+**pyguitest 0.15.1 or newer is required outright** — the floor the generated
 code is verified against. Generated scripts call the `expect_` family as
 pyguitest `Session` methods, which do not exist before 0.9.0; double-click a
 named element with `Element.double_click`, which 0.10.0 added; once `motion`
@@ -277,10 +277,14 @@ the floor required until 0.14.0 raised it again: that is the release whose
 `macos` backend a macOS recording resolves windows and elements through, and
 whose `macquartz` vocabulary its key names are translated through, so a
 recording made on a Mac has nothing older to replay or regenerate against.
-0.15.0 is where the floor stands now, and it is the one step in that list
-nothing here strictly needs: it is the pyguitest this output was last verified
-against, which is the standard this floor has always used. Nothing here
-depends on that going unnoticed: `validate()` checks
+0.15.0 was the step nothing here strictly needed -- the pyguitest this output
+was last verified against, and no more. 0.15.1 is different: a generated
+script under `locators = "element"` (the default) scopes an element search
+with `gui.window_element(title)`, and an older pyguitest there could resolve
+that call to a shell-owned decoration proxy instead of the real window on a
+real GNOME/Mutter desktop, found live -- so this is the first floor step in a
+while an older install can genuinely get wrong rather than merely lack.
+`validate()` checks
 `gui.*` calls against the installed `Session` and what is called on an element
 against the installed `Element`, so a script naming a method this pyguitest does
 not have is reported INVALID when it is generated. `--doctor` prints the

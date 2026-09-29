@@ -966,6 +966,38 @@ def test_a_hit_test_answer_is_not_second_guessed():
     assert target.window is not None
 
 
+def test_resolve_windows_false_withholds_a_window_even_when_the_session_has_one():
+    # macOS composes one backend for both halves and answers window queries
+    # regardless of window_context -- confirmed live, every click there still
+    # carried a window with window_context = False as long as element_context
+    # stayed on. This is the shared gate `_window` reads, which keeps the
+    # setting honest independent of whether a platform's session structurally
+    # lacks the capability (most do, which is why this went unnoticed there).
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7), geometry=(0, 0, 800, 600)
+    )
+    made = DesktopResolver(session=session, elements=False, resolve_windows=False)
+    assert made.resolve(100, 100).window is None
+
+
+def test_resolve_windows_true_is_the_default():
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7), geometry=(0, 0, 800, 600)
+    )
+    made = DesktopResolver(session=session, elements=False)
+    assert made.resolve(100, 100).window is not None
+
+
+def test_resolve_windows_false_also_gates_the_motion_path():
+    # resolve_window (the elementless variant the motion path calls) shares
+    # `_window` with resolve/resolve_hover, so the same flag has to reach it.
+    session = FakeSession(
+        window=FakeWindow(title="Focused", pid=7), geometry=(0, 0, 800, 600)
+    )
+    made = DesktopResolver(session=session, elements=False, resolve_windows=False)
+    assert made.resolve_window(100, 100).window is None
+
+
 # -- elements, now asked of the session --------------------------------------
 
 
