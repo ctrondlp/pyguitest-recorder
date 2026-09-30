@@ -510,6 +510,10 @@ def _declare_user32(lib: Any) -> None:
         ctypes.c_void_p,
     )
     lib.ToUnicodeEx.restype = ctypes.c_int
+    # Read once per start, never inside a hook callback: the toggle keys'
+    # state at the moment recording begins -- see `_KeyboardState.seed`.
+    lib.GetKeyState.argtypes = (ctypes.c_int,)
+    lib.GetKeyState.restype = ctypes.c_short
     # The heartbeat's two calls. `GetLastInputInfo` is the session's own last
     # input -- the one reading that is not this process's opinion -- and
     # `GetTickCount` is the same clock it reports in, which lives in kernel32
@@ -799,6 +803,25 @@ class _KeyboardState:
         """Start with every key up and no modifier latched."""
         self._state = bytearray(256)
 
+    def seed(self, lib: Any) -> None:
+        """Start from the toggle keys' real state rather than from all-off.
+
+        Caps Lock, Num Lock and Scroll Lock are *latched*, so the transitions
+        this shadow sees during a recording say nothing about where they were
+        when it began. Starting them off made a recording begun with Caps Lock
+        on capture its opposite: measured on Windows 11, `a` pressed with Caps
+        Lock on typed `A` in the application and was recorded as text `'a'`,
+        so the replay typed the wrong case. `GetKeyState`'s low bit is the
+        toggle, and asking it here -- once, before the hooks, rather than
+        inside a callback where the documented rule forbids trusting it -- is
+        what gives the shadow the state the keyboard actually has.
+        """
+        for vk_code in _TOGGLE_KEYS:
+            if lib.GetKeyState(vk_code) & _KEYSTATE_TOGGLED:
+                self._state[vk_code] |= _KEYSTATE_TOGGLED
+            else:
+                self._state[vk_code] &= ~_KEYSTATE_TOGGLED
+
     def press(self, vk_code: int) -> None:
         """Record `vk_code` going down: its own byte, generic byte, and toggle bit.
 
@@ -1014,6 +1037,7 @@ class Win32CaptureBackend:
         self._vocabulary = _KeyVocabulary()
         self._state = _KeyboardState()
         self._surrogates = _SurrogatePairs()
+        self._wheel = _WheelAccumulator()
         self._altgr_announced = False
         self._altgr_down = False
         self._last_event: float = 0.0
@@ -1078,6 +1102,7 @@ class Win32CaptureBackend:
         reason = _off_desktop_reason()
         if reason is not None:
             raise CaptureUnavailable(reason)
+        self._state.seed(lib)
         self._keyboard_proc = _HOOKPROC(self._on_keyboard_event)
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
@@ -1411,12 +1436,11 @@ class Win32CaptureBackend:
                 injected=injected,
             )
         if wparam in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
-            detents = _whole_detents(_signed_high_word(info.mouseData))
+            detents = self._wheel.add(wparam, _signed_high_word(info.mouseData), now)
             if detents == 0:
-                # A precision surface reporting less than one detent has
-                # nothing pyguitest's own detent-based scroll() can replay --
-                # see `Win32Backend.scroll`'s own note that a caller sends
-                # whole detents, never fractions of one.
+                # Less than a whole detent so far: pyguitest's scroll() takes
+                # whole detents, so the fraction waits in the accumulator for
+                # the rest of the gesture -- see `_WheelAccumulator`.
                 return None
             dx, dy = (detents, 0) if wparam == WM_MOUSEHWHEEL else (0, detents)
             return RawEvent(
@@ -1522,6 +1546,47 @@ def _signed_high_word(value: int) -> int:
     """
     word = _high_word(value)
     return word - 0x10000 if word >= 0x8000 else word
+
+
+_WHEEL_GESTURE_GAP = 0.5
+"""Seconds without wheel input after which a leftover fraction is dropped.
+
+Longer than the gap between one precision-touchpad report and the next inside a
+gesture, and short enough that a fraction left over from one gesture does not
+complete a detent for the next one a person makes."""
+
+
+class _WheelAccumulator:
+    """Whole detents out of wheel deltas that arrive in fractions of one.
+
+    A precision touchpad reports a two-finger scroll as a stream of deltas well
+    under one detent (`WHEEL_DELTA`, 120) apiece, and each was dropped on its
+    own, so touchpad scrolling never reached a recording on Windows at all --
+    only a mouse wheel's whole notches did. The deltas are summed per axis
+    instead, and every whole detent the running total crosses is emitted, the
+    fraction kept for the next report. A change of direction, or a pause longer
+    than `_WHEEL_GESTURE_GAP`, starts the sum again, so a leftover fraction
+    cannot turn into a detent the person did not scroll.
+
+    Truncation toward zero is `_whole_detents`'s, so the two directions still
+    mirror each other.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing carried on either axis."""
+        self._rest: dict[int, int] = {}
+        self._at: dict[int, float] = {}
+
+    def add(self, axis: int, delta: int, now: float) -> int:
+        """Add one report on `axis`; return the whole detents it completes."""
+        rest = self._rest.get(axis, 0)
+        if now - self._at.get(axis, now) > _WHEEL_GESTURE_GAP or rest * delta < 0:
+            rest = 0
+        total = rest + delta
+        detents = _whole_detents(total)
+        self._rest[axis] = total - detents * WHEEL_DELTA
+        self._at[axis] = now
+        return detents
 
 
 def _whole_detents(delta: int) -> int:

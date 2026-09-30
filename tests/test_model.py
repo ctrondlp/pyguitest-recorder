@@ -598,3 +598,52 @@ def test_loading_recalculates_each_delay_from_the_neighbour_it_ended_up_with():
     loaded = Recording.from_dict(recording.to_dict())
     assert [e.timestamp for e in loaded.events] == [1.0, 2.0, 3.0]
     assert [e.delay for e in loaded.events] == pytest.approx([0.0, 1.0, 1.0])
+
+
+# -- a loaded field must be the type it declares ------------------------------
+#
+# The generator writes numbers into the script as code, unquoted, so a
+# hand-edited recording whose `button` or coordinate was a string ran whatever
+# the string said: `"1); import os; os.system(...); ("` came out as a line of
+# the generated script.
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {
+            "kind": "click",
+            "timestamp": 1.0,
+            "button": "1); import os; (",
+            "target": {"x": 1, "y": 2},
+        },
+        {
+            "kind": "click",
+            "timestamp": 1.0,
+            "target": {"x": "1); import os; (", "y": 2},
+        },
+        {"kind": "scroll", "timestamp": 1.0, "dy": [1], "target": {"x": 1, "y": 2}},
+        {"kind": "click", "timestamp": 1.0, "count": True, "target": {"x": 1, "y": 2}},
+        {
+            "kind": "click",
+            "timestamp": 1.0,
+            "target": {"x": 1, "y": 2, "window": {"geometry": [0, 0, "w", 9]}},
+        },
+    ],
+)
+def test_a_field_that_is_not_its_declared_type_is_refused(entry):
+    from pyguitest_recorder.model.events import event_from_dict
+
+    with pytest.raises(ValueError, match="malformed"):
+        event_from_dict(entry)
+
+
+def test_a_float_coordinate_still_loads():
+    # Coordinates arrive as floats on some platforms, and a float formats as a
+    # number all the same.
+    from pyguitest_recorder.model.events import event_from_dict
+
+    event = event_from_dict(
+        {"kind": "click", "timestamp": 1.0, "target": {"x": 1.5, "y": 2}}
+    )
+    assert event.target.x == 1.5

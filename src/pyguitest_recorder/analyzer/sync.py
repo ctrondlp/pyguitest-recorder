@@ -426,10 +426,22 @@ def _observe(
 
 
 def _window_key(window: WindowRef | None) -> str:
-    """A window's identity for "have we seen this before", or empty for none."""
-    if window is None:
+    """A window's identity for "have we seen this before", or empty for none.
+
+    The same three fields the generator binds a window by (`_window_var`):
+    app id, first-seen title and pid. App id alone is shared by every window
+    of one application -- every TextEdit window on macOS, where it is the
+    owning process's name, and every window of one WM_CLASS on X11 -- so it
+    made a second window of the same application look already seen: no
+    `wait_for_window` where a pause had waited for it to open, and no raise
+    when the recording moved back and forth between two of them. The title is
+    safe in the key because the resolver pins it to what the window was first
+    seen as (see `WindowRef`), so a drifting title does not split one window
+    into several.
+    """
+    if window is None or not (window.app_id or window.title):
         return ""
-    return window.app_id or window.title
+    return f"{window.app_id}\x1f{window.title}\x1f{window.pid}"
 
 
 def _window_label(window: WindowRef | None) -> str:

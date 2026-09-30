@@ -124,7 +124,9 @@ default_timeout = 10.0
 # Ceiling on one inferred wait, however long the observed gap. A wait returns
 # as soon as its condition holds, so this only ever costs a wait that was
 # going to expire anyway; infer_idle above is the rule most likely to reach it
-# with no observed gap behind it, since wait_for_idle is a guess.
+# with no observed gap behind it, since wait_for_idle is a guess. Unlike
+# max_waypoints there is no "no cap" value: 0 and inf are refused, since a
+# wait of zero or infinite seconds is not a wait -- use a large number instead.
 max_timeout = 300.0
 # Multiplier between the pause a recording took and the timeout written. 1 is
 # a literal reading -- a script's numbers are the seconds the recording

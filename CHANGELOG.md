@@ -3,6 +3,84 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [Unreleased]
+
+### Fixed
+
+- **A Windows recording begun with Caps Lock on captured every letter in the
+  wrong case.** The capture backend keeps its own copy of the keyboard state for
+  `ToUnicodeEx` -- the low-level hook is documented as the one place the system's
+  copy cannot be trusted -- and that copy started with every toggle off. Caps Lock,
+  Num Lock and Scroll Lock are latched, so the key-downs seen during a recording
+  say nothing about where they were when it began. Found live on Windows 11: `a`
+  pressed with Caps Lock on typed `A` in the application and was recorded as
+  `'a'`, so the replay typed the wrong case. The three toggles are now read with
+  `GetKeyState` once, when capture starts, and the same keystroke records as `'A'`.
+
+- **Windows of one application were one window to the analyzer.** Sync inference
+  keyed a window by its app id alone, which every window of one application
+  shares -- every TextEdit window on macOS, where the app id is the owning
+  process's name, and every window of one `WM_CLASS` on X11. A second window of the
+  same application therefore looked already seen: a pause spent waiting for it to
+  open got no `wait_for_window` with the time it actually took, and moving back and
+  forth between two of them got no raise, so a replayed click could land on
+  whichever was in front. The generator already bound windows by app id, title and
+  pid for exactly this reason; the analyzer now uses the same identity.
+
+- **A recording file could put code into the script generated from it.** A
+  recording is user-editable JSON -- `--regenerate` exists so one can be trimmed
+  by hand, or received from someone else and re-rendered -- and three routes from
+  it reached the generated source as code rather than as data. A `Comment`'s text
+  or any event's `note` holding a line break ended its `# ...` comment and started
+  a line of code. A numeric field that was not a number -- a click's `button`, a
+  coordinate, a scroll amount -- was written into the call unquoted, so
+  `"button": "1); import os; os.system(...); ("` became a statement. And the
+  environment fields shown in the header docstring were inserted unescaped, so
+  three double quotes in one closed the docstring early. All three were
+  demonstrated with an `os.system` call in the generated file. Loading now checks
+  every field against the type it declares (an integer field still takes a finite
+  float, which some platforms record coordinates as), comments and notes are
+  flattened to one line, and every header line is escaped.
+- **A header naming a Windows path produced a script that did not parse.** The
+  header docstring escaped only triple quotes, so `C:\Users\...` in the `header`
+  setting put a `\U` into the source -- the start of a unicode escape to Python,
+  and a `SyntaxError`. Backslashes are escaped too now.
+- **On Windows, a menu item chosen by an injected click was recorded as whatever
+  was behind the menu.** The recorder names a click when it *consumes* the press,
+  and choosing an item closes the menu, so by then the point answered for the
+  control underneath: a synthetic click on `Actions` and then on `Do Thing`
+  recorded the second as `page tab 'General'`, and the replay never chose the item.
+  A person's click is saved by the tenth of a second the button is held; one
+  injected by another tool -- recording a replay, which is exactly how the live
+  check reads a replay back -- is not. The popup memory that already covered this
+  on Linux was switched off on Windows on the reasoning that UI Automation
+  hit-tests popups itself, which is only true while the popup is still open. It
+  now runs there too, for the shape UI Automation actually publishes (an
+  expandable `menu item` on the menu bar, and a `menu` of the same name parented
+  by the *window*, whose items are destroyed when it closes -- so they are kept as
+  a snapshot). Measured on Windows 11: the same injected clicks now record as
+  `menu item 'Do Thing'`.
+- **Touchpad scrolling never reached a Windows recording.** A precision touchpad
+  reports a two-finger scroll as a stream of wheel deltas well under one detent
+  each, and every report under a whole detent was dropped on its own -- so only a
+  mouse wheel's notches were recorded, and a touchpad scroll left nothing behind.
+  Fractions are now summed per axis and each whole detent the sum crosses is
+  recorded, the remainder carried; a change of direction or a half-second pause
+  starts the sum again, so a leftover fraction cannot become a detent nobody
+  scrolled. Measured live: six 40-unit reports -- two detents' worth -- recorded as
+  two scrolls, where they had recorded as nothing.
+- **The test suite now passes on a Mac.** Four tests exercised a Linux or Windows
+  rule without pinning the platform, so on a Mac host the code correctly took the
+  macOS branch and the tests failed: two about skipping the containment checks on
+  a scaled screen (a Mac never reads its scale as a unit mismatch), and two about
+  falling back from a composed session (a Mac recording asks for one backend, so
+  there is nothing composed to fall back from). They pin the platform they are
+  about now; the code is unchanged. Run on macOS 26.7: 941 passed, 0 failed.
+- **`max_timeout` now says it has no "no cap" value.** `max_waypoints` takes 0 for
+  "uncapped" and `max_timeout` refuses 0 and infinity -- correctly, since the cap is
+  what a `timeout=` is clamped to -- but nothing said so, and the two sit next to
+  each other. The setting's docstring and `config.example.toml` both do now.
+
 ## [0.8.0] — 2026-09-28
 
 ### Added
@@ -486,7 +564,7 @@ hook-loss note** in either run, which is the heartbeat not crying wolf under a r
 desktop's input. Its replay half stopped on a combo box, reproducibly, and that turned out
 to be pyguitest's to fix: `uia.Element.click` had no route for a control whose click *is*
 an expand, and pyguitest 0.14.0 gives it one -- see that package's CHANGELOG and
-`docs/validation.md`. The check was re-run the same day with that in place, and with the
+pyguitest's `docs/validation.md`. The check was re-run the same day with that in place, and with the
 two bugs above fixed so the capture is whole: **the replay passes the dropdown line** and
 carries on through the recorded sequence, stopping further in at a `SysListView32` cell
 whose only advertised action is the same MSAA shim that then declares none. That one is

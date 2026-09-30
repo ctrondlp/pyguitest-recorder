@@ -1063,6 +1063,9 @@ class TestASmallerContextThanAskedForSaysWhy:
             return self._session()
 
         monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        # Off macOS, where a recording asks for one backend and there is no
+        # composed attempt to fall back from.
+        monkeypatch.setattr(Recorder, "_on_macos", lambda _self: False)
         made = Recorder(Settings())
         notes: list[str] = []
         session = made._open_session("", notes)
@@ -1098,6 +1101,7 @@ class TestASmallerContextThanAskedForSaysWhy:
                 return self._session()
 
         monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        monkeypatch.setattr(Recorder, "_on_macos", lambda _self: False)
         notes: list[str] = []
         assert Recorder(Settings())._open_session("", notes) is not None
         (note,) = [n for n in notes if "smaller context" in n]

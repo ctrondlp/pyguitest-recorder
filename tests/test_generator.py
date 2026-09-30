@@ -18,6 +18,7 @@ from pyguitest_recorder.generator import python as generator_module
 from pyguitest_recorder.model import (
     Assertion,
     Click,
+    Comment,
     Drag,
     ElementRef,
     Environment,
@@ -2643,3 +2644,41 @@ class TestTheReplayAsksForTheOptInInputBackend:
 
         monkeypatch.setattr(platforms.sys, "platform", "linux")
         assert "macquartz" in self._connect_line("SessionType.DARWIN")
+
+
+def test_free_text_cannot_leave_its_comment():
+    # A Comment's text and an event's note are prose from a user-editable
+    # file; a line break in either used to end the comment and start code.
+    injected = 'hi\nimport os; os.system("echo PWNED")'
+    source = render(
+        Comment(timestamp=0.0, text=injected),
+        Click(timestamp=1.0, target=Target(x=5, y=6), note=injected),
+    )
+    for line in source.splitlines():
+        if "PWNED" in line:
+            assert line.lstrip().startswith("#"), line
+    ast.parse(source)
+
+
+def test_a_header_naming_a_windows_path_still_parses():
+    # The docstring is a string literal: `C:\Users` put a `\U` escape into it
+    # and the generated script did not parse at all.
+    path = "C:" + chr(92) + "Users" + chr(92) + "someone"
+    recording = Recording(events=[Click(timestamp=0.0, target=Target(x=5, y=6))])
+    source = generate(recording, GeneratorOptions(header=f"Owned by {path}"))
+    assert path in ast.get_docstring(ast.parse(source))
+
+
+def test_a_recordings_environment_cannot_close_the_header():
+    # Environment fields come from the recording file and land inside the
+    # header docstring: three quotes in one closed it and made the rest code.
+    recording = Recording(events=[Click(timestamp=0.0, target=Target(x=5, y=6))])
+    recording.environment.desktop = 'x"""\nimport os; os.system("x")\n"""'
+    tree = ast.parse(generate(recording))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and "system" in ast.unparse(node.func)
+    ]
+    assert calls == []
+    assert 'os.system("x")' in ast.get_docstring(tree)
