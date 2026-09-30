@@ -658,6 +658,26 @@ def _keys(value: Any) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _whole_count(value: Any) -> Any:
+    """`count` as a whole number, or `ValueError` naming it.
+
+    A count is not a coordinate, and the tolerance `_check_fields` documents
+    for coordinates does not carry: the generator repeats the call it renders
+    once per count (`["gui.click()"] * event.count`), so a float reaching it
+    raised `TypeError: can't multiply sequence by non-int` -- past the
+    `ValueError` `--regenerate` promises, naming neither the field nor the
+    event. JSON has one number type, so a file round-tripped through a tool
+    that writes numbers back arrives with `1.0` where the recorder wrote `1`;
+    that is the integer it says, and a fractional one is not a number of times
+    to write a call out at all.
+    """
+    if not isinstance(value, float):
+        return value
+    if not value.is_integer():
+        raise ValueError(f"'count' is not a whole number of times: {value!r}")
+    return int(value)
+
+
 def event_from_dict(data: dict[str, Any]) -> Event:
     """Rebuild an event from its serialized form, by its `kind` tag.
 
@@ -695,6 +715,8 @@ def event_from_dict(data: dict[str, Any]) -> Event:
                 payload[name] = _rebuild(context, payload[name])
         if "keys" in payload:
             payload["keys"] = _keys(payload["keys"])
+        if "count" in payload:
+            payload["count"] = _whole_count(payload["count"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed {kind!r} event ({exc})") from exc
     known = {f.name for f in fields(cls)}

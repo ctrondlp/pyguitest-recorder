@@ -1403,6 +1403,9 @@ class Win32CaptureBackend:
                 injected=injected,
             )
         if wparam in _BUTTON_DOWN:
+            # A press ends a scroll gesture, and the fraction it had not yet
+            # turned into a detent goes with it -- see `_WheelAccumulator`.
+            self._wheel.discard()
             return RawEvent(
                 kind="button_press",
                 timestamp=now,
@@ -1423,6 +1426,9 @@ class Win32CaptureBackend:
                 injected=injected,
             )
         if wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+            if wparam == WM_XBUTTONDOWN:
+                # Ditto: a side button is a press like any other.
+                self._wheel.discard()
             number = _XBUTTON_NUMBER.get(_high_word(info.mouseData))
             if number is None:
                 return None
@@ -1566,7 +1572,8 @@ class _WheelAccumulator:
     instead, and every whole detent the running total crosses is emitted, the
     fraction kept for the next report. A change of direction, or a pause longer
     than `_WHEEL_GESTURE_GAP`, starts the sum again, so a leftover fraction
-    cannot turn into a detent the person did not scroll.
+    cannot turn into a detent the person did not scroll. A button press does
+    too -- see `discard`.
 
     Truncation toward zero is `_whole_detents`'s, so the two directions still
     mirror each other.
@@ -1576,6 +1583,20 @@ class _WheelAccumulator:
         """Start with nothing carried on either axis."""
         self._rest: dict[int, int] = {}
         self._at: dict[int, float] = {}
+
+    def discard(self) -> None:
+        """Forget any carried fraction, for a gesture something else ended.
+
+        A press is the interruption `_WHEEL_GESTURE_GAP` cannot see: the
+        reports either side of a click are close enough together to look like
+        one gesture, so half a detent from before the click completed a detent
+        with the report after it -- and the scroll was recorded at the *later*
+        coordinates, a point the person had not scrolled at. The button that
+        was pressed is what ends that gesture, so the fraction goes with it
+        rather than crossing into the next one.
+        """
+        self._rest.clear()
+        self._at.clear()
 
     def add(self, axis: int, delta: int, now: float) -> int:
         """Add one report on `axis`; return the whole detents it completes."""

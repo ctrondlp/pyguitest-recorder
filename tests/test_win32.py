@@ -382,6 +382,25 @@ class TestTranslateMouse:
         later = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
         assert later is None
 
+    @pytest.mark.parametrize(
+        "down,data",
+        [(WM_LBUTTONDOWN, 0), (WM_XBUTTONDOWN, 1 << 16)],
+    )
+    def test_a_button_press_ends_the_scroll_gesture(self, down, data):
+        # A half detent left over from before a click used to be carried
+        # across it, and the next report completed a detent nobody scrolled
+        # there -- recorded at the *later* coordinates, since a scroll is
+        # placed where the report that completed it arrived. A press ends the
+        # gesture as surely as a pause does, and the fraction goes with it.
+        made = Win32CaptureBackend()
+        before = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert before is None, "less than a detent so far"
+        made._translate_mouse(down, mouse_info(mouse_data=data))
+        first = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert first is None, "the fraction before the press is not carried past it"
+        raw = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert raw.dy == 1
+
     def test_less_than_one_detent_downward_is_dropped_the_same_way(self):
         # The guard above has to work in both directions. Flooring made it
         # one-directional: -40 // 120 is -1, so a touchpad nudge toward the

@@ -2462,14 +2462,17 @@ def _docstring_text(text: str) -> str:
     docstring is an ordinary string literal: a header naming a Windows path,
     `C:\Users\...`, put a `\U` into the source, which Python reads as the
     start of a unicode escape and refuses, so the generated script did not even
-    parse. Then an embedded run of three double quotes, which would otherwise
-    close the docstring early -- and a recording's environment fields reach this
-    too, from a file `--regenerate` invites people to edit: a `desktop` holding
-    three quotes, a line of code and three more put that line into the script
-    as code. Escaping the quotes after the backslashes means the one backslash
-    added in front of them is not itself doubled.
+    parse. Then every double quote, each escaped: a recording's environment
+    fields reach this too, from a file `--regenerate` invites people to edit,
+    and three quotes in one closed the docstring early and made the rest of the
+    field code. Escaping a run of exactly *three* was not enough: a field
+    holding four quotes escaped its first and left the other three bare, which
+    closes the docstring just the same, and five after an open short string
+    reopened one, so the line of code between the two runs landed in the
+    generated module as code. Escaping the quotes after the backslashes means
+    the one backslash added in front of each is not itself doubled.
     """
-    return text.replace("\\", "\\\\").replace('"""', '\\"""')
+    return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _notes(recording: Recording, state: _State) -> list[str]:

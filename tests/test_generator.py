@@ -1672,7 +1672,9 @@ def test_a_header_containing_triple_quotes_does_not_corrupt_the_module():
     source = full(KeyStroke(key="Return"), header='Ticket QA-1234"""')
     assert validate(source) == []
     assert 'gui.tap_key("Return")' in source
-    assert 'Ticket QA-1234\\"""' in source
+    # Each of the three escaped, not just the run itself: see `_docstring_text`
+    # for the field holding four quotes, which the earlier form let through.
+    assert 'Ticket QA-1234\\"\\"\\"' in source
 
 
 @pytest.mark.needs_ruff
@@ -2682,3 +2684,23 @@ def test_a_recordings_environment_cannot_close_the_header():
     ]
     assert calls == []
     assert 'os.system("x")' in ast.get_docstring(tree)
+
+
+def test_a_run_of_quotes_in_a_recording_field_cannot_close_the_header():
+    # Escaping a run of exactly three quotes left the fourth alone, and
+    # `\"` followed by `"""` closes the docstring just as surely: the escaped
+    # quote, three that are not. Four quotes in a field, a line of code, and
+    # five more to reopen a string put that line into the module as a
+    # statement -- three quotes was never the only run that mattered.
+    recording = Recording(events=[Click(timestamp=0.0, target=Target(x=5, y=6))])
+    recording.environment.desktop = (
+        "x" + '"' * 4 + '\nimport os; os.system("echo PWNED")\ns = "x' + '"' * 5
+    )
+    tree = ast.parse(generate(recording))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and "system" in ast.unparse(node.func)
+    ]
+    assert calls == []
+    assert 'os.system("echo PWNED")' in ast.get_docstring(tree)

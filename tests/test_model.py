@@ -647,3 +647,36 @@ def test_a_float_coordinate_still_loads():
         {"kind": "click", "timestamp": 1.0, "target": {"x": 1.5, "y": 2}}
     )
     assert event.target.x == 1.5
+
+
+def test_a_click_count_written_as_a_float_is_made_whole():
+    # JSON has one number type, so a tool that reads a recording and writes it
+    # back turns `"count": 1` into `1.0`. A count is not a coordinate: the
+    # generator repeats the call it renders once per count
+    # (`["gui.click()"] * event.count`), which raised `TypeError: can't
+    # multiply sequence by non-int` -- past the ValueError `--regenerate`
+    # promises and naming neither the field nor the event.
+    from pyguitest_recorder.model.events import event_from_dict
+
+    event = event_from_dict(
+        {"kind": "click", "timestamp": 1.0, "count": 1.0, "target": {"x": 1, "y": 2}}
+    )
+    assert event.count == 1
+    assert isinstance(event.count, int)
+
+
+def test_a_fractional_click_count_is_refused_by_name():
+    # The other half of a count being whole: 1.5 is not a number of times to
+    # write a call out, and it reached the same TypeError even once whole
+    # floats were accepted.
+    from pyguitest_recorder.model.events import event_from_dict
+
+    with pytest.raises(ValueError, match="'count' is not a whole number"):
+        event_from_dict(
+            {
+                "kind": "click",
+                "timestamp": 1.0,
+                "count": 1.5,
+                "target": {"x": 1, "y": 2},
+            }
+        )

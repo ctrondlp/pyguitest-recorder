@@ -66,10 +66,24 @@ was released.
   every field against the type it declares (an integer field still takes a finite
   float, which some platforms record coordinates as), comments and notes are
   flattened to one line, and every header line is escaped.
-- **A header naming a Windows path produced a script that did not parse.** The
-  header docstring escaped only triple quotes, so `C:\Users\...` in the `header`
-  setting put a `\U` into the source -- the start of a unicode escape to Python,
-  and a `SyntaxError`. Backslashes are escaped too now.
+- **A header naming a Windows path produced a script that did not parse, and a
+  header holding a run of quotes could still put code into one.** The header
+  docstring escaped only a run of exactly three quotes, so `C:\Users\...` in the
+  `header` setting put a `\U` into the source -- the start of a unicode escape to
+  Python, and a `SyntaxError` -- and four quotes in a recording's own environment
+  field (a `desktop`, say) came out as one escaped quote followed by three bare
+  ones, which closes the docstring just as surely as three did; five more
+  reopened a short string, and the line of code between the two runs landed in the
+  generated module as code. Backslashes are escaped, and then every double quote.
+- **A recording whose click count was written as `1.0` failed to generate a
+  script.** JSON has one number type, so a file that has been through another tool
+  can hold `1.0` where the recorder wrote `1`, and the generator repeats the click
+  once per count -- `TypeError: can't multiply sequence by non-int`, naming neither
+  the field nor the event and landing outside the `ValueError` `--regenerate`
+  promises. A whole float is now the integer it says, and a fractional one is
+  refused by name. Coordinates keep their floats, which is the different case the
+  type check was widened for: they are formatted into the script as numbers rather
+  than counted with.
 - **On Windows, a menu item chosen by an injected click was recorded as whatever
   was behind the menu.** The recorder names a click when it *consumes* the press,
   and choosing an item closes the menu, so by then the point answered for the
@@ -85,6 +99,23 @@ was released.
   by the *window*, whose items are destroyed when it closes -- so they are kept as
   a snapshot). Measured on Windows 11: the same injected clicks now record as
   `menu item 'Do Thing'`.
+- **A Windows submenu choice was named for whatever was underneath it.** An entry
+  that opens a submenu is an ordinary `menu item`, not a menu owner, so the press
+  that opened the submenu spent the remembered popup *without* remembering the one
+  it opened -- and the press that chose from the submenu was consumed after that
+  had closed too, with nothing left to answer it from. The same misattribution the
+  bullet above fixes, one level down, on an item that is a bare coordinate in the
+  generated script the moment the window moves. The entry is recognised from the
+  `expandable` the snapshot now keeps -- before anything live is read, since over
+  UI Automation a read is a round trip -- and the submenu it opened is remembered
+  once the popup it came from has been spent.
+- **A check recorded on an item in a remembered Windows menu kept no state.** The
+  layout kept for a closed popup is a snapshot, and a snapshot carries what naming
+  an item needs rather than what reading one gives: no text, no checked state. A
+  check made while the menu was still open therefore raised on the first attribute
+  read, and the recorder's own rule -- an unreadable state is no state -- dropped
+  it to "this is showing", with the live item sitting right there. The live item is
+  looked up again for the state and paired with the snapshot by role and name.
 - **Touchpad scrolling never reached a Windows recording.** A precision touchpad
   reports a two-finger scroll as a stream of wheel deltas well under one detent
   each, and every report under a whole detent was dropped on its own -- so only a
@@ -93,7 +124,11 @@ was released.
   recorded, the remainder carried; a change of direction or a half-second pause
   starts the sum again, so a leftover fraction cannot become a detent nobody
   scrolled. Measured live: six 40-unit reports -- two detents' worth -- recorded as
-  two scrolls, where they had recorded as nothing.
+  two scrolls, where they had recorded as nothing. A button press ends the sum too,
+  and that one is not an edge case: the reports either side of a click are close
+  enough together to look like a single gesture, so half a detent from before the
+  click completed a detent with the report after it, and the scroll was recorded at
+  the *later* coordinates -- a point the person had not scrolled at.
 - **The test suite now passes on a Mac.** Four tests exercised a Linux or Windows
   rule without pinning the platform, so on a Mac host the code correctly took the
   macOS branch and the tests failed: two about skipping the containment checks on
