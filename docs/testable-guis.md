@@ -1,25 +1,45 @@
 # How to build a GUI that can be tested
 
-**Who this is for:** application developers. It is written to be handed to you
-by whoever has to automate your UI, and it asks for about a day of work spread
-across a codebase — most of it in two sittings.
+**Who this is for:** application developers. Someone who automates or tests
+your UI is probably handing you this page, and the request is modest: give
+your controls accurate names, roles and states. Most of the value is in the
+first half hour, and the rest can be done a screen at a time.
 
-**The short version:** accessibility is the *foundation* of robust GUI
-automation. A test can find your widgets the same way a screen reader does —
-through the accessibility tree — and when it can, it clicks a button by name
-and survives redesigns. When it can't, it falls back to pixel coordinates, and
-those break the next time anything moves.
+**Why it works:** automation tools such as
+[pyguitest](https://github.com/ctrondlp/pyguitest) and its recorder find your
+widgets the way a screen reader does, through the platform's accessibility
+tree. When the tree is accurate, a test clicks "the button named Save" and
+survives redesigns, theme changes and window moves. When it is not, the test
+falls back to pixel coordinates, which break the next time anything moves.
 
-Two qualifications, so the rest of this document is read accurately.
-Accessibility and automation are not the same thing: a test can also match a
-window title, compare an image, or click a coordinate, so a badly-labelled
-application is harder to test rather than impossible. And not everything the
-accessibility tree exposes is worth automating against — a name that changes
-with state is published, visible, and still useless to a test.
+The same work makes your application usable with a screen reader, so this is
+not test-only scaffolding: what a test needs is mostly what a blind or
+low-vision user needs. You do not need pyguitest to do any of it; the
+[last section](#how-to-check-your-own-work) lists free inspectors for every
+platform.
 
-None of this is test-only scaffolding. Every item below is the accessibility
-work the application already owed. Testability is what you get for free once
-it's done.
+Two caveats, so the rest is read accurately. Accessibility and automation are
+not the same thing: a test can also match a window title, compare an image or
+click a coordinate, so a badly labelled application is harder to test, not
+impossible. And not everything the tree exposes is worth testing against: a
+name that changes with state is published, visible and still useless to a
+test.
+
+**Contents:**
+[Start here](#start-here) ·
+[The mental model](#the-mental-model-five-things-every-widget-publishes) ·
+[Why it matters](#why-it-matters-the-failure-is-silent) ·
+[1. Names](#1-name-every-control-a-user-acts-on) ·
+[2. Unique names](#2-make-names-unique-within-a-window) ·
+[3. Widget types](#3-use-the-widget-type-that-matches-the-behaviour) ·
+[4. Stable names](#4-keep-names-stable-when-state-changes) ·
+[5. Window identity](#5-give-the-window-a-stable-identity) ·
+[6. Positions](#6-report-widget-positions-where-your-toolkit-allows) ·
+[7. Busy and ready](#7-make-busy-and-ready-visible) ·
+[8. Focus and actions](#8-support-keyboard-focus-and-actions) ·
+[An empty tree](#when-it-isnt-your-code-an-empty-tree) ·
+[Checking your work](#how-to-check-your-own-work) ·
+[Checklist](#checklist)
 
 ---
 
@@ -42,15 +62,10 @@ The two that buy the most, in this order:
    separate label widget, and unless you say the two are related the field is
    published as an unnamed entry.
 
-Then look at what you actually published, rather than assuming it worked:
-
-```sh
-pyguitest inspect --window "MyApp"
-```
-
-`--window` takes a regex and narrows the listing to windows whose **title**
-matches it, so quote enough of the title to be unambiguous. If your Save
-button turns up in that output under the name you expect, a test can find it.
+Then look at what you actually published, rather than assuming it worked,
+with `pyguitest inspect --window "MyApp"` or any of the inspectors under
+[How to check your own work](#how-to-check-your-own-work). If your Save
+button turns up there under the name you expect, a test can find it.
 
 ### If you have an afternoon
 
@@ -94,9 +109,9 @@ asserts on. Relationships are what save it when a name alone is ambiguous.
 
 ## Why it matters: the failure is silent
 
-The frustrating part of accessibility metadata is that nothing complains when
-it's wrong. There is no error, no warning in the console, no failing build. A
-test suite just quietly gets worse:
+Accessibility metadata has a frustrating property: nothing complains when it
+is wrong. There is no error, no console warning and no failing build. A test
+suite just quietly gets worse:
 
 | What the app publishes | What the test can do | How long it keeps working |
 |---|---|---|
@@ -224,6 +239,14 @@ saveButton.setAccessibilityHelp("Write the document to disk")
 // SwiftUI
 Button("Save", action: save)
     .accessibilityLabel("Save")
+```
+
+```html
+<!-- Web content, including Electron -->
+<button aria-label="Save"><svg aria-hidden="true">…</svg></button>
+
+<label for="email">Email</label>
+<input id="email" type="email">
 ```
 
 Standard WinForms and WPF controls, and standard AppKit controls
@@ -380,8 +403,16 @@ modern desktop, two windows side by side may not agree.
 | A **native Wayland** client | The `xdg_toplevel` app id — one string, conventionally your reverse-DNS application id | `Gtk.Application(application_id=...)`, `QGuiApplication::setDesktopFileName`, or your toolkit's equivalent |
 | An **X11** client, on a real X session | `WM_CLASS`, specifically the **class** half | The toolkit sets it from your program/application name; `xprop WM_CLASS` shows what you actually shipped |
 | An **X11 client under XWayland** (an X11 app in a Wayland session) | `WM_CLASS` again — XWayland clients are X11 clients, and the compositor reports them that way | Same as above |
-| A **Windows** window | The window's **class name** (`GetClassName`) — one string per window, and usually toolkit-generated rather than something you choose (`Notepad`, `Chrome_WidgetWin_1`) | Not normally developer-set; a custom Win32 class name comes from `RegisterClassEx`'s `lpszClassName`. WPF and WinForms generate their own and do not expose a way to override it |
-| A **macOS** window | The owning application's **display name** (`kCGWindowOwnerName`, e.g. `TextEdit`) — one name per *process*, shared by every window it owns, not a per-window id the way the rows above are | `CFBundleName` or `CFBundleDisplayName` in `Info.plist`; the executable's own name for a binary with no bundle |
+
+On Windows and macOS there is no per-application id to choose. A Windows
+window is identified by its **class name** (`GetClassName`), which the toolkit
+generates (`Notepad`, `Chrome_WidgetWin_1`); a custom Win32 class name comes
+from `RegisterClassEx`. A macOS window is identified by its owning
+application's **display name** (`kCGWindowOwnerName`, from `CFBundleName` or
+`CFBundleDisplayName` in `Info.plist`), which every window the process owns
+shares. Both are coarser than a Wayland app id or an X11 class: they do not say
+*which* window of an application you are looking at, so there the title, or the
+element tree scoped by `pid`, tells two windows of the same application apart.
 
 The XWayland row is the one that surprises people: in a single Wayland
 session, native clients are identified by their Wayland app id and XWayland
@@ -409,92 +440,71 @@ Set neither and the property is simply absent — it is optional in ICCCM — so
 tools report an empty app id and your window can only be found by the title
 you were just told not to rely on.
 
-Windows and macOS have no equivalent gap — a window always has a class name,
-and a process always has some name CoreGraphics can read — but both are
-coarser than a Wayland app id or an X11 class. A Windows class name is
-usually shared by every window your toolkit creates rather than chosen per
-application, and a macOS process name says nothing about *which* window of
-several you are looking at. Neither platform gives you the reverse-DNS-style
-per-application id Wayland does; the title, or the element tree scoped by
-`pid` (see [section 6](#6-report-positions-in-screen-coordinates)), is what
-tells two windows of the same application apart on either of them.
+## 6. Report widget positions, where your toolkit allows
 
-## 6. Report positions in screen coordinates
+Mostly this one is your toolkit's job. It is listed because of how badly it
+fails, not because you are likely to cause it. A test that asks "what widget
+is at this point?" relies on each widget reporting where it is. When
+positions are missing or in the wrong coordinate space, a tool that trusts
+them clicks the wrong widget and the test still passes; a tool that checks
+falls back to raw coordinates, and your application is testable only by
+position.
 
-This is the one that produces tests that pass while doing the wrong thing, so
-it's worth a direct check.
+What has been measured, so you know what to expect:
 
-When something asks your widget where it is, the answer must be where it
-actually is *on the screen* — not relative to the window, and not `(0, 0)`.
+- **GTK 4 applications reported every widget at `(0, 0)`**, with the correct
+  size: gnome-calculator's `C`, `↑n` and `7` buttons all claimed
+  `(0, 0, 64, 44)`. "What is at this point?" then answered with the window
+  for most sampled points (48 of 49 in gnome-calculator, 42 of 49 in baobab,
+  48 of 49 in gnome-text-editor). That was one Fedora 45 stack (details at the
+  end); other toolkit releases may differ.
+- **Native Wayland clients cannot know where their window is on the screen**,
+  so the positions they publish are relative to the window. The same GTK 3
+  application reported a button at `(516, 183)` through XWayland and at
+  `(32, 23)` natively, with the window at `(510, 183)`.
 
-This isn't hypothetical, and it is not one application's bug. Measured on
-Fedora 45 (the exact toolkit and at-spi versions are in the note at the end)
-across three unrelated GTK 4 applications — gnome-calculator, baobab and
-gnome-text-editor — **every widget reported its correct size at position
-`(0, 0)`**. gnome-calculator's `C`, `↑n` and `7` buttons all claimed
-`(0, 0, 64, 44)`.
+Neither is something an application sets wrong, and a tool cannot recover a
+position that was never published. What you can do:
 
-The size is right and the position is missing, which has a specific
-consequence: "what is at this point?" cannot distinguish two widgets, so it
-walks back up and answers with the *window*. It did that for 48 of 49 sampled
-points in gnome-calculator, 42 of 49 in baobab, 48 of 49 in gnome-text-editor.
-Nothing errors. A tool that trusts it clicks confidently on the wrong widget;
-a tool that checks, like this one, falls back to raw coordinates and your
-application becomes untestable by name.
-
-Mostly this is your toolkit's job. On the GTK 4 versions measured above it was
-*not* being done, and there is nothing a tool higher up can recover — a
-position that was never published cannot be inferred. Treat that as a finding
-about those versions rather than a permanent property of GTK 4: it is the kind
-of thing that gets fixed upstream without an announcement, so **measure your
-own stack before concluding anything**:
+- **Prefer names and actions to geometry in your own tests.**
+  `gui.button("Save").click()` uses no coordinates, so none of the above
+  touches it.
+- **If you draw your own widgets**, publish their bounds through your
+  toolkit's accessibility API, in the coordinate space it asks for.
+- **Check your own stack**, on a second monitor and at a non-100% scale
+  factor, where the remaining bugs live:
 
 ```python
 import pyguitest
 
 with pyguitest.connect() as gui:
-    # window_element matches a window *title*: a plain string is a literal
-    # substring match, a compiled re.Pattern is a regex. Section 5 is the page
-    # for what to match on instead when the title is not trustworthy.
+    # A plain string matches a window title as a literal substring; pass a
+    # compiled re.Pattern for a regex.
     window = gui.window_element("MyApp")
     for element in gui.elements(within=window):
         print(element.role, element.name, gui.extents(element))
 ```
 
-Every widget reporting `x` and `y` of `0` while the sizes look right is the
+Every widget reporting `x` and `y` of `0` with plausible sizes is the
 signature. A window that genuinely sits at the top-left corner of the screen
-is the one false positive — move it first.
+is the one false positive, so move it first.
 
-If that raises `WindowNotFound` for a window that is plainly on screen, look
-it up by app id instead of retrying the title — it does not drift, and
-several ids may be given where the two protocols name a window differently
-(which value that is on your desktop is
+If `window_element` raises `WindowNotFound` for a window that is plainly on
+screen, look it up by app id instead of by title (see
 [section 5](#which-value-is-the-app-id)):
 
 ```python
 window = gui.find_window(app_id="org.example.MyApp")
 ```
 
-If the title you passed was just stale (a window element's name *is* its
-title, read at the moment of the lookup), `window.title` now has the current
-one, and `gui.window_element(window.title)` finds it.
-
-If instead the toolkit publishes no name for the window at all, that still
-won't help: a native-Wayland GTK 4 frame node has been measured with an empty
-name, every widget inside it still enumerable and placed correctly.
-`window_element` matches on name, so there is nothing to match — the same
-class of toolkit gap as the position bug above, not something the
-application sets and gets wrong. Scope by process instead, since every
+If the toolkit publishes no name for the window at all (a native-Wayland GTK 4
+frame has been seen with an empty name), scope by process instead, since every
 element still reports its own `pid`:
 
 ```python
 for element in gui.elements(predicate=lambda e: e.pid == window.pid):
     print(element.role, element.name, gui.extents(element))
 ```
-
-Check it directly if you maintain custom widgets, and check it **on a second
-monitor and at a non-100% scale factor**, which is where the remaining bugs
-live.
 
 ## 7. Make "busy" and "ready" visible
 
@@ -528,8 +538,9 @@ So make progress observable:
   still identifies a widget when hit-testing cannot (section 6), because focus
   involves no geometry: a GTK 4 application whose clicks all degrade to
   coordinates still gets `gui.text_field("Name").set_text(...)` for its
-  typing, purely because focus is reported correctly. Verified on a bare X
-  server, where Tab walks real widgets and each one reports itself focused.
+  typing, purely because focus is reported correctly. Checked on a bare X
+  server and on GNOME, where Tab walks real widgets and each one reports
+  itself focused.
 - **Expose the actions a widget supports** (click, press, toggle) rather than
   only reacting to raw mouse events. Tests can then invoke the action directly,
   which is faster and doesn't depend on the pointer being anywhere in
@@ -591,10 +602,18 @@ specific:
 
 ## How to check your own work
 
-**Look at the tree.** `pyguitest inspect` prints every widget on the desktop
-with its type, name and state (`--json` for a diffable version). If you can't
-find your button in that output by name, no test will either. `--window` takes
-a regex and narrows the listing to windows whose **title** matches it:
+**Look at the tree.** If you cannot find your button in an inspector by
+name, no test will either. Use whichever fits your platform:
+
+| Platform | Inspector |
+|---|---|
+| Linux | `pyguitest inspect`, or Accerciser |
+| Windows | Accessibility Insights for Windows, or Inspect.exe from the Windows SDK |
+| macOS | Accessibility Inspector, in Xcode's developer tools |
+
+`pyguitest inspect` prints every widget on the desktop with its type, name and
+state (`--json` for a diffable version). `--window` takes a regex and narrows
+the listing to windows whose **title** matches it:
 
 ```sh
 pyguitest inspect --window "MyApp"
@@ -660,6 +679,21 @@ never joined the tree — lands in a note block at the end, pointed to from the
 top of the file. So the list of things to fix writes itself, and it is
 written by the same rules a test would be held to.
 
+## Checklist
+
+A version to paste into a pull-request template:
+
+- [ ] Every icon-only button has an accessible name.
+- [ ] Every text field is connected to its visible label (or named directly).
+- [ ] Names are unique within each window; per-row actions have a named row.
+- [ ] Names do not change with state; state is exposed as state or value.
+- [ ] Custom widgets use the platform's widget type (or publish role, name
+      and bounds themselves).
+- [ ] The window has a stable app id and real dialog titles.
+- [ ] Busy work is visible: a status message, a disabled button, or both.
+- [ ] Keyboard focus is reported, and text fields can be set programmatically.
+- [ ] A screen of your app passes `gui.assert_accessible(within=window)`.
+
 ---
 
 <details>
@@ -676,13 +710,10 @@ Editor; that same application's native-Wayland frame publishing an empty
 AT-SPI name while every element belonging to its process stayed enumerable
 and correctly placed, confirmed on KDE Plasma 6 / KWin (2026-09-09).
 
-Focus reporting has been measured twice, with opposite results, and both are
-true: **no** per-widget focus on GNOME Shell 50.4 Wayland across three toolkits
-(the shell holds it session-wide), and **working** per-widget focus for GTK 4
-on a bare X server with no shell running (2026-09-06). So section 8 is worth
-doing even though a tool cannot always benefit from it — what breaks it is the
-desktop, not your application.
-Details in pyguitest's
+Per-widget keyboard focus is published on GNOME (GTK 3 through XWayland and
+GTK 4 natively) and on a bare X server with no shell running; an earlier
+version of this document said GNOME did not, which was a bug in the tool
+reading it, not in GNOME. Details in pyguitest's
 [validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
 
 Taken from toolkit documentation rather than verified here: the GTK 3/4 and Qt
@@ -690,15 +721,13 @@ API calls and UI-file syntax, and the Qt environment variables. They're the
 standard forms, but check them against your toolkit version before treating a
 failure as your application's fault.
 
-**Everything about Windows and macOS in this document is taken from platform
-documentation the same way, and none of it has had the live check the
-GNOME/KDE/X11 claims above got.** The WPF, WinForms, and AppKit/SwiftUI API
-calls, the `GetClassName`/`kCGWindowOwnerName` app-id mechanisms, and the
-custom-control causes of an empty tree are all standard, documented behavior
-— but pyguitest's own
+**The Windows, macOS and web advice is taken from platform documentation in
+the same way, and has not had the live check the GNOME, KDE and X11 claims
+did.** That covers the WPF, WinForms, AppKit, SwiftUI and ARIA snippets, the
+`GetClassName` and `kCGWindowOwnerName` app-id mechanisms, and the
+custom-control causes of an empty tree. Treat it as a starting point rather
+than a measurement; pyguitest's
 [validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md)
-is the record of what a real Windows and macOS session actually served, and
-this document's specific advice for those two platforms has not yet had that
-same real-hardware check. Treat it as a starting point, not a measurement.
+records what real Windows and macOS sessions have actually served.
 
 </details>
