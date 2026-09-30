@@ -88,7 +88,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.15"
+PROFILE = "pyguitest-0.16"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -96,12 +96,24 @@ checked against, not with this package's own version. It is what tells a
 reader of a two-year-old generated script which API it was written for, and
 what `--regenerate` re-renders against when that API has moved on.
 
-0.15.0 is the release whose `WINDOW_CAPTURE` reaches macOS, so the three
+0.15.0 was the release whose `WINDOW_CAPTURE` reaches macOS, so the three
 platforms this recorder captures on are the three whose native per-window
-capture the library now has. Nothing this generator emits needs it -- a script
-generated here still replays under 0.14.0 -- but the header is a claim about
-what was checked, and the check was against this, which is the same claim
-`pyproject.toml`'s floor makes.
+capture the library now has. Nothing this generator emits needed it -- a
+script generated here still replays under 0.14.0 -- but the header is a claim
+about what was checked, and the check was against this, which is the same
+claim `pyproject.toml`'s floor makes.
+
+0.16.0 is the first step in a while whose changes reach calls this generator
+emits rather than only calls it never writes. Five of them: a Windows
+`gui.tap_key(...)` carried no scan code and no extended bit, so `Home`, an
+arrow or Right Ctrl arrived as a key no keyboard sends; `expect_checked` read
+a selected Windows radio button as unchecked; macOS `double_click()` sent two
+single clicks, so a Cocoa application saw no double click at all;
+`gui.drag(...)` moved the pointer without posting the drag events a held
+button requires; and `find_window`/`wait_for_window` named the window behind
+one it shared a title with. Nothing emitted here names a method 0.15.1
+lacked, so this is not a step `validate()` could have caught -- an older
+install simply gets one of those calls wrong, which is what the floor is for.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached

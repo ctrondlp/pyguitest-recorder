@@ -3,7 +3,32 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
-## [Unreleased]
+## [0.8.1] — 2026-09-30
+
+### Changed
+
+- **`PROFILE` and the `pyguitest` floor both move to 0.16.0, and this is a step
+  an older install gets wrong rather than one it merely lacks.** The header a
+  generated script carries is a claim about the API its calls were checked
+  against, so it follows the pyguitest this generator was last validated against,
+  and the floor follows it there — the convention 0.15.0 followed when nothing
+  emitted here needed it. 0.16.0 is different: five calls in a generated script
+  changed behaviour there. A Windows `gui.tap_key(...)` now carries the scan code
+  and extended bit the layout gives the key, where it went out with neither and
+  `Home`, an arrow or Right Ctrl arrived as a key no keyboard sends;
+  `expect_checked` reads a selected radio button as checked, where it answered
+  None and a generated check failed against a button that was plainly selected;
+  macOS `double_click()` counts its clicks, where AppKit read two clicks of count
+  1 and double-clicking a word selected nothing; `gui.drag(...)` posts drag
+  events where it posted moves, which the window server does not deliver as a
+  drag at all; and `find_window`/`wait_for_window` name the topmost window, where
+  they named the one behind. `window_element()`, whose 4.24s per call is what
+  0.15.1's step was about, is 0.11s. An install left at 0.15.1 therefore has to
+  move up to run *this* recorder even though most of what it writes would still
+  run there — the whole cost, stated rather than discovered. Landing it wants
+  pyguitest 0.16.0 *published*, not merely tagged: CI here installs pyguitest
+  from PyPI like every other job, so until that release exists the requirement
+  cannot resolve at all.
 
 ### Fixed
 

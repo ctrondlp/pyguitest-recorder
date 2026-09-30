@@ -192,7 +192,23 @@ dependencies = [
     # within it. `window_element` now prefers the process pyguitest's own
     # window list names, so a script generated against this floor gets a
     # `pyguitest` that resolves the correct one.
-    "pyguitest>=0.15.1",
+    #
+    # 0.16.0 raises it for five calls this generator emits, every one of them
+    # a call an older pyguitest gets wrong rather than one it lacks -- so
+    # `validate()` cannot catch it the way it catches a missing method:
+    # a Windows `gui.tap_key(...)` went out with no scan code and no extended
+    # bit, so `Home`, an arrow or Right Ctrl arrived as a key no keyboard
+    # sends; `expect_checked` read a selected radio button as unchecked, so a
+    # generated check failed against an application doing the right thing;
+    # macOS `double_click()` sent two single clicks, which AppKit reads as two
+    # clicks of count 1; `gui.drag(...)` posted moves where a held button
+    # needs drag events, so the drag went nowhere; and
+    # `find_window`/`wait_for_window` named the rearmost of two windows
+    # sharing a title. `window_element()`, the call 0.15.1's step was about,
+    # also stopped taking 4.24s per call on Windows. The floor keeps the
+    # meaning every step above gives it: the release this output was verified
+    # against, not the oldest that might work.
+    "pyguitest>=0.16.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]

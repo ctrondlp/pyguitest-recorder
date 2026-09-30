@@ -252,7 +252,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.15.1 or newer is required
+older than the recording expects. **pyguitest 0.16.0 or newer is required
 outright** — the floor the generated code is verified against. Generated
 scripts may call `Element.expand()`/`.collapse()` or read `.selectable`
 directly (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and
@@ -264,11 +264,19 @@ before it there is no `macos` backend for the recording's windows and
 elements to be resolved through, and no `macquartz` key vocabulary for its
 key names to be translated through. 0.15.0 was where the floor stood with
 nothing generated here actually needing what it added -- simply the release
-the output was last verified against. 0.15.1 is a real need: a script under
+the output was last verified against. 0.15.1 was a real need: a script under
 `locators = "element"` (the default) scopes its search with
 `gui.window_element(title)`, and an older pyguitest there could resolve that
 call to a shell-owned decoration proxy instead of the real window on a real
-GNOME/Mutter desktop, found live. Older floors matter as well:
+GNOME/Mutter desktop, found live. 0.16.0 is a real need in the same silent
+way: `gui.tap_key(...)` on Windows injected keys that carried no scan code and
+no extended bit, `expect_checked` read a selected radio button as unchecked,
+macOS `double_click()` sent two single clicks where `gui.drag()` posted no drag
+events, and `find_window`/`wait_for_window` could name the window behind
+another with the same title. None of that raises on its own -- a script left on
+0.15.1 presses a key the layout does not spell, or is told a control is not set
+when it plainly is -- which is why the floor is what it is. Older floors matter
+as well:
 `gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
