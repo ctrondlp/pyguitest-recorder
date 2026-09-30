@@ -22,9 +22,10 @@ absolute one.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from enum import Enum
-from typing import Any, ClassVar
+from types import UnionType
+from typing import Any, ClassVar, Union, get_args, get_origin, get_type_hints
 
 __all__ = [
     "Origin",
@@ -657,6 +658,26 @@ def _keys(value: Any) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _whole_count(value: Any) -> Any:
+    """`count` as a whole number, or `ValueError` naming it.
+
+    A count is not a coordinate, and the tolerance `_check_fields` documents
+    for coordinates does not carry: the generator repeats the call it renders
+    once per count (`["gui.click()"] * event.count`), so a float reaching it
+    raised `TypeError: can't multiply sequence by non-int` -- past the
+    `ValueError` `--regenerate` promises, naming neither the field nor the
+    event. JSON has one number type, so a file round-tripped through a tool
+    that writes numbers back arrives with `1.0` where the recorder wrote `1`;
+    that is the integer it says, and a fractional one is not a number of times
+    to write a call out at all.
+    """
+    if not isinstance(value, float):
+        return value
+    if not value.is_integer():
+        raise ValueError(f"'count' is not a whole number of times: {value!r}")
+    return int(value)
+
+
 def event_from_dict(data: dict[str, Any]) -> Event:
     """Rebuild an event from its serialized form, by its `kind` tag.
 
@@ -694,10 +715,89 @@ def event_from_dict(data: dict[str, Any]) -> Event:
                 payload[name] = _rebuild(context, payload[name])
         if "keys" in payload:
             payload["keys"] = _keys(payload["keys"])
+        if "count" in payload:
+            payload["count"] = _whole_count(payload["count"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed {kind!r} event ({exc})") from exc
     known = {f.name for f in fields(cls)}
     try:
-        return cls(**{k: v for k, v in payload.items() if k in known})
+        event = cls(**{k: v for k, v in payload.items() if k in known})
     except TypeError as exc:
         raise ValueError(f"malformed {kind!r} event ({exc})") from exc
+    _check_fields(event, kind)
+    return event
+
+
+def _check_fields(obj: Any, where: str) -> None:
+    """Refuse a loaded object whose fields are not the types they declare.
+
+    Not tidiness: the generator writes numbers into the script as *code*,
+    unquoted -- `gui.double_click({button})`, `gui.move_mouse({x}, {y})` -- so
+    a hand-edited recording whose `button` was the string
+    `"1); import os; os.system('...'); ("` produced a script that ran it. The
+    strings are safe already (they go out through `_literal`), and so is every
+    number that is a number; what this refuses is a field that is neither what
+    it says nor anything a recording writes. An `int` field accepts a finite
+    float too, since coordinates arrive as floats on some platforms and a float
+    formats as a number all the same.
+
+    Recurses into the nested context objects, which is where the coordinates
+    and the window and element fields live.
+    """
+    hints = get_type_hints(type(obj))
+    for field_ in fields(obj):
+        value = getattr(obj, field_.name)
+        hint = hints[field_.name]
+        if not _conforms(value, hint):
+            shown = repr(value)
+            if len(shown) > 60:
+                shown = f"{shown[:57]}..."
+            raise ValueError(
+                f"malformed {where!r} event: {field_.name!r} is {shown}, which is "
+                f"not {_type_name(hint)}"
+            )
+        for item in value if isinstance(value, tuple) else (value,):
+            if is_dataclass(item) and not isinstance(item, type):
+                _check_fields(item, where)
+
+
+def _is_number(value: Any) -> bool:
+    """A real, finite number -- never a bool, which is an int to Python."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _conforms(value: Any, hint: Any) -> bool:
+    """Whether `value` is what the annotation `hint` says, as JSON can carry it."""
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        return any(_conforms(value, arg) for arg in get_args(hint))
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        args = get_args(hint)
+        if len(args) == 2 and args[1] is Ellipsis:
+            return all(_conforms(item, args[0]) for item in value)
+        return len(value) == len(args) and all(
+            _conforms(item, arg) for item, arg in zip(value, args, strict=True)
+        )
+    if hint is type(None):
+        return value is None
+    if hint is bool:
+        return isinstance(value, bool)
+    if hint in (int, float):
+        return _is_number(value)
+    if hint is str:
+        return isinstance(value, str)
+    if isinstance(hint, type):
+        return isinstance(value, hint)
+    return True
+
+
+def _type_name(hint: Any) -> str:
+    """An annotation as a reader would write it, for the error message."""
+    return getattr(hint, "__name__", None) or str(hint).replace("typing.", "")

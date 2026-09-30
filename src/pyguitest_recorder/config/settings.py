@@ -249,6 +249,12 @@ class Settings:
     `SyncOptions.max_timeout`, which this becomes. Lower it for a suite that
     would rather fail fast than sit out a five-minute guess; the one rule that
     routinely reaches it with no observed gap behind it is `infer_idle`.
+
+    There is no "no cap" spelling, unlike `max_waypoints`, where 0 means none:
+    zero, a negative number and infinity are all refused, because the cap is
+    what `timeout=` is clamped to and a wait of zero or infinite seconds is not
+    a wait. A suite that never wants a ceiling in practice sets a large finite
+    number instead.
     """
     timeout_factor: float = 1.0
     """Multiplier between the pause a recording took and the timeout written.

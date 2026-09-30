@@ -1063,6 +1063,11 @@ class TestASmallerContextThanAskedForSaysWhy:
             return self._session()
 
         monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        # Pinned off macOS: a Mac recording asks for one backend and there is
+        # no composed attempt to fall back from, so the composed pair followed
+        # by each half alone -- what this test is about -- is the path every
+        # other platform takes.
+        monkeypatch.setattr(Recorder, "_on_macos", lambda _self: False)
         made = Recorder(Settings())
         notes: list[str] = []
         session = made._open_session("", notes)
@@ -1098,6 +1103,7 @@ class TestASmallerContextThanAskedForSaysWhy:
                 return self._session()
 
         monkeypatch.setattr(pyguitest, "connect", fake_connect)
+        monkeypatch.setattr(Recorder, "_on_macos", lambda _self: False)
         notes: list[str] = []
         assert Recorder(Settings())._open_session("", notes) is not None
         (note,) = [n for n in notes if "smaller context" in n]

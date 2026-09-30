@@ -93,8 +93,10 @@ class FakeUser32:
     under it.
     """
 
-    def __init__(self, hook_fails=False, text="", layout=0xABCD):
+    def __init__(self, hook_fails=False, text="", layout=0xABCD, toggled=()):
         self.hook_fails = hook_fails
+        self.toggled = set(toggled)
+        """Virtual keys whose toggle bit `GetKeyState` reports as set."""
         self.text = text
         self.layout = layout
         self.hooked = []
@@ -146,6 +148,9 @@ class FakeUser32:
 
     def GetKeyboardLayout(self, _thread_id):
         return self.layout
+
+    def GetKeyState(self, vk_code):
+        return 1 if vk_code in self.toggled else 0
 
     def ToUnicodeEx(self, _vk, _scan, _state, buffer, _size, flags, _layout):
         self.tounicode_flags.append(flags)
@@ -350,6 +355,52 @@ class TestTranslateMouse:
         raw = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=40 << 16))
         assert raw is None
 
+    def test_touchpad_fractions_add_up_to_detents(self):
+        # A precision touchpad reports a two-finger scroll as deltas well under
+        # one detent each; dropped one by one, touchpad scrolling never reached
+        # a recording at all.
+        made = Win32CaptureBackend()
+        got = [
+            made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=40 << 16))
+            for _ in range(6)
+        ]
+        assert [raw.dy if raw else 0 for raw in got] == [0, 0, 1, 0, 0, 1]
+
+    def test_a_change_of_direction_starts_the_sum_again(self):
+        made = Win32CaptureBackend()
+        made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        down = (-80 & 0xFFFF) << 16
+        assert made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=down)) is None
+        raw = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=down))
+        assert raw.dy == -1
+
+    def test_a_leftover_fraction_does_not_outlive_the_gesture(self, monkeypatch):
+        made = Win32CaptureBackend()
+        clock = iter([10.0, 10.0 + win32_module._WHEEL_GESTURE_GAP + 0.1])
+        monkeypatch.setattr(win32_module, "_now", lambda: next(clock))
+        made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        later = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert later is None
+
+    @pytest.mark.parametrize(
+        "down,data",
+        [(WM_LBUTTONDOWN, 0), (WM_XBUTTONDOWN, 1 << 16)],
+    )
+    def test_a_button_press_ends_the_scroll_gesture(self, down, data):
+        # A half detent left over from before a click used to be carried
+        # across it, and the next report completed a detent nobody scrolled
+        # there -- recorded at the *later* coordinates, since a scroll is
+        # placed where the report that completed it arrived. A press ends the
+        # gesture as surely as a pause does, and the fraction goes with it.
+        made = Win32CaptureBackend()
+        before = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert before is None, "less than a detent so far"
+        made._translate_mouse(down, mouse_info(mouse_data=data))
+        first = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert first is None, "the fraction before the press is not carried past it"
+        raw = made._translate_mouse(WM_MOUSEWHEEL, mouse_info(mouse_data=80 << 16))
+        assert raw.dy == 1
+
     def test_less_than_one_detent_downward_is_dropped_the_same_way(self):
         # The guard above has to work in both directions. Flooring made it
         # one-directional: -40 // 120 is -1, so a touchpad nudge toward the
@@ -438,6 +489,16 @@ class TestKeyboardState:
         assert state._state[0x14] & 0x01
         state.release(0x14)
         state.press(0x14)
+        assert not state._state[0x14] & 0x01
+
+    def test_seed_starts_from_the_real_toggle_state(self):
+        # Latched keys: a recording begun with Caps Lock on recorded `a` for
+        # an `A` the application typed, measured on Windows 11.
+        state = _KeyboardState()
+        state.seed(FakeUser32(toggled={0x14}))
+        assert state._state[0x14] & 0x01
+        assert not state._state[0x90] & 0x01
+        state.seed(FakeUser32())
         assert not state._state[0x14] & 0x01
 
     def test_array_reflects_the_current_state(self):

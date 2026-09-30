@@ -868,7 +868,11 @@ def test_client_side_decoration_slack_is_allowed():
 def test_the_fit_check_is_skipped_on_a_scaled_screen():
     # AT-SPI extents and window geometry are not reliably in the same units
     # there, and a false rejection costs every named element on the desktop.
-    target = fitting_resolver(extents=(0, 0, 1920, 1080), scale=2.0).resolve(100, 100)
+    # Pinned off macOS: a Mac never reads its scale as a unit mismatch (see
+    # `_any_screen_scaled`), so on a Mac host this asked a different question.
+    target = fitting_resolver(
+        extents=(0, 0, 1920, 1080), scale=2.0, macos=False
+    ).resolve(100, 100)
     assert target.element is not None
 
 
@@ -913,7 +917,8 @@ def test_the_cover_check_allows_the_same_decoration_slack():
 
 
 def test_the_cover_check_is_skipped_on_a_scaled_screen():
-    made = hit_resolver(extents=(0, 0, 252, 25), scale=2.0)
+    # Pinned off macOS for the reason the fit-check test above gives.
+    made = hit_resolver(extents=(0, 0, 252, 25), scale=2.0, macos=False)
     assert made.resolve(155, 131).element is not None
 
 
@@ -1374,7 +1379,10 @@ def test_a_check_recorded_on_a_popup_item_reads_the_item(monkeypatch):
     assert not any("changed between" in warning for warning in made.warnings)
 
 
-def test_windows_is_left_to_ui_automation_which_sees_popups_itself():
+def test_a_gtk_shaped_menu_on_windows_is_left_to_ui_automation():
+    # The Linux route keys on a `menu` opener with its items beneath it, which
+    # is not what UI Automation publishes; Windows has its own route, for the
+    # shape it does publish -- see `Win32MenuSession` below.
     made = DesktopResolver(session=PopupSession(), elements=True, windows=True)
     made.resolve(30, 20)
     assert made.resolve(150, 212).element.name == "Open"
@@ -2442,3 +2450,167 @@ def test_the_same_screen_is_still_skipped_on_x11():
     made = fitting_resolver(extents=(0, 0, 1920, 1080), scale=2.0, macos=False)
     assert made._scaled is True
     assert made.resolve(100, 100).element is not None
+
+
+class _DeadElement(FakeElement):
+    """What a UI Automation element is once its popup has closed: unreadable."""
+
+    def __getattribute__(self, name):
+        if name.startswith("__"):
+            return object.__getattribute__(self, name)
+        raise RuntimeError("the element is no longer available")
+
+
+class Win32MenuSession(ElementSession):
+    """A Win32 menu bar under UI Automation, measured on Windows 11.
+
+    The menu-bar entry is an expandable `menu item` with no children; its open
+    popup is a `menu` of the same name parented by the *window*; and closing
+    the popup destroys its items, so reading one afterwards raises. Over the
+    popup the hit test sees the popup while it is open and the tab beneath it
+    once it has closed -- which is when the choosing press is consumed.
+    """
+
+    def __init__(self):
+        super().__init__(window=FakeWindow(title="Probe", pid=77))
+        self.window_el = FakeElement("window", "Probe", pid=77)
+        bar = FakeElement("menu bar", "Application", pid=77, parent=self.window_el)
+        self.actions = FakeElement("menu item", "Actions", pid=77, parent=bar)
+        self.actions.expandable = True
+        self.popup = FakeElement("menu", "Actions", pid=77, parent=self.window_el)
+        self.do_thing = FakeElement(
+            "menu item", "Do Thing", pid=77, parent=self.popup, actions=["invoke"]
+        )
+        # An entry that opens a submenu is still a `menu item`, and the one
+        # signal that says so is `expandable`.
+        self.more = FakeElement("menu item", "More", pid=77, parent=self.popup)
+        self.more.expandable = True
+        # An item that carries state, which a stored layout does not.
+        self.tick = FakeElement(
+            "check menu item",
+            "Tick",
+            pid=77,
+            parent=self.popup,
+            text="Tick",
+            checked=True,
+            checkable=True,
+        )
+        self.popup.children = [self.do_thing, self.more, self.tick]
+        self.submenu = FakeElement("menu", "More", pid=77, parent=self.window_el)
+        self.do_other = FakeElement(
+            "menu item",
+            "Do Other Thing",
+            pid=77,
+            parent=self.submenu,
+            actions=["invoke"],
+        )
+        self.submenu.children = [self.do_other]
+        self.tab = FakeElement("page tab", "General", pid=77, parent=self.window_el)
+        self.window_el.children = [bar, self.tab]
+        self.open = False
+        self.submenu_open = False
+
+    def element_at(self, x, y):
+        if (x, y) == (30, 20):
+            if not self.open:
+                self.open = True
+                self.window_el.children.append(self.popup)
+            return self.actions
+        if (x, y) == (60, 50):
+            return self.do_thing if self.open else self.tab
+        if (x, y) == (60, 80):
+            # Pressing the submenu's own entry: the submenu opens beside it,
+            # and the entry stays where it was -- still what the point answers
+            # with while UI Automation has the submenu open.
+            if self.open and not self.submenu_open:
+                self.submenu_open = True
+                self.window_el.children.append(self.submenu)
+            return self.more if self.open else self.tab
+        if (x, y) == (60, 110):
+            return self.tick if self.open else self.tab
+        if (x, y) == (250, 80):
+            return self.do_other if self.submenu_open else self.tab
+        return None
+
+    def close(self):
+        """Choosing an item: the popup goes, and its items die with it."""
+        self.open = False
+        self.window_el.children.remove(self.popup)
+        self.do_thing.__class__ = _DeadElement
+
+    def close_submenu(self):
+        """Choosing from the submenu: it goes the same way."""
+        self.submenu_open = False
+        self.window_el.children.remove(self.submenu)
+        self.do_other.__class__ = _DeadElement
+
+    def elements(self, within=None, predicate=None, **kwargs):
+        if within is self.popup and self.open:
+            items = self.popup.children
+        elif within is self.submenu and self.submenu_open:
+            items = self.submenu.children
+        else:
+            return []
+        return [c for c in items if predicate is None or predicate(c)]
+
+    def extents(self, element):
+        if element is self.do_thing:
+            return (50, 40, 176, 28)
+        if element is self.more:
+            return (50, 70, 176, 28)
+        if element is self.tick:
+            return (50, 100, 176, 28)
+        if element is self.do_other:
+            return (240, 70, 200, 28)
+        if element is self.tab:
+            return (40, 40, 100, 30)
+        return (20, 10, 60, 20)
+
+
+def test_a_win32_menu_choice_consumed_after_the_menu_closed_is_still_named():
+    # Measured on Windows 11: an injected click on `Actions` then on `Do Thing`
+    # recorded the second as the page tab behind the popup, because the popup
+    # had closed by the time the press was consumed.
+    session = Win32MenuSession()
+    made = DesktopResolver(session=session, elements=True, windows=True)
+    assert made.resolve(30, 20).element.name == "Actions"
+    session.close()
+    chosen = made.resolve(60, 50).element
+    assert (chosen.role, chosen.name) == ("menu item", "Do Thing")
+    assert chosen.path[-1] == ("menu", "Actions")
+    # Spent: the next press at that point is the tab again.
+    assert made.resolve(60, 50).element.name == "General"
+
+
+def test_a_win32_submenu_choice_consumed_after_the_submenu_closed_is_still_named():
+    # An entry that opens a submenu is an ordinary `menu item`, not a menu
+    # owner, so the press that opened the submenu spent the popup it came from
+    # without remembering the one it opened -- and the press that chose from
+    # the submenu was consumed after that had closed too, with nothing to
+    # answer it from: the same misattribution as the menu-bar click above, one
+    # level down, on a menu item that is really a coordinate in the script.
+    session = Win32MenuSession()
+    made = DesktopResolver(session=session, elements=True, windows=True)
+    assert made.resolve(30, 20).element.name == "Actions"
+    opened = made.resolve(60, 80).element
+    assert (opened.role, opened.name) == ("menu item", "More")
+    session.close_submenu()
+    chosen = made.resolve(250, 80).element
+    assert (chosen.role, chosen.name) == ("menu item", "Do Other Thing")
+    assert chosen.path[-1] == ("menu", "More")
+
+
+def test_a_check_on_a_remembered_win32_menu_item_reads_its_state():
+    # The stored layout is a snapshot: `_Frozen` keeps what naming an item
+    # needs, and not the text or checked state a check records. Reading state
+    # through one raised on the first attribute and the observation was
+    # dropped to "this is showing" -- while the popup was still open and the
+    # live item was right there to read.
+    session = Win32MenuSession()
+    made = DesktopResolver(session=session, elements=True, windows=True)
+    made.resolve(30, 20)
+    assert session.open, "the popup is open"
+    observation = made.inspect(60, 110)
+    assert observation.target.element.name == "Tick"
+    assert observation.checked is True
+    assert observation.checkable is True

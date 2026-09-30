@@ -262,6 +262,53 @@ which is a different answer from None ("a popup does, and nothing in it is here"
 
 
 @dataclass(frozen=True)
+class _Frozen:
+    """A snapshot of one accessible, readable after the real one has gone.
+
+    Everything naming this element needs -- the attributes `_describe_element`
+    and `_ancestry` read -- plus the `expandable` that says a `menu item` opens
+    a submenu, which `_remember_submenu` decides from before it pays for a live
+    read. What UI Automation needs and AT-SPI does not: a closed popup menu's
+    items stay in an AT-SPI tree, unplaced, but under UI Automation they are
+    destroyed with the popup, so a remembered live item raised on the first
+    read and the press that chose it came out as a bare coordinate.
+    """
+
+    role: str
+    name: str
+    description: str = ""
+    pid: int | None = None
+    actions: tuple[str, ...] = ()
+    expanded: bool | None = None
+    expandable: bool | None = None
+    selectable: bool | None = None
+    parent: _Frozen | None = None
+
+
+def _freeze(element: Any, depth: int = MAX_DEPTH) -> _Frozen | None:
+    """`element` and its ancestry as `_Frozen`, or None if it cannot be read."""
+    if element is None or depth <= 0:
+        return None
+    try:
+        return _Frozen(
+            role=element.role,
+            name=element.name or "",
+            description=element.description or "",
+            pid=element.pid,
+            actions=tuple(element.actions or ()),
+            expanded=element.expanded,
+            # Read leniently, unlike its neighbours: an element that does not
+            # publish the property cannot expand, and "not an opener" is a
+            # better answer than losing the whole snapshot to the guard below.
+            expandable=getattr(element, "expandable", None),
+            selectable=element.selectable,
+            parent=_freeze(element.parent, depth - 1),
+        )
+    except Exception:  # noqa: BLE001 - an element going stale mid-read is ordinary
+        return None
+
+
+@dataclass(frozen=True)
 class _Lookup:
     """What one window lookup answered, and when, for a recorded move to reuse."""
 
@@ -850,6 +897,10 @@ class DesktopResolver:
         try:
             found = self._live_at(x, y, spend=False)
             element = found[0] if found is not None else None
+            if isinstance(element, _Frozen):
+                # A snapshot is all `_live_at` can offer inside a remembered
+                # Windows popup, and it carries no state -- see `_live_item_for`.
+                element = self._live_item_for(element)
             if element is None or expected is None:
                 return Observation(target=target)
             if element.role != expected.role or (element.name or "") != expected.name:
@@ -1654,6 +1705,9 @@ class DesktopResolver:
             return None
         if self._on_windows():
             element = self._past_a_bare_text_leaf(element)
+            if spend:
+                self._remember_windows_popup(element)
+            return element, None
         # Not on Windows, where UI Automation hit-tests popups itself and there is
         # nothing to remember: this would be up to `POPUP_WAIT_SECONDS` and a
         # subtree read over UI Automation on every press on a menu, for an answer
@@ -1808,17 +1862,21 @@ class DesktopResolver:
         the press that chooses an item -- `spend`, which a hover is not, since a
         rest is consumed alongside the press that ended it and must not use the
         popup up first -- and by any point outside the popup, and it expires
-        after `POPUP_MEMORY_SECONDS`. Not spent by a press on an entry that opens
-        a submenu, which leaves the popup open.
+        after `POPUP_MEMORY_SECONDS`. A press on an entry that opens a submenu
+        spends this layout too and remembers the submenu in its place: the entry
+        is an ordinary `menu item`, and the choice made from the submenu is
+        consumed after *that* has closed -- see `_remember_submenu`.
 
         Inside the popup but on no item -- a separator, a gap -- is answered
         None, which is a coordinate, and never the hit test: whatever it would
         name is under the popup and is not what was clicked.
 
-        Skipped on Windows, where UI Automation hit-tests popups themselves.
+        On Windows UI Automation hit-tests a popup that is still open, but the
+        same race applies once it has closed, and there the owner is the popup
+        itself -- see `_remember_windows_popup`, the only thing that sets one.
         """
         owner = self._menu_owner
-        if owner is None or self._on_windows():
+        if owner is None:
             return _NO_POPUP
         shown = self._visible_items(owner)
         if shown:
@@ -1849,6 +1907,7 @@ class DesktopResolver:
         item, rect, role = min(under, key=lambda entry: entry[1][2] * entry[1][3])
         if spend and role not in MENU_OWNER_ROLES:
             self._forget_popup()
+            self._remember_submenu(x, y, item)
         return item, rect
 
     def _visible_items(
@@ -1867,11 +1926,17 @@ class DesktopResolver:
         except Exception:  # noqa: BLE001 - a menu that closed mid-read is closed
             return []
         shown = []
+        frozen = self._on_windows()
         for item in items:
             try:
                 rect = self._extents(item)
                 if rect is not None and _placed(rect):
-                    shown.append((item, rect, item.role))
+                    # Frozen on Windows: UI Automation destroys a closed
+                    # popup's items, so the live one would be unreadable by the
+                    # time the press that chose it is described. See `_Frozen`.
+                    kept = _freeze(item) if frozen else item
+                    if kept is not None:
+                        shown.append((kept, rect, item.role))
             except Exception:  # noqa: BLE001 - an item can go stale under the read
                 continue
         return shown
@@ -1899,6 +1964,112 @@ class DesktopResolver:
         """Stop believing any popup is open."""
         self._menu_owner = None
         self._popup_layout = None
+
+    def _live_item_for(self, described: Any) -> Any:
+        """The live item a remembered popup's description stands for, if any.
+
+        `_state` reads `text`, `checked` and `checkable`, which a `_Frozen`
+        snapshot deliberately does not carry -- it holds what naming an element
+        needs. Every item of a remembered Windows popup is one, so a check made
+        inside a menu that was still open raised on the first attribute and the
+        observation was dropped to "this is showing", with the live item right
+        there to read. Paired by role and name, which is what `_state` checks
+        the reading against anyway.
+        """
+        owner = self._menu_owner
+        if owner is None:
+            return None
+        try:
+            items = self.session.elements(
+                within=owner,
+                predicate=lambda e: (
+                    e.role == described.role and (e.name or "") == described.name
+                ),
+            )
+            return next(iter(items), None)
+        except Exception:  # noqa: BLE001 - a popup closing mid-read is ordinary
+            return None
+
+    def _remember_submenu(self, x: int, y: int, item: Any) -> None:
+        """Remember the popup a submenu's own entry has just opened.
+
+        An entry that opens a submenu is an ordinary `menu item`, not a menu
+        owner, so the press that opened the submenu has just spent the popup it
+        was chosen from -- and the press that chooses from the submenu is
+        consumed after *that* has closed too, which is the race
+        `_remember_windows_popup` exists for, one level down. Without this the
+        choice from a submenu was named for whatever lay underneath, on a menu
+        item that is a bare coordinate the moment the window moves.
+
+        The snapshot's own `expandable` decides it, before anything live is
+        read: over UI Automation a read is a round trip, and every ordinary item
+        in a menu would pay it for an answer that is always no.
+
+        The element is then read live, because a `_Frozen` holds what naming an
+        item needs and not the parent chain and child list
+        `_remember_windows_popup` has to walk. Checked to be the item that was
+        chosen -- role and name, the same identity `_state` checks -- so a popup
+        that opened *over* the point cannot be remembered in its place.
+        """
+        if not self._on_windows() or not getattr(item, "expandable", None):
+            return
+        try:
+            live = self.session.element_at(x, y)
+            if live is None or live.role != item.role or (live.name or "") != item.name:
+                return
+        except Exception:  # noqa: BLE001 - a popup closing mid-read is ordinary
+            return
+        self._remember_windows_popup(live)
+
+    def _remember_windows_popup(self, opener: Any) -> None:
+        """On a press that opened a Win32 menu, remember the popup's layout.
+
+        The race `_popup_at` describes is not a Linux one. UI Automation does
+        hit-test an open popup, but the press that chooses an item is consumed
+        after the item has closed the menu, and then the point answers with
+        whatever was underneath. Measured on Windows 11 against a real menu
+        bar: a synthetic click on `Actions` then on `Do Thing` recorded the
+        second as `page tab 'General'`, the control behind the popup, and the
+        replay never chose the item. A person's click is saved by the tenth of
+        a second the button is held; one injected by another tool -- a replay
+        being recorded, say -- is not.
+
+        The popup is found where UI Automation actually puts it: a `menu`
+        named after its menu-bar item, as a child of the application's
+        *window* rather than of the item (measured on the same probe; the item
+        itself has no children at all). The opener is recognised by being an
+        expandable `menu item`, which is what UI Automation makes a menu-bar
+        entry. Waited for for `POPUP_WAIT_SECONDS`, as `_await_popup` does,
+        since the application opens it after the press.
+        """
+        try:
+            if opener.role != "menu item" or not opener.expandable:
+                return
+            window = opener
+            for _ in range(_MAX_POPUP_ANCESTRY):
+                window = window.parent
+                if window is None:
+                    return
+                if window.role in ("window", "frame", "dialog"):
+                    break
+            else:
+                return
+            name = opener.name
+            deadline = time.monotonic() + POPUP_WAIT_SECONDS
+            while True:
+                for child in window.children:
+                    if child.role != "menu" or child.name != name:
+                        continue
+                    shown = self._visible_items(child)
+                    if shown:
+                        self._menu_owner = child
+                        self._popup_layout, self._popup_seen = shown, _now()
+                        return
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(POPUP_POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - a window closing mid-walk just has no popup
+            return
 
     def _describe_element(self, element: Any) -> ElementRef:
         """Snapshot a live accessible as the durable reference a recording keeps."""

@@ -3,6 +3,144 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.8.1] — 2026-09-30
+
+### Changed
+
+- **`PROFILE` and the `pyguitest` floor both move to 0.16.0, and this is a step
+  an older install gets wrong rather than one it merely lacks.** The header a
+  generated script carries is a claim about the API its calls were checked
+  against, so it follows the pyguitest this generator was last validated against,
+  and the floor follows it there — the convention 0.15.0 followed when nothing
+  emitted here needed it. 0.16.0 is different: five calls in a generated script
+  changed behaviour there. A Windows `gui.tap_key(...)` now carries the scan code
+  and extended bit the layout gives the key, where it went out with neither and
+  `Home`, an arrow or Right Ctrl arrived as a key no keyboard sends;
+  `expect_checked` reads a selected radio button as checked, where it answered
+  None and a generated check failed against a button that was plainly selected;
+  macOS `double_click()` counts its clicks, where AppKit read two clicks of count
+  1 and double-clicking a word selected nothing; `gui.drag(...)` posts drag
+  events where it posted moves, which the window server does not deliver as a
+  drag at all; and `find_window`/`wait_for_window` name the topmost window, where
+  they named the one behind. `window_element()`, whose 4.24s per call is what
+  0.15.1's step was about, is 0.11s. An install left at 0.15.1 therefore has to
+  move up to run *this* recorder even though most of what it writes would still
+  run there — the whole cost, stated rather than discovered. Landing it wants
+  pyguitest 0.16.0 *published*, not merely tagged: CI here installs pyguitest
+  from PyPI like every other job, so until that release exists the requirement
+  cannot resolve at all.
+
+### Fixed
+
+- **A Windows recording begun with Caps Lock on captured every letter in the
+  wrong case.** The capture backend keeps its own copy of the keyboard state for
+  `ToUnicodeEx` -- the low-level hook is documented as the one place the system's
+  copy cannot be trusted -- and that copy started with every toggle off. Caps Lock,
+  Num Lock and Scroll Lock are latched, so the key-downs seen during a recording
+  say nothing about where they were when it began. Found live on Windows 11: `a`
+  pressed with Caps Lock on typed `A` in the application and was recorded as
+  `'a'`, so the replay typed the wrong case. The three toggles are now read with
+  `GetKeyState` once, when capture starts, and the same keystroke records as `'A'`.
+
+- **Windows of one application were one window to the analyzer.** Sync inference
+  keyed a window by its app id alone, which every window of one application
+  shares -- every TextEdit window on macOS, where the app id is the owning
+  process's name, and every window of one `WM_CLASS` on X11. A second window of the
+  same application therefore looked already seen: a pause spent waiting for it to
+  open got no `wait_for_window` with the time it actually took, and moving back and
+  forth between two of them got no raise, so a replayed click could land on
+  whichever was in front. The generator already bound windows by app id, title and
+  pid for exactly this reason; the analyzer now uses the same identity.
+
+- **A recording file could put code into the script generated from it.** A
+  recording is user-editable JSON -- `--regenerate` exists so one can be trimmed
+  by hand, or received from someone else and re-rendered -- and three routes from
+  it reached the generated source as code rather than as data. A `Comment`'s text
+  or any event's `note` holding a line break ended its `# ...` comment and started
+  a line of code. A numeric field that was not a number -- a click's `button`, a
+  coordinate, a scroll amount -- was written into the call unquoted, so
+  `"button": "1); import os; os.system(...); ("` became a statement. And the
+  environment fields shown in the header docstring were inserted unescaped, so
+  three double quotes in one closed the docstring early. All three were
+  demonstrated with an `os.system` call in the generated file. Loading now checks
+  every field against the type it declares (an integer field still takes a finite
+  float, which some platforms record coordinates as), comments and notes are
+  flattened to one line, and every header line is escaped.
+- **A header naming a Windows path produced a script that did not parse, and a
+  header holding a run of quotes could still put code into one.** The header
+  docstring escaped only a run of exactly three quotes, so `C:\Users\...` in the
+  `header` setting put a `\U` into the source -- the start of a unicode escape to
+  Python, and a `SyntaxError` -- and four quotes in a recording's own environment
+  field (a `desktop`, say) came out as one escaped quote followed by three bare
+  ones, which closes the docstring just as surely as three did; five more
+  reopened a short string, and the line of code between the two runs landed in the
+  generated module as code. Backslashes are escaped, and then every double quote.
+- **A recording whose click count was written as `1.0` failed to generate a
+  script.** JSON has one number type, so a file that has been through another tool
+  can hold `1.0` where the recorder wrote `1`, and the generator repeats the click
+  once per count -- `TypeError: can't multiply sequence by non-int`, naming neither
+  the field nor the event and landing outside the `ValueError` `--regenerate`
+  promises. A whole float is now the integer it says, and a fractional one is
+  refused by name. Coordinates keep their floats, which is the different case the
+  type check was widened for: they are formatted into the script as numbers rather
+  than counted with.
+- **On Windows, a menu item chosen by an injected click was recorded as whatever
+  was behind the menu.** The recorder names a click when it *consumes* the press,
+  and choosing an item closes the menu, so by then the point answered for the
+  control underneath: a synthetic click on `Actions` and then on `Do Thing`
+  recorded the second as `page tab 'General'`, and the replay never chose the item.
+  A person's click is saved by the tenth of a second the button is held; one
+  injected by another tool -- recording a replay, which is exactly how the live
+  check reads a replay back -- is not. The popup memory that already covered this
+  on Linux was switched off on Windows on the reasoning that UI Automation
+  hit-tests popups itself, which is only true while the popup is still open. It
+  now runs there too, for the shape UI Automation actually publishes (an
+  expandable `menu item` on the menu bar, and a `menu` of the same name parented
+  by the *window*, whose items are destroyed when it closes -- so they are kept as
+  a snapshot). Measured on Windows 11: the same injected clicks now record as
+  `menu item 'Do Thing'`.
+- **A Windows submenu choice was named for whatever was underneath it.** An entry
+  that opens a submenu is an ordinary `menu item`, not a menu owner, so the press
+  that opened the submenu spent the remembered popup *without* remembering the one
+  it opened -- and the press that chose from the submenu was consumed after that
+  had closed too, with nothing left to answer it from. The same misattribution the
+  bullet above fixes, one level down, on an item that is a bare coordinate in the
+  generated script the moment the window moves. The entry is recognised from the
+  `expandable` the snapshot now keeps -- before anything live is read, since over
+  UI Automation a read is a round trip -- and the submenu it opened is remembered
+  once the popup it came from has been spent.
+- **A check recorded on an item in a remembered Windows menu kept no state.** The
+  layout kept for a closed popup is a snapshot, and a snapshot carries what naming
+  an item needs rather than what reading one gives: no text, no checked state. A
+  check made while the menu was still open therefore raised on the first attribute
+  read, and the recorder's own rule -- an unreadable state is no state -- dropped
+  it to "this is showing", with the live item sitting right there. The live item is
+  looked up again for the state and paired with the snapshot by role and name.
+- **Touchpad scrolling never reached a Windows recording.** A precision touchpad
+  reports a two-finger scroll as a stream of wheel deltas well under one detent
+  each, and every report under a whole detent was dropped on its own -- so only a
+  mouse wheel's notches were recorded, and a touchpad scroll left nothing behind.
+  Fractions are now summed per axis and each whole detent the sum crosses is
+  recorded, the remainder carried; a change of direction or a half-second pause
+  starts the sum again, so a leftover fraction cannot become a detent nobody
+  scrolled. Measured live: six 40-unit reports -- two detents' worth -- recorded as
+  two scrolls, where they had recorded as nothing. A button press ends the sum too,
+  and that one is not an edge case: the reports either side of a click are close
+  enough together to look like a single gesture, so half a detent from before the
+  click completed a detent with the report after it, and the scroll was recorded at
+  the *later* coordinates -- a point the person had not scrolled at.
+- **The test suite now passes on a Mac.** Four tests exercised a Linux or Windows
+  rule without pinning the platform, so on a Mac host the code correctly took the
+  macOS branch and the tests failed: two about skipping the containment checks on
+  a scaled screen (a Mac never reads its scale as a unit mismatch), and two about
+  falling back from a composed session (a Mac recording asks for one backend, so
+  there is nothing composed to fall back from). They pin the platform they are
+  about now; the code is unchanged. Run on macOS 26.7: 941 passed, 0 failed.
+- **`max_timeout` now says it has no "no cap" value.** `max_waypoints` takes 0 for
+  "uncapped" and `max_timeout` refuses 0 and infinity -- correctly, since the cap is
+  what a `timeout=` is clamped to -- but nothing said so, and the two sit next to
+  each other. The setting's docstring and `config.example.toml` both do now.
+
 ## [0.8.0] — 2026-09-28
 
 ### Added
@@ -486,7 +624,7 @@ hook-loss note** in either run, which is the heartbeat not crying wolf under a r
 desktop's input. Its replay half stopped on a combo box, reproducibly, and that turned out
 to be pyguitest's to fix: `uia.Element.click` had no route for a control whose click *is*
 an expand, and pyguitest 0.14.0 gives it one -- see that package's CHANGELOG and
-`docs/validation.md`. The check was re-run the same day with that in place, and with the
+pyguitest's `docs/validation.md`. The check was re-run the same day with that in place, and with the
 two bugs above fixed so the capture is whole: **the replay passes the dropdown line** and
 carries on through the recorded sequence, stopping further in at a `SysListView32` cell
 whose only advertised action is the same MSAA shim that then declares none. That one is

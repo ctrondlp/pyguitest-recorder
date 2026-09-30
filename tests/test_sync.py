@@ -442,9 +442,9 @@ def test_a_check_in_a_background_window_does_not_raise_it():
 
 
 def test_a_reactivation_comment_names_the_window_a_reader_would_recognize():
-    # `_window_key` prefers the app id because it does not drift, which makes
-    # a poor name in prose: "moved back to 'zenity'" for a window every other
-    # line calls "Recorder Check".
+    # The app id is part of a window's identity because it does not drift, but
+    # it makes a poor name in prose: "moved back to 'zenity'" for a window
+    # every other line calls "Recorder Check".
     dialog = WindowRef(title="Recorder Check", app_id="Zenity", pid=11)
     other = WindowRef(title="Second", app_id="Other", pid=12)
     events = [
@@ -474,3 +474,33 @@ def test_the_same_element_is_not_waited_for_twice():
     out = infer_synchronization(events)
     waits = [e for e in out if isinstance(e, WaitForElement)]
     assert [w.element.name for w in waits] == ["OK"]
+
+
+# Two windows of one application: the same app id, told apart by title (and,
+# across processes, pid) -- every TextEdit window on macOS, every window of one
+# WM_CLASS on X11. The generator binds them apart; the analyzer has to as well.
+FIRST_DOC = WindowRef(title="notes.txt", app_id="TextEdit", pid=40)
+SECOND_DOC = WindowRef(title="todo.txt", app_id="TextEdit", pid=40)
+
+
+def test_a_second_window_of_the_same_app_is_waited_for():
+    events = [
+        click(1.0, window=FIRST_DOC, element=SAVE),
+        Pause(timestamp=1.1, seconds=3.0),
+        click(4.1, window=SECOND_DOC, element=OK),
+    ]
+    out = infer_synchronization(events)
+    waits = [e for e in out if isinstance(e, WaitForWindow)]
+    assert [w.window.title for w in waits] == ["notes.txt", "todo.txt"]
+    assert "waited 3s here" in waits[-1].note
+
+
+def test_moving_back_between_two_windows_of_one_app_raises_the_window():
+    events = [
+        click(1.0, window=FIRST_DOC, element=SAVE),
+        click(2.0, window=SECOND_DOC, element=OK),
+        click(3.0, window=FIRST_DOC, element=SAVE),
+    ]
+    out = infer_synchronization(events)
+    raised = [e for e in out if isinstance(e, WindowActivate)]
+    assert [e.window.title for e in raised] == ["notes.txt"]
