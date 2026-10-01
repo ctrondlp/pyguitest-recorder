@@ -3,6 +3,154 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [Unreleased]
+
+## [0.8.2] — 2026-10-01
+
+### Changed
+
+- **The pyguitest floor is now 0.16.1.** The release fixes two calls a generated
+  script makes, both silent: on Linux `Element.click()` on a GTK switch or
+  toggle button did nothing (it offers AT-SPI no `click` or `press` action), and
+  the `input` backend's pointer landed one pixel short of every absolute
+  position, so a recorded coordinate click missed by one. Neither raises on an
+  older install, which is what the floor is for. The generator `PROFILE` stays
+  `pyguitest-0.16`: it names the minor series the emitted calls were checked
+  against, and no emitted call changed.
+
+- **The package metadata gains the macOS environment facet and a link to
+  pyguitest.** The `Environment :: MacOS X` classifier joins the X11 and Win32
+  ones -- without it a macOS reader filtering PyPI by environment did not find a
+  recorder that has a macOS backend -- and `[project.urls]` links pyguitest,
+  whose scripts this writes. Every classifier was checked against the published
+  trove list, and the sdist and wheel pass `twine check --strict`.
+
+### Fixed
+
+- **Shift+Left was recorded as Left, so a recorded selection replayed as cursor
+  movement.** Shift and AltGr are not counted as command modifiers, because with a
+  character key they make text -- `Shift+a` is the letter A. But with a key that has
+  *no* text (Left, Home, End, Tab, Return, the function keys) there is nothing for
+  them to be making, and `Shift+Left` is a different command from `Left`: it
+  selects. The Shift was silently dropped, a three-character selection became three
+  cursor moves, and the copy and paste after it acted on nothing -- found when a
+  replayed text-editing session ended with different text from the original,
+  against a live desktop. A held modifier now makes a non-text key a hotkey, so the
+  script says `send_keys("+({Left})")`. `Shift+letter` is still typed text, and
+  Ctrl+Shift combinations are unchanged.
+
+- **Every press of Delete was recorded as typing the letter "ÿ".** The X11
+  backend decides whether a keysym is text by asking python-xlib's
+  `keysym_to_string`, which answers `chr(0xFF)` for Delete (0xFFFF). The recording
+  then held a `text_input` of `ÿ` where it should hold a `Delete` keystroke, and the
+  script replayed it as `type_text("ÿ")` -- which a scancode backend such as uinput
+  refuses, so the whole replay stopped there. Found replaying a recorded
+  text-editing session against a live GNOME desktop. The 0xFF00-0xFFFF block is X11's
+  miscellaneous keys (Delete, Home, the arrows, F1-F35, the keypad, the modifiers)
+  and holds no character, so it is now excluded outright; Latin-1 and the direct
+  Unicode block are untouched. A test sweeps the whole block.
+
+- **Typed text was attributed to the wrong field when the recorder fell behind, and
+  a password could land in the script in clear.** Keyboard focus is read when a
+  typed run is *consumed*, and the read walks the accessible tree -- about 400ms on
+  a busy desktop. Behind a backlog it answers where focus is *now*, which after a
+  Tab is the next field. Found validating recorded-and-replayed sessions on a live
+  GNOME Wayland desktop: a driver typed Name, Tab, Email, Tab, Password at machine
+  speed; the recorder fell 1.1s behind, the email was attributed to the password
+  field and withheld, the Tab after it to the first field, and the replay script
+  asked for a `SECRET_1` that was an email address. The wrong name is the mild
+  half. A stale read naming an earlier, ordinary field while a password is being
+  typed writes that password into the script verbatim -- the same failure
+  `_note_unidentified_text` records happening for real in a network-share dialog.
+  Past `NormalizerOptions.focus_max_lag` (0.25s, measured per run at the moment it
+  starts) a run now claims no field and is withheld as sensitive, with a note on
+  the event and in the script saying the recorder was behind rather than that it
+  was a password field, and it no longer pays for the focus read it cannot trust.
+  Typing at a human pace keeps up and is unchanged; what is still open is making
+  the read cheap or event-driven, which would remove the cause rather than the
+  consequence.
+
+- **Late typing is no longer withheld when nothing queued could have moved focus.**
+  The rule above failed closed on every run that started past 0.25s behind, and
+  resolving a click or a Tab costs 0.2-0.8s, so typing straight after either was
+  nearly always withheld: a live recording of a plain form came out with the email
+  address as `SECRET_1`, and which fields were masked depended on how fast the
+  machine was. Focus moves because input moves it, so a late read is still right
+  when nothing that moves focus is waiting. The X11 backend now shows its queue
+  (`pending()`), and a late run is trusted when nothing in it is a click, a key
+  with no text (Tab, Return, Escape, the arrows) or a key held with Ctrl, Alt or
+  Super. It still fails closed when the queue holds any of those, when the backend
+  cannot show its queue (Windows and macOS, for now), and past
+  `NormalizerOptions.focus_stale_lag` (3s), because input is the only thing the
+  queue can speak for -- an application moving its own focus leaves no trace in it.
+
+- **`docs/troubleshooting.md` explains why plain text can come out as `SECRET_n`.**
+  The password-field reason was documented in the generated script's comment only;
+  the new lag reason above would otherwise look like a bug.
+
+- **`kill`, a dropped SSH session or a closed terminal threw away the whole
+  recording, and a signal that did end one could hang it.** Ctrl-C ends a
+  recording cleanly -- the tail is collected and the script written -- but
+  Python's default for SIGTERM and SIGHUP is to end the process on the spot, so a
+  CI timeout, a `kill`, or a terminal window closed mid-recording lost everything
+  captured. Found by working through an external audit's abrupt-termination
+  questions against the code. Those two signals, and Ctrl-Break on Windows, are
+  now handled like Ctrl-C while a recording runs, and the previous handlers are
+  restored afterwards. SIGINT is taken over too where it is *ignored*: a shell
+  starts a background job (`pyguitest-recorder -o x.py &`, `nohup`, a CI step)
+  with SIGINT ignored, Python honours that by installing no Ctrl-C handler, and
+  `kill -INT` -- the documented way to stop a recording -- did nothing at all,
+  silently. Found when a validation harness started under `nohup` spawned recorders
+  that never stopped, each one idle with `SigIgn` showing SIGINT.
+
+  **On X11 the signal no longer raises anything.** The first version raised
+  `KeyboardInterrupt` from the handler, as Ctrl-C does, and a recording made while
+  the recorder was behind live input then sometimes never stopped: 2 of 9 stops
+  hung for over 90 seconds, with faulthandler showing the main thread spinning
+  inside python-xlib. An exception delivered asynchronously lands wherever the
+  thread happens to be, which for a recorder working through a backlog is almost
+  always inside an X request, and python-xlib keeps per-connection bookkeeping it
+  does not protect: the interrupted connection then believes another thread is
+  still receiving, and the tail collection that reuses it waits for ever. It
+  reproduces with no recorder -- interrupt `intern_atom` with an async exception,
+  call it again, and three runs in three hang -- so a plain Ctrl-C had the same
+  hazard. Now, where `Recorder.cooperative_interrupts` is true (X11), the first
+  signal stops capture from a helper thread exactly as the stop key does, `run`
+  finishes the backlog capture had already delivered and returns, and a second
+  signal gives up on what is left (`Recorder.abandon_tail`), checked between
+  events. SIGINT is replaced there whether or not it was ignored. Windows and
+  macOS keep the exception, since the hazard is proven only for python-xlib.
+
+  The same exception cost the event it landed in. Twelve `Tab` taps recorded as
+  eleven in 7 of 9 stress trials, always exactly one, at a different position each
+  time, and never for letters or arrows (cheap to consume) -- the key in flight
+  when the signal arrived, aborted mid-event while the recorder was working out
+  which window and element it had gone to. The raw capture showed all twelve
+  delivered, and replaying that raw stream through the normalizer offline gave
+  twelve. It was also why the second recording of a replay kept coming out one
+  event short: a dropped drag, a dropped Tab. After the change, 18 of 18 trials
+  recorded all twelve and none hung.
+  `docs/troubleshooting.md` gains a section on what ends a recording cleanly and
+  what cannot.
+
+- **A recording with no element context said so only after it ended.** When the
+  pyguitest session could not open, the note -- "clicks will carry bare
+  coordinates" -- was printed in the summary after the stop key, by which point
+  the whole interaction had been performed for a script of screen coordinates.
+  Notes the session already holds are now printed as recording starts.
+
+### Tests
+
+- **Generated scripts are executed, not only read.** `tests/test_replay.py` runs
+  the generator's output through `exec` against a real `pyguitest.Session` over
+  a fake backend that records what reached it. It pins that an element
+  recording reaches the named elements and no coordinates; that a window-relative
+  click follows the window to where it now is (recorded at 100,50, replayed at
+  300,200, lands at 410,280); that a hotkey leaves no modifier held; and that
+  quotes, backslashes, tabs, newlines and non-ASCII text in an element name or
+  in typed text arrive unchanged. `validate()` already checked names and keywords
+  against the installed pyguitest; nothing ran the result.
+
 ## [0.8.1] — 2026-09-30
 
 ### Changed

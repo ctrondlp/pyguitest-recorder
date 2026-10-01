@@ -78,6 +78,10 @@ classifiers = [
     # anyone browsing by platform even after "macos" appeared in keywords and
     # the description.
     "Operating System :: MacOS :: MacOS X",
+    # The Environment facet a macOS reader filters by, beside the X11 and Win32
+    # ones above: recording here has three mechanisms and the sidebar should
+    # show all three.
+    "Environment :: MacOS X",
     "Programming Language :: Python :: 3",
     # The versions CI actually runs; 3.14 is added here when the matrix adds
     # it, not before.
@@ -205,10 +209,17 @@ dependencies = [
     # needs drag events, so the drag went nowhere; and
     # `find_window`/`wait_for_window` named the rearmost of two windows
     # sharing a title. `window_element()`, the call 0.15.1's step was about,
-    # also stopped taking 4.24s per call on Windows. The floor keeps the
-    # meaning every step above gives it: the release this output was verified
-    # against, not the oldest that might work.
-    "pyguitest>=0.16.0",
+    # also stopped taking 4.24s per call on Windows.
+    #
+    # 0.16.1 raises it for two more calls this generator emits, again calls an
+    # older pyguitest gets wrong rather than lacks: on Linux `Element.click()`
+    # on a GTK switch or toggle button, which offers AT-SPI no `click` or
+    # `press` action, did nothing and the script went on as if it had worked;
+    # and the `input` backend's pointer landed one pixel short of every
+    # absolute position, so a recorded coordinate click missed by one. The
+    # floor keeps the meaning every step above gives it: the release this
+    # output was verified against, not the oldest that might work.
+    "pyguitest>=0.16.1",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
@@ -240,6 +251,7 @@ issues = "https://github.com/ctrondlp/pyguitest-recorder/issues"
 # the package it depends on does.
 documentation = "https://github.com/ctrondlp/pyguitest-recorder/tree/main/docs"
 changelog = "https://github.com/ctrondlp/pyguitest-recorder/blob/main/CHANGELOG.md"
+pyguitest = "https://github.com/ctrondlp/pyguitest"
 
 [project.scripts]
 pyguitest-recorder = "pyguitest_recorder.cli:main"

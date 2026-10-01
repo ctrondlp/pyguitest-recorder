@@ -1654,8 +1654,13 @@ class PythonGenerator:
             # Said at the point of use, not only in the binding block at the
             # top: a reader scanning the body should not have to work out why
             # one `type_text` takes a name where every other takes a string.
+            # An event that carries its own note says *why* (the recorder was
+            # too far behind to know the field), which the password wording
+            # here would contradict.
             self._comment(
-                "this went into a password field, so the text itself was "
+                "the text itself was never written here"
+                if event.note
+                else "this went into a password field, so the text itself was "
                 "never written here",
                 state,
             )

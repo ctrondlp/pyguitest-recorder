@@ -496,6 +496,25 @@ def test_sensitive_text_never_appears_as_a_literal():
     assert "gui.type_text(SECRET_1)" in source
 
 
+def test_text_withheld_for_lag_says_why_not_that_it_was_a_password():
+    # A run withheld because the recorder was behind live input is not known to
+    # be a password, so the script must not claim it was -- and must carry the
+    # recorder's own explanation, which is what tells a reader why a field they
+    # typed plain text into wants an environment variable to replay.
+    note = "typed while the recorder was 1.1s behind live input; withheld"
+    source = render(TextInput(text="ada@example.org", sensitive=True, note=note))
+    assert "ada@example.org" not in source
+    assert "gui.type_text(SECRET_1)" in source
+    assert f"# {note}" in source
+    assert "never written here" in source
+    assert "password field" not in source.split("def main")[1]
+
+
+def test_a_real_password_field_still_says_it_was_one():
+    source = render(TextInput(text="hunter2", sensitive=True))
+    assert "this went into a password field" in source
+
+
 @pytest.mark.needs_ruff
 def test_redaction_can_be_disabled():
     source = render(TextInput(text="hunter2", sensitive=True), redact_sensitive=False)
@@ -513,6 +532,13 @@ def test_quotes_and_newlines_survive_the_literal():
 def test_hotkey_uses_send_keys_grammar():
     assert 'gui.send_keys("^(s)")' in render(HotKey(keys=("ctrl", "s")))
     assert 'gui.send_keys("^(+(l))")' in render(HotKey(keys=("ctrl", "shift", "l")))
+
+
+def test_shift_with_a_named_key_keeps_its_shift_in_the_script():
+    # Shift+Left selects, Left moves: the recorder used to drop the Shift.
+    source = render(HotKey(keys=("shift", "Left")))
+    assert 'gui.send_keys("+({Left})")' in source
+    assert 'tap_key("Left")' not in source
 
 
 @pytest.mark.needs_ruff

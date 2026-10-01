@@ -22,6 +22,7 @@ class FakeResolver:
         self.text = text
         self.checked = checked
         self.focus = focus
+        self.focus_calls = 0
 
     def resolve(self, x, y, screen=0):
         element = None
@@ -46,6 +47,7 @@ class FakeResolver:
 
     def focused(self):
         """What has keyboard focus, which most desktops cannot say."""
+        self.focus_calls += 1
         return self.focus
 
     def close(self):

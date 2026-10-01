@@ -1034,3 +1034,220 @@ def test_hover_threshold_custom_value_gates_short_rests():
     )
     assert len(long) == 1
     assert long[0].dwell == pytest.approx(0.7)
+
+
+class TestShiftWithAKeyThatHasNoText:
+    """Shift+Left selects. Left does not. Dropping the Shift lost the selection."""
+
+    @staticmethod
+    def _hold_shift_and_press(key, *names):
+        events = [key(1.0, "Shift_L")]
+        for i, name in enumerate(names):
+            events.append(key(1.1 + i * 0.1, name))
+        events.append(key(2.0, "Shift_L", kind="key_release"))
+        return events
+
+    def test_shift_left_is_a_hotkey_not_a_plain_cursor_move(self, key):
+        events = drain(Normalizer(), self._hold_shift_and_press(key, "Left"))
+        assert [type(e).__name__ for e in events] == ["HotKey"]
+        assert events[0].keys == ("shift", "Left")
+
+    def test_shift_held_across_three_presses_is_three_selecting_moves(self, key):
+        events = drain(
+            Normalizer(), self._hold_shift_and_press(key, "Left", "Left", "Left")
+        )
+        assert [e.keys for e in events] == [("shift", "Left")] * 3
+
+    def test_the_other_keys_without_text_too(self, key):
+        for name in ("Home", "End", "Tab", "Return", "F10", "Delete", "Up"):
+            events = drain(Normalizer(), self._hold_shift_and_press(key, name))
+            assert [e.keys for e in events] == [("shift", name)], name
+
+    def test_shift_with_a_letter_is_still_text(self, key):
+        # Unchanged: Shift+a is "A", typed, not a command.
+        events = drain(
+            Normalizer(),
+            [
+                key(1.0, "Shift_L"),
+                key(1.1, "A", "A"),
+                key(1.2, "Shift_L", kind="key_release"),
+            ],
+        )
+        assert [type(e).__name__ for e in events] == ["TextInput"]
+        assert events[0].text == "A"
+
+    def test_a_named_key_with_no_modifier_is_still_a_keystroke(self, key):
+        events = drain(Normalizer(), [key(1.0, "Left")])
+        assert [type(e).__name__ for e in events] == ["KeyStroke"]
+
+    def test_ctrl_shift_is_still_one_hotkey_with_both(self, key):
+        events = drain(
+            Normalizer(),
+            [key(1.0, "Control_L"), key(1.05, "Shift_L"), key(1.1, "Left")],
+        )
+        assert events[0].keys == ("ctrl", "shift", "Left")
+
+
+class TestTypingStartedBehindLiveInput:
+    """Focus is read when a run is consumed, so behind a backlog it is stale.
+
+    Found live on a GNOME Wayland desktop: a driver typed Name, Tab, Email, Tab,
+    Password at machine speed while each focus read took ~400ms. The recorder fell
+    1.1s behind, and by the time it read focus for the email the Tab had already
+    moved it: the email was attributed to the password field (and withheld), the
+    Tab after it to the first field. The dangerous direction is the mirror image --
+    a stale read naming an ordinary field while a password is being typed -- so
+    past `focus_max_lag` a run fails closed.
+    """
+
+    @staticmethod
+    def _ordinary():
+        return Target(x=0, y=0, element=ElementRef(role="entry", name="Email"))
+
+    def _typed(self, key, lag, **options):
+        resolver = FakeResolver(focus=self._ordinary())
+        normalizer = Normalizer(
+            options=NormalizerOptions(**options),
+            resolver=resolver,
+            lag=lambda raw: lag,
+        )
+        events = drain(normalizer, [key(1.0, "p", "p"), key(1.05, "w", "w")])
+        return [e for e in events if isinstance(e, TextInput)][0], resolver
+
+    def test_a_run_that_starts_behind_claims_no_field_and_is_withheld(self, key):
+        typed, _ = self._typed(key, lag=1.1)
+        # The focus read says "Email", an ordinary field: trusting it would have
+        # written a password into the script in clear.
+        assert typed.sensitive is True
+        assert typed.target is None
+        assert "1.1s behind" in typed.note
+        assert typed.text == "pw"
+
+    def test_a_stale_run_does_not_pay_for_a_focus_read(self, key):
+        _, resolver = self._typed(key, lag=1.1)
+        assert resolver.focus_calls == 0
+
+    def test_a_run_that_keeps_up_is_attributed_to_the_focused_field(self, key):
+        typed, resolver = self._typed(key, lag=0.05)
+        assert typed.sensitive is False
+        assert typed.target.element.name == "Email"
+        assert typed.note == ""
+        assert resolver.focus_calls == 1
+
+    def test_the_threshold_is_exclusive(self, key):
+        at, _ = self._typed(key, lag=0.25)
+        over, _ = self._typed(key, lag=0.2501)
+        assert at.sensitive is False
+        assert over.sensitive is True
+
+    def test_the_threshold_is_an_option(self, key):
+        tolerant, _ = self._typed(key, lag=5.0, focus_max_lag=10.0)
+        strict, _ = self._typed(key, lag=0.01, focus_max_lag=0.0)
+        assert tolerant.sensitive is False
+        assert strict.sensitive is True
+
+    def test_no_lag_source_means_never_behind(self, key):
+        # A saved recording being re-rendered, or a synthetic stream in a test:
+        # there is no live input to be behind.
+        resolver = FakeResolver(focus=self._ordinary())
+        events = drain(Normalizer(resolver=resolver), [key(1.0, "p", "p")])
+        typed = [e for e in events if isinstance(e, TextInput)][0]
+        assert typed.sensitive is False and typed.target is not None
+
+    def test_only_where_a_run_starts_decides_it(self, key):
+        # Lag measured per run, not per character: a run that began promptly is
+        # not retroactively withheld because later characters were consumed late.
+        lags = iter([0.0, 9.0, 9.0])
+        resolver = FakeResolver(focus=self._ordinary())
+        normalizer = Normalizer(resolver=resolver, lag=lambda raw: next(lags))
+        events = drain(normalizer, [key(1.0, "a", "a"), key(1.05, "b", "b")])
+        typed = [e for e in events if isinstance(e, TextInput)][0]
+        assert typed.text == "ab" and typed.sensitive is False
+
+    def test_a_second_run_after_an_idle_gap_is_judged_afresh(self, key):
+        lags = iter([9.0, 0.0])
+        resolver = FakeResolver(focus=self._ordinary())
+        normalizer = Normalizer(resolver=resolver, lag=lambda raw: next(lags))
+        events = drain(normalizer, [key(1.0, "a", "a"), key(9.0, "b", "b")])
+        runs = [e for e in events if isinstance(e, TextInput)]
+        assert [r.sensitive for r in runs] == [True, False]
+
+
+class TestTypingBehindLiveInputWithAnEmptyQueue:
+    """Late, but nothing waiting can have moved focus, so the read still holds.
+
+    Measured live: resolving a click or a Tab costs 0.2-0.8s, so typing that
+    starts straight after one is nearly always past `focus_max_lag`. Failing
+    closed every time withheld ordinary text as `SECRET_n` and made which text
+    that happened to depend on how fast the machine was. The queue says what
+    the late read cannot: whether anything that moves focus came after.
+    """
+
+    @staticmethod
+    def _typed(key, queued, lag=0.8, **options):
+        resolver = FakeResolver(
+            focus=Target(x=0, y=0, element=ElementRef(role="entry", name="Email"))
+        )
+        normalizer = Normalizer(
+            options=NormalizerOptions(**options),
+            resolver=resolver,
+            lag=lambda raw: lag,
+            pending=queued,
+        )
+        events = drain(normalizer, [key(1.0, "p", "p"), key(1.05, "w", "w")])
+        return [e for e in events if isinstance(e, TextInput)][0], resolver
+
+    def test_an_empty_queue_keeps_the_focus_read(self, key):
+        typed, resolver = self._typed(key, lambda: [])
+        assert typed.sensitive is False
+        assert typed.target.element.name == "Email"
+        assert resolver.focus_calls == 1
+
+    def test_more_text_waiting_does_not_move_focus(self, key):
+        queued = [key(1.1, "q", "q"), key(1.15, "Shift_L"), key(1.2, "R", "R")]
+        typed, _ = self._typed(key, lambda: queued)
+        assert typed.sensitive is False
+
+    @pytest.mark.parametrize(
+        "keysym", ["Tab", "Return", "Escape", "Down", "Control_L", "Alt_L", "Super_L"]
+    )
+    def test_a_command_waiting_behind_it_could_have_moved_focus(self, key, keysym):
+        typed, resolver = self._typed(key, lambda: [key(1.1, keysym)])
+        assert typed.sensitive is True
+        assert typed.target is None
+        assert "0.8s behind" in typed.note
+        assert resolver.focus_calls == 0
+
+    def test_a_click_waiting_behind_it_could_have_moved_focus(self, key, press):
+        typed, _ = self._typed(key, lambda: [press(1.1)])
+        assert typed.sensitive is True
+
+    def test_releases_do_not_move_focus(self, key, release):
+        queued = [release(1.1), key(1.2, "Tab", kind="key_release")]
+        typed, _ = self._typed(key, lambda: queued)
+        assert typed.sensitive is False
+
+    def test_a_source_that_cannot_say_fails_closed(self, key):
+        typed, _ = self._typed(key, lambda: None)
+        assert typed.sensitive is True
+
+    def test_no_source_at_all_fails_closed(self, key):
+        typed, _ = self._typed(key, None)
+        assert typed.sensitive is True
+
+    def test_far_enough_behind_fails_closed_whatever_is_queued(self, key):
+        typed, _ = self._typed(key, lambda: [], lag=3.5)
+        assert typed.sensitive is True
+
+    def test_the_staleness_limit_is_an_option(self, key):
+        loose, _ = self._typed(key, lambda: [], lag=3.5, focus_stale_lag=10.0)
+        tight, _ = self._typed(key, lambda: [], lag=0.5, focus_stale_lag=0.4)
+        assert loose.sensitive is False
+        assert tight.sensitive is True
+
+    def test_a_run_that_keeps_up_never_asks_the_queue(self, key):
+        def boom():
+            raise AssertionError("asked the queue for a run that was on time")
+
+        typed, _ = self._typed(key, boom, lag=0.05)
+        assert typed.sensitive is False

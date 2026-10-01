@@ -11,8 +11,14 @@ recording it again.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import signal
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 from . import __version__
 from .analyzer import SyncOptions, infer_synchronization
@@ -417,6 +423,75 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
     )
 
 
+@contextlib.contextmanager
+def _interrupt_on_termination(recorder: Any = None) -> Iterator[None]:
+    """Let `kill`, a closed terminal and Ctrl-Break end a recording like Ctrl-C.
+
+    Python's default for SIGTERM and SIGHUP is to end the process on the spot,
+    so a recording stopped that way -- a `kill`, a CI step's timeout, an SSH
+    session dropping, a terminal window closed -- lost everything captured so
+    far, where Ctrl-C keeps it. Raising `KeyboardInterrupt` from the handler
+    sends these down the path Ctrl-C already takes: collect the tail, write
+    the script. Only the main thread can install handlers, so anywhere else
+    this changes nothing; the previous handlers are put back on the way out.
+
+    SIGINT is included only where it is *ignored*. A shell starts a background
+    job (`pyguitest-recorder -o x.py &`, `nohup`, a CI step) with SIGINT set to
+    ignore, Python honours that by not installing its own handler, and so
+    `kill -INT` -- the documented way to stop a recording -- did nothing at all,
+    silently: found when a test harness spawned recorders that never stopped.
+    Where SIGINT is not ignored Python's default already raises
+    `KeyboardInterrupt`, so nothing is replaced.
+
+    **Where the recorder says its interrupts must be cooperative** (X11, see
+    `Recorder.cooperative_interrupts`) nothing is raised at all. An exception
+    landing in the middle of a python-xlib request leaves that connection
+    believing another thread is still receiving, and the tail collection that
+    follows hangs on it -- found as a recording that would not stop 90 seconds
+    after SIGTERM, and reproduced without the recorder. The first signal stops
+    capture from a helper thread, exactly as the stop key does, so `run`
+    finishes its backlog and returns; a second gives up on what is left. SIGINT
+    is then taken over whether or not it was ignored, since Python's own Ctrl-C
+    is the same asynchronous exception.
+    """
+    names = ("SIGTERM", "SIGHUP", "SIGBREAK", "SIGINT")
+    previous: dict[int, Any] = {}
+    cooperative = bool(getattr(recorder, "cooperative_interrupts", False))
+    received = [0]
+
+    def interrupt(_signum: int, _frame: FrameType | None) -> None:
+        if not cooperative:
+            raise KeyboardInterrupt
+        received[0] += 1
+        if received[0] == 1:
+            threading.Thread(
+                target=recorder.stop, name="stop-on-signal", daemon=True
+            ).start()
+        else:
+            recorder.abandon_tail()
+
+    for name in names:
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        if (
+            name == "SIGINT"
+            and not cooperative
+            and signal.getsignal(number) is not signal.SIG_IGN
+        ):
+            continue
+        try:
+            previous[number] = signal.signal(number, interrupt)
+        except (ValueError, OSError):
+            continue
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(number, handler)
+
+
 def _record(
     settings: Settings,
     trim_from: float | None = None,
@@ -447,6 +522,12 @@ def _record(
     except CaptureUnavailable as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 1
+    # What the session could not open is known the moment it starts. Left to
+    # `_summarize`, a recording made without element context (every click a bare
+    # coordinate) says so only once it is over, after the whole interaction has
+    # been performed for nothing.
+    for note in recorder.recording.environment.notes:
+        print(f"note: {note}", file=sys.stderr)
     print(f"Recording. {_stop_hint(settings)} to stop.", file=sys.stderr)
     if settings.check_key:
         print(
@@ -458,7 +539,8 @@ def _record(
         file=sys.stderr,
     )
     try:
-        recording = recorder.run()
+        with _interrupt_on_termination(recorder):
+            recording = recorder.run()
     finally:
         recorder.stop()
     if recorder.unstopped_presses:

@@ -5,6 +5,8 @@ An unset flag that stays `None` is the mechanism by which the config file
 wins, and no end-to-end test would notice the difference.
 """
 
+import sys
+
 import pytest
 
 from pyguitest_recorder.cli import (
@@ -120,6 +122,7 @@ def _fake_recorder(assertion):
             self.on_stop_progress = None
             self.on_check = None
             self.on_lag = None
+            self.recording = Recording()
 
         def start(self):
             pass
@@ -162,6 +165,180 @@ def test_announce_checks_gates_the_live_check_feedback(tmp_path, capsys, monkeyp
         ]
     )
     assert "Check:" not in capsys.readouterr().err
+
+
+def test_a_degraded_session_is_said_when_recording_starts_not_after(
+    tmp_path, capsys, monkeypatch
+):
+    # "clicks will carry bare coordinates" is worth knowing before ten minutes
+    # of recording, not in the summary after them.
+    from pyguitest_recorder import cli
+
+    class Degraded(_fake_recorder(None)):
+        def __init__(self, settings):
+            super().__init__(settings)
+            self.recording.environment.notes.append(
+                "window and element context off: no pyguitest session"
+            )
+
+        def run(self):
+            print("RUNNING", file=sys.stderr)
+            return self.recording
+
+    monkeypatch.setattr(cli, "Recorder", Degraded)
+    main(["--config", str(_empty(tmp_path)), "-o", str(tmp_path / "s.py")])
+    err = capsys.readouterr().err
+    note = err.index("note: window and element context off")
+    assert note < err.index("Recording.")
+    assert note < err.index("RUNNING")
+
+
+def test_termination_signals_end_a_recording_like_ctrl_c_and_are_restored():
+    import signal
+
+    from pyguitest_recorder import cli
+
+    names = [n for n in ("SIGTERM", "SIGHUP", "SIGBREAK") if hasattr(signal, n)]
+    before = {n: signal.getsignal(getattr(signal, n)) for n in names}
+    with cli._interrupt_on_termination():
+        for name in names:
+            handler = signal.getsignal(getattr(signal, name))
+            assert handler is not before[name]
+            with pytest.raises(KeyboardInterrupt):
+                handler(getattr(signal, name), None)
+    assert {n: signal.getsignal(getattr(signal, n)) for n in names} == before
+
+
+def test_an_ignored_sigint_is_made_to_stop_the_recording_and_then_restored():
+    # A background job starts with SIGINT ignored, so `kill -INT` -- the
+    # documented way to stop a recording -- did nothing at all, silently.
+    import signal
+
+    from pyguitest_recorder import cli
+
+    original = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        with cli._interrupt_on_termination():
+            handler = signal.getsignal(signal.SIGINT)
+            assert handler is not signal.SIG_IGN
+            with pytest.raises(KeyboardInterrupt):
+                handler(signal.SIGINT, None)
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
+def test_a_sigint_that_is_not_ignored_is_left_alone():
+    # Python's default already raises KeyboardInterrupt; replacing it would
+    # only lose whatever a caller (a test runner, an IDE) had installed.
+    import signal
+
+    from pyguitest_recorder import cli
+
+    sentinel = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        with cli._interrupt_on_termination():
+            assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, sentinel)
+
+
+class _CooperativeRecorder:
+    """What `_interrupt_on_termination` needs of an X11 recorder."""
+
+    cooperative_interrupts = True
+
+    def __init__(self):
+        import threading
+
+        self.stopped = threading.Event()
+        self.abandoned = 0
+
+    def stop(self):
+        self.stopped.set()
+
+    def abandon_tail(self):
+        self.abandoned += 1
+
+
+def test_where_interrupts_are_cooperative_a_signal_stops_capture_and_raises_nothing():
+    # An exception delivered into the middle of a python-xlib request leaves
+    # that connection spinning forever; reproduced with no recorder at all, and
+    # live as a recording that would not stop 90s after SIGTERM. So on X11 the
+    # handler asks for a stop from another thread, as the stop key does.
+    import signal
+
+    from pyguitest_recorder import cli
+
+    recorder = _CooperativeRecorder()
+    with cli._interrupt_on_termination(recorder):
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)  # must not raise
+        assert recorder.stopped.wait(5), "stop() was never called"
+        assert recorder.abandoned == 0
+
+
+def test_a_second_signal_abandons_the_backlog_instead_of_raising():
+    import signal
+
+    from pyguitest_recorder import cli
+
+    recorder = _CooperativeRecorder()
+    with cli._interrupt_on_termination(recorder):
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)
+        recorder.stopped.wait(5)
+        handler(signal.SIGTERM, None)
+        handler(getattr(signal, "SIGHUP", signal.SIGTERM), None)
+        assert recorder.abandoned == 2
+
+
+def test_cooperative_interrupts_take_over_sigint_even_when_it_is_not_ignored():
+    # Python's own Ctrl-C is the same asynchronous exception, so it is replaced
+    # too -- and put back afterwards.
+    import signal
+
+    from pyguitest_recorder import cli
+
+    original = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        with cli._interrupt_on_termination(_CooperativeRecorder()):
+            assert signal.getsignal(signal.SIGINT) is not signal.default_int_handler
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
+def test_a_recorder_that_is_not_cooperative_still_gets_a_keyboard_interrupt():
+    import signal
+
+    from pyguitest_recorder import cli
+
+    class Plain:
+        cooperative_interrupts = False
+
+    with cli._interrupt_on_termination(Plain()):
+        handler = signal.getsignal(signal.SIGTERM)
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+
+
+def test_a_real_sigterm_raises_keyboard_interrupt_in_the_main_thread():
+    import os
+    import signal
+    import time
+
+    from pyguitest_recorder import cli
+
+    if not hasattr(signal, "SIGTERM") or os.name == "nt":
+        pytest.skip("Windows cannot deliver SIGTERM to itself this way")
+    with cli._interrupt_on_termination(), pytest.raises(KeyboardInterrupt):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(1)
 
 
 def test_debug_flag_reports_which_config_file_won_and_a_resolved_value(
