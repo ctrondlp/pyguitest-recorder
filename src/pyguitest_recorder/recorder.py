@@ -532,6 +532,8 @@ class Recorder:
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
     _consuming: bool = field(default=False, init=False)
+    _abandon_tail: bool = field(default=False, init=False)
+    """Set by `abandon_tail`: stop working through the backlog, keep what is done."""
     _lifecycle: threading.Lock = field(default_factory=threading.Lock, init=False)
     """Guards `_stopping`, `_consuming`, and the decision each makes about who
     closes the context. `stop` is called from another thread by design -- a
@@ -615,6 +617,8 @@ class Recorder:
             options=self._normalizer_options(),
             resolver=self._resolver,
             started=_now(),
+            lag=self._lag_of,
+            pending=self._pending_events,
         )
         try:
             self._backend.start()
@@ -638,7 +642,6 @@ class Recorder:
         """
         if self._backend is None or self._normalizer is None:
             raise RuntimeError("start() must be called before run()")
-        interrupted = False
         # From here until the last event has been consumed, `stop` leaves the
         # resolver and its session alone -- see `stop`. Everything below still
         # asks them which window and which element an event landed in, and a
@@ -651,12 +654,7 @@ class Recorder:
             already_stopped = self._stopping
             self._consuming = not already_stopped
         try:
-            try:
-                for raw in self._backend.events():
-                    if self._absorb(raw):
-                        break
-            except KeyboardInterrupt:
-                interrupted = True
+            interrupted = self._consume_the_stream()
             if interrupted:
                 self._collect_the_tail()
             # Presses held for a stop run that never completed are the
@@ -693,6 +691,29 @@ class Recorder:
         self._collect_warnings()
         return self.recording
 
+    def _consume_the_stream(self) -> bool:
+        """Work through live events until the stream ends. True if interrupted.
+
+        A `KeyboardInterrupt` is the interrupt where signals raise (Windows,
+        macOS); `abandon_tail` is the second interrupt where they do not (X11,
+        see `cooperative_interrupts`), checked between events so it can never
+        land inside a request.
+        """
+        assert self._backend is not None
+        try:
+            for raw in self._backend.events():
+                if self._absorb(raw):
+                    break
+                if self._abandon_tail:
+                    self.recording.environment.notes.append(
+                        "interrupted a second time while working through the "
+                        "backlog, so the end of this recording is missing"
+                    )
+                    break
+        except KeyboardInterrupt:
+            return True
+        return False
+
     def _collect_the_tail(self) -> None:
         """Sort in what capture had already delivered when the run was interrupted.
 
@@ -725,6 +746,33 @@ class Recorder:
                 "interrupted a second time while collecting what capture had "
                 "already delivered, so the end of this recording is missing"
             )
+
+    @property
+    def cooperative_interrupts(self) -> bool:
+        """Whether an interrupt must stop capture rather than raise into `run`.
+
+        True for X11. An exception delivered asynchronously to the consuming
+        thread lands wherever it happens to be, and on a recording that has
+        fallen behind that is almost always inside a python-xlib request --
+        python-xlib keeps per-connection bookkeeping it does not protect, so an
+        exception mid-request leaves the connection believing another thread is
+        still receiving. The tail collection that follows reuses that connection
+        and spins forever: reproduced with no recorder at all, three runs in
+        three, and live as a recording that would not stop 90 seconds after
+        SIGTERM. So on X11 a signal asks for a stop the way the stop key does,
+        from another thread, and `run` finishes normally.
+        """
+        return getattr(self._backend, "name", "") == "xrecord"
+
+    def abandon_tail(self) -> None:
+        """Stop working through the backlog, keeping the recording as it stands.
+
+        What a second interrupt means where `cooperative_interrupts` is true:
+        the first asked for a stop, which waits for everything capture had
+        already delivered; this gives up on the rest. Checked between events,
+        never mid-request.
+        """
+        self._abandon_tail = True
 
     @property
     def unstopped_presses(self) -> int:
@@ -786,6 +834,21 @@ class Recorder:
         """
         if getattr(raw, "injected", False) and getattr(raw, "kind", "") == "key_press":
             self._injected_keys.append(getattr(raw, "keysym", "") or "?")
+
+    def _pending_events(self) -> list[Any] | None:
+        """What capture holds that has not been consumed, or None if it cannot say.
+
+        None is not "nothing": a backend with no way to look at its queue gives
+        the analyzer no basis for trusting a late focus read, and it must be
+        told that rather than that the coast is clear.
+        """
+        pending = getattr(self._backend, "pending", None)
+        return pending() if callable(pending) else None
+
+    def _lag_of(self, raw: Any) -> float:
+        """Seconds between an event being captured and being consumed."""
+        now = _now()
+        return max(0.0, now - getattr(raw, "timestamp", now))
 
     def _note_lag(self, raw: Any) -> None:
         """Notice when consumption has fallen behind the input it is consuming.

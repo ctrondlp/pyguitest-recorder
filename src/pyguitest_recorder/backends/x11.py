@@ -488,6 +488,17 @@ class X11CaptureBackend:
                 raise CaptureUnavailable(str(item)) from item
             yield item
 
+    def pending(self) -> list[RawEvent]:
+        """What capture has delivered and nothing has consumed yet, oldest first.
+
+        A copy, taken under the queue's own lock, that leaves the queue exactly
+        as it was: the consumer is a different thread and goes on taking from it.
+        Errors and the end-of-stream marker are not events and are left out.
+        """
+        with self._queue.mutex:
+            queued = list(self._queue.queue)
+        return [item for item in queued if isinstance(item, RawEvent)]
+
     def drain(self) -> Iterator[RawEvent]:
         """Yield what the pump has already delivered, without waiting for more.
 
@@ -733,6 +744,11 @@ bug this project already fixed (see status.md), on X11 instead.
 """
 
 
+_MISC_KEYSYM_FIRST = 0xFF00
+_MISC_KEYSYM_LAST = 0xFFFF
+"""X11's miscellaneous-function-keys block, where no keysym is a character."""
+
+
 def _printable(keysym: int) -> str:
     """The character a keysym produces, or empty for a non-printing key."""
     if keysym >= _UNICODE_KEYSYM_BASE:
@@ -748,6 +764,14 @@ def _printable(keysym: int) -> str:
             return chr(codepoint)
         except ValueError:
             return ""
+    if _MISC_KEYSYM_FIRST <= keysym <= _MISC_KEYSYM_LAST:
+        # The miscellaneous block: Delete, Home, the arrows, F1-F35, the keypad
+        # and the modifiers. None of it is a character, but python-xlib's
+        # `keysym_to_string` answers for Delete (0xFFFF) with `chr(0xFF)`, so
+        # every press of Delete was recorded as typing "ÿ" -- and replayed as
+        # `type_text("ÿ")`, which a scancode backend rightly refuses. Found
+        # replaying a recorded text-editing session on a live desktop.
+        return ""
     try:
         from Xlib import XK
     except ImportError:  # pragma: no cover - reached only without python-xlib

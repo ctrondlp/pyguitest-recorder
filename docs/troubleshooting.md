@@ -9,6 +9,9 @@ that specific recording.
 - [Nothing was captured at all](#nothing-was-captured-at-all)
 - [On Windows, one window records nothing](#on-windows-one-window-records-nothing)
 - [The recording stopped when I did not mean it to](#the-recording-stopped-when-i-did-not-mean-it-to)
+- [Text I typed came out as `SECRET_1`](#text-i-typed-came-out-as-secret_1)
+- [I killed the recorder and lost the recording](#i-killed-the-recorder-and-lost-the-recording)
+- [A coordinate click replays a title bar too high on GNOME](#a-coordinate-click-replays-a-title-bar-too-high-on-gnome)
 - [The check key typed into the application instead of recording a check](#the-check-key-typed-into-the-application-instead-of-recording-a-check)
 - [The script clicked the wrong thing](#the-script-clicked-the-wrong-thing)
 - [The script fails at replay](#the-script-fails-at-replay)
@@ -22,7 +25,9 @@ the recorder could not *reach* the accessibility layer, or it reached it and
 did not *believe* what it was told.
 
 **Start with `--doctor`.** If element resolution is off, that is the whole
-answer — see [the next section](#doctor-says-element-resolution-is-off).
+answer — see [the next section](#doctor-says-element-resolution-is-off). A
+recording made that way says so as it starts, in a `note:` line above
+`Recording.`, so you need not perform the whole interaction to find out.
 
 If resolution is on, the recorder looked and refused. It drops an accessible
 element, and falls back to a coordinate, whenever the answer cannot be
@@ -162,6 +167,68 @@ XRecord/X11-only, so a press landing on a genuinely native-Wayland surface (no
 XWayland presence at all) never reaches the recorder in the first place — see
 `docs/developers/architecture.md#why-wayland-has-no-capture-backend`.
 
+## Text I typed came out as `SECRET_1`
+
+Typed text is withheld from the script, and replaced by an environment variable
+you supply at replay, for one of two reasons. The script says which, in a comment
+above the line.
+
+- **It went into a password field.** The comment says so. Nothing else is needed.
+- **The recorder was behind live input when the typing started.** The comment
+  says how far behind. Keyboard focus is read when a typed run is processed, not
+  when it was typed, and reading it takes time; behind a backlog it reports where
+  focus is *now*, which after a Tab is the next field. A stale answer that names an
+  ordinary field while you are typing a password would put the password in the
+  script, so past 0.25s behind, the recorder claims no field and withholds the text
+  instead -- unless nothing that could have moved focus (a click, a Tab, Return,
+  an arrow, a shortcut) was typed after it, in which case focus is still where the
+  typing went and it is read normally. On Linux that check is made against what
+  capture has queued; elsewhere, and past 3s behind, the text is withheld. It is
+  not known to have been secret.
+
+The second is most likely when typing fast, or when the desktop is busy — machine
+typing, a replay being re-recorded, a slow accessibility tree. Typing at a human
+pace keeps up. Either way the replay needs `SECRET_1` and so on set in its
+environment, in the order they appear in the script's header. `--doctor` on a
+desktop whose accessibility tree is slow is a fair first check, and the
+`note: the recorder is N.Ns behind live input` lines printed while recording say
+when it happened.
+
+## I killed the recorder and lost the recording
+
+Ctrl-C, `kill` (SIGTERM or `kill -INT`), a closed terminal or dropped SSH session
+(SIGHUP) and, on Windows, Ctrl-Break all end a recording the same way -- including
+when the recorder was started as a background job (`&`, `nohup`, a CI step), which
+a shell starts with SIGINT ignored: what was captured is
+collected and the script is written, as if you had pressed the stop key. A
+second Ctrl-C while it collects gives up the events still queued and keeps the
+rest. What cannot be caught is a signal the process never sees — `kill -9`, a
+crash, or the machine losing power — and those lose the recording, because
+nothing is written until the end. End a long recording with the stop key or
+Ctrl-C rather than by killing the process outright.
+
+## A coordinate click replays a title bar too high on GNOME
+
+A click the recorder could not name -- a drawing area, an unnamed control -- is
+written as an offset from its window's origin. The recorder measures that origin
+through the X11 backend, which reports the client window; a generated script's
+bare `pyguitest.connect()` replays it through the GNOME Shell extension when that
+is installed, which reports the visible frame including the title bar. On GNOME
+Shell 51.0 the two differed by 37 pixels vertically for a GTK3 window under
+XWayland, so every such click landed 37 pixels too high.
+
+Elements the recorder names are not affected, because they are found by name at
+replay. For the rest, pin the session the way the recorder measured, input
+backend first:
+
+```python
+with pyguitest.connect(backend=["input", "x11", "atspi"]) as gui:
+```
+
+Measured with it, a replayed recording reproduced the original's event log and
+final state exactly. Detail, and why the two disagree, in pyguitest's
+[troubleshooting](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md#geometry-is-a-few-dozen-pixels-off-between-two-sessions-on-gnome).
+
 ## The check key typed into the application instead of recording a check
 
 The check key matches *exactly*, so a held Shift silently turns a check into a
@@ -252,32 +319,34 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.16.0 or newer is required
-outright** — the floor the generated code is verified against. Generated
-scripts may call `Element.expand()`/`.collapse()` or read `.selectable`
-directly (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and
-later), double-click named elements with `Element.double_click` (0.10.0), and
-under `motion = "natural"` or `"recorded"` move the pointer with
+older than the recording expects. **pyguitest 0.16.1 or newer is required
+outright** — the floor the generated code is verified against. Generated scripts
+may call `Element.expand()`/`.collapse()` or read `.selectable` directly
+(0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),
+double-click named elements with `Element.double_click` (0.10.0), and under
+`motion = "natural"` or `"recorded"` move the pointer with
 `Session.move_mouse_naturally` (0.10.1). 0.11.0 is the first release that
-imports on Windows at all, and 0.14.0 is the one a macOS recording needs:
-before it there is no `macos` backend for the recording's windows and
-elements to be resolved through, and no `macquartz` key vocabulary for its
-key names to be translated through. 0.15.0 was where the floor stood with
-nothing generated here actually needing what it added -- simply the release
-the output was last verified against. 0.15.1 was a real need: a script under
-`locators = "element"` (the default) scopes its search with
-`gui.window_element(title)`, and an older pyguitest there could resolve that
-call to a shell-owned decoration proxy instead of the real window on a real
-GNOME/Mutter desktop, found live. 0.16.0 is a real need in the same silent
-way: `gui.tap_key(...)` on Windows injected keys that carried no scan code and
-no extended bit, `expect_checked` read a selected radio button as unchecked,
-macOS `double_click()` sent two single clicks where `gui.drag()` posted no drag
-events, and `find_window`/`wait_for_window` could name the window behind
-another with the same title. None of that raises on its own -- a script left on
-0.15.1 presses a key the layout does not spell, or is told a control is not set
-when it plainly is -- which is why the floor is what it is. Older floors matter
-as well:
-`gui.button(...)` finds nothing on a current at-spi2 before 0.5.0.
+imports on Windows at all, and 0.14.0 is the one a macOS recording needs: before
+it there is no `macos` backend for the recording's windows and elements to be
+resolved through, and no `macquartz` key vocabulary for its key names to be
+translated through. 0.15.0 was where the floor stood with nothing generated here
+actually needing what it added -- simply the release the output was last
+verified against. 0.15.1 was a real need: a script under `locators = "element"`
+(the default) scopes its search with `gui.window_element(title)`, and an older
+pyguitest there could resolve that call to a shell-owned decoration proxy
+instead of the real window on a real GNOME/Mutter desktop, found live. 0.16.0 is
+a real need in the same silent way: `gui.tap_key(...)` on Windows injected keys
+that carried no scan code and no extended bit, `expect_checked` read a selected
+radio button as unchecked, macOS `double_click()` sent two single clicks where
+`gui.drag()` posted no drag events, and `find_window`/`wait_for_window` could
+name the window behind another with the same title. None of that raises on its
+own -- a script left on 0.15.1 presses a key the layout does not spell, or is
+told a control is not set when it plainly is -- which is why the floor is what
+it is. 0.16.1 is a patch step with the same character: on Linux,
+`Element.click()` on a GTK switch or toggle button did nothing, and the `input`
+backend's pointer landed one pixel short of an absolute position, so a recorded
+coordinate click missed by one. Older floors matter as well: `gui.button(...)`
+finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
 

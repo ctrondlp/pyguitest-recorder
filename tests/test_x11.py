@@ -510,6 +510,27 @@ def test_printable_rejects_control_characters():
     assert _printable(XK.XK_Escape) == ""
 
 
+def test_delete_is_not_the_letter_y_with_a_diaeresis():
+    # python-xlib's keysym_to_string(0xFFFF) is chr(0xFF). Live, every press of
+    # Delete was recorded as typed text "ÿ" and replayed as type_text of it.
+    from Xlib import XK
+
+    assert XK.keysym_to_string(XK.XK_Delete) == "ÿ"  # the library's own answer
+    assert _printable(XK.XK_Delete) == ""
+
+
+def test_no_keysym_in_the_miscellaneous_block_is_a_character():
+    # Home, the arrows, Insert, F1-F35, the keypad, the modifiers, Delete: all of
+    # 0xFF00-0xFFFF is keys, not text, whatever a keysym-to-string table says.
+    assert [k for k in range(0xFF00, 0x10000) if _printable(k)] == []
+
+
+def test_latin1_and_the_unicode_block_are_unaffected_by_that():
+    assert _printable(0x00E9) == "é"
+    assert _printable(0x0100_00E9) == "é"
+    assert _printable(0x0041) == "A"
+
+
 def test_printable_decodes_the_direct_unicode_keysym_block():
     """ICCCM's 0x01000000+codepoint block.
 
@@ -740,6 +761,23 @@ def test_drain_takes_only_what_was_queued_when_it_was_called():
     assert [e.kind for e in made.drain()] == ["button_press"]
     made._handle(FakeReply(release()))
     assert [e.kind for e in made.drain()] == ["button_release"]
+
+
+def test_pending_shows_the_queue_without_taking_anything_from_it():
+    made = backend()
+    made._handle(FakeReply(press()))
+    made._handle(FakeReply(release()))
+    assert [e.kind for e in made.pending()] == ["button_press", "button_release"]
+    # Looked at, not consumed: a reader still gets all of it, in order.
+    assert [e.kind for e in made.drain()] == ["button_press", "button_release"]
+
+
+def test_pending_leaves_out_the_pumps_error_and_the_end_of_stream_marker():
+    made = backend()
+    made._queue.put(RuntimeError("the X server went away"))
+    made._handle(FakeReply(press()))
+    made.stop()
+    assert [e.kind for e in made.pending()] == ["button_press"]
 
 
 def test_drain_leaves_the_end_of_stream_marker_for_a_reader():

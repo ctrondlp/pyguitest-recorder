@@ -14,6 +14,7 @@ held until something forces them out.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from ..backends.base import RawEvent
@@ -122,6 +123,31 @@ class NormalizerOptions:
     text_idle: float = 1.5
     """Seconds of keyboard silence that end a run of typed text."""
 
+    focus_max_lag: float = 0.25
+    """How far behind live input a typed run may start and still trust focus.
+
+    Keyboard focus is read when a run is *consumed*, not when it was typed, and
+    the read itself walks the accessible tree -- about 400ms on a busy desktop.
+    Behind a backlog the answer is where focus is now, which after a Tab is the
+    next field: measured live, an email typed into one field was attributed to
+    the password field below it, and the password after it to a third. The
+    harm is not the wrong name. A stale answer that names an earlier, ordinary
+    field while the user is typing a password writes the password into the
+    script in clear. So past this lag the run claims no field and is withheld as
+    sensitive, with a note on the event saying why. Zero distrusts every run;
+    a huge value restores the old behaviour."""
+
+    focus_stale_lag: float = 3.0
+    """How far behind a run may start before focus is distrusted whatever is queued.
+
+    Behind `focus_max_lag` a run is still trusted when nothing that could have
+    moved focus is waiting in capture's queue (see `Normalizer.pending`): the
+    field focus is in now is then the field it was in when the keys were typed.
+    That argument covers input, and only input -- an application that moves its
+    own focus, or a window that opens, leaves no trace in the queue -- and the
+    longer the recorder has been behind, the more of that has had time to
+    happen. Past this lag the run fails closed regardless."""
+
     pause_threshold: float = 1.0
     """Seconds of inactivity that become an explicit Pause event."""
 
@@ -204,6 +230,7 @@ class _Typed:
     timestamp: float = 0.0
     last: float = 0.0
     sensitive: bool = False
+    note: str = ""
 
 
 @dataclass
@@ -227,6 +254,24 @@ class _Rest:
     screen: int
 
 
+def _may_move_focus(raw: RawEvent) -> bool:
+    """Whether this input could change which element has keyboard focus.
+
+    Deliberately wide. A press can focus what it lands on; a key with no text
+    (Tab, Return, Escape, arrows) or any key held with Ctrl, Alt or Super is a
+    command, and commands open dialogs and move between fields. Only a modifier
+    that makes text, and a key that is text, are known not to.
+    """
+    if raw.kind == "button_press":
+        return True
+    if raw.kind != "key_press":
+        return False
+    modifier = MODIFIERS.get(raw.keysym)
+    if modifier is not None:
+        return modifier not in _TEXT_SAFE
+    return not raw.text
+
+
 @dataclass
 class Normalizer:
     """Group raw events into canonical ones."""
@@ -234,6 +279,18 @@ class Normalizer:
     options: NormalizerOptions = field(default_factory=NormalizerOptions)
     resolver: ContextResolver = field(default_factory=NullResolver)
     started: float = 0.0
+    lag: Callable[[RawEvent], float] | None = None
+    """How many seconds behind live input an event is being consumed.
+
+    Supplied by the recorder, which alone knows the clock events were stamped
+    with; a replayed or synthetic stream has none and is never "behind"."""
+    pending: Callable[[], Sequence[RawEvent] | None] | None = None
+    """What capture has delivered that this normalizer has not yet been fed.
+
+    Supplied by the recorder where the backend can show its queue. It lets a run
+    that started behind live input be trusted when nothing in that queue moves
+    focus. None, or a source that answers None, means "cannot say", and a run
+    that started behind is withheld as before."""
 
     _held: dict[int, _Pending] = field(default_factory=dict, init=False)
     _typed: _Typed = field(default_factory=_Typed, init=False)
@@ -551,7 +608,13 @@ class Normalizer:
             self._mods.add(modifier)
             return []
         active = self._mods - _TEXT_SAFE
-        if active:
+        # Shift and AltGr make text, so with a key that *has* text they are not
+        # a command. With one that has none -- Left, Home, Tab, Return, F-keys --
+        # there is no text for them to be making, and Shift+Left is a different
+        # command from Left: it selects. Dropping the Shift recorded a
+        # three-character selection as three cursor moves, and the replay's
+        # copy and paste then acted on nothing.
+        if active or (self._mods and not raw.text):
             out = self._flush_text()
             # Every modifier actually held, not just the ones that decided
             # this was a hotkey at all. Shift and AltGr are excluded from that
@@ -616,16 +679,46 @@ class Normalizer:
         if self._typed.text and idle > self.options.text_idle:
             out = self._flush_text()
         if not self._typed.text:
-            focused = self.resolver.focused()
-            target = self._text_target(raw, focused)
-            self._typed = _Typed(
-                target=target,
-                timestamp=self._at(raw),
-                sensitive=self.options.sensitive or self._is_secret(target, focused),
-            )
+            behind = self.lag(raw) if self.lag is not None else 0.0
+            if behind > self.options.focus_max_lag and self._focus_untrusted(behind):
+                # Focus read now is focus after whatever was typed since, so it
+                # cannot name the field this started in -- and getting that
+                # wrong toward "not a password" leaks one. Fail closed.
+                self._typed = _Typed(
+                    target=None,
+                    timestamp=self._at(raw),
+                    sensitive=True,
+                    note=(
+                        f"typed while the recorder was {behind:.1f}s behind live "
+                        "input, so the field this went into could not be read "
+                        "reliably; the text is withheld in case it was a password"
+                    ),
+                )
+            else:
+                focused = self.resolver.focused()
+                target = self._text_target(raw, focused)
+                self._typed = _Typed(
+                    target=target,
+                    timestamp=self._at(raw),
+                    sensitive=self.options.sensitive
+                    or self._is_secret(target, focused),
+                )
         self._typed.text += raw.text
         self._typed.last = raw.timestamp
         return out
+
+    def _focus_untrusted(self, behind: float) -> bool:
+        """Whether a focus read taken `behind` seconds late may name the wrong field.
+
+        Focus moves because input moves it, so a recorder that is late but has
+        nothing queued that could move focus reads, now, the field the keys went
+        into. Only the queue can say so, and only where the backend shows it: no
+        answer is "untrusted", the same as a recorder that is far too late.
+        """
+        if behind > self.options.focus_stale_lag or self.pending is None:
+            return True
+        queued = self.pending()
+        return queued is None or any(_may_move_focus(raw) for raw in queued)
 
     def _is_secret(self, target: Target, focused: Target | None) -> bool:
         """Whether this run of typing must never reach the generated script.
@@ -686,6 +779,7 @@ class Normalizer:
             text=self._typed.text,
             target=self._typed.target,
             sensitive=self._typed.sensitive,
+            note=self._typed.note,
         )
         self._typed = _Typed()
         return [event]

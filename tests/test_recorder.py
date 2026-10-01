@@ -12,6 +12,8 @@ import time
 from typing import Any
 from unittest import mock
 
+import pytest
+
 from conftest import FakeResolver
 from pyguitest_recorder.analyzer import Normalizer
 from pyguitest_recorder.backends import x11 as x11_module
@@ -451,6 +453,120 @@ def test_a_stop_landing_before_run_claims_the_context_does_not_lose_it() -> None
     recording = recorder.run()
     assert not session.closed, "the run must not close a context it never claimed"
     assert recording.events == []
+
+
+class TestLagFeedsTheNormalizer:
+    """The recorder is what knows how old an event is, so it tells the normalizer."""
+
+    def test_lag_is_the_age_of_the_event_on_the_capture_clock(self):
+        recorder = Recorder(settings=Settings())
+        with mock.patch("pyguitest_recorder.recorder._now", return_value=110.6):
+            lag = recorder._lag_of(RawEvent(kind="key_press", timestamp=110.0))
+            assert lag == pytest.approx(0.6)
+
+    def test_an_event_stamped_in_the_future_is_not_negative_lag(self):
+        recorder = Recorder(settings=Settings())
+        with mock.patch("pyguitest_recorder.recorder._now", return_value=5.0):
+            assert recorder._lag_of(RawEvent(kind="key_press", timestamp=9.0)) == 0.0
+
+    def test_start_hands_the_normalizer_that_clock(self):
+        recorder = _recorder(FakeSession())
+        with mock.patch(
+            "pyguitest_recorder.recorder.choose_backend",
+            return_value=FakeBackend(fails=False),
+        ):
+            recorder.start()
+        try:
+            assert recorder._normalizer is not None
+            assert recorder._normalizer.lag == recorder._lag_of
+        finally:
+            recorder.stop()
+
+    def test_start_hands_the_normalizer_the_backends_queue(self):
+        recorder = _recorder(FakeSession())
+        backend = FakeBackend(fails=False)
+        queued = [RawEvent(kind="key_press", timestamp=1.0, keysym="Tab")]
+        backend.pending = lambda: queued  # type: ignore[attr-defined]
+        with mock.patch(
+            "pyguitest_recorder.recorder.choose_backend", return_value=backend
+        ):
+            recorder.start()
+        try:
+            assert recorder._normalizer is not None
+            assert recorder._normalizer.pending() == queued
+        finally:
+            recorder.stop()
+
+    def test_a_backend_that_cannot_show_its_queue_answers_none_not_empty(self):
+        # Empty would say "nothing could have moved focus" and trust a late read.
+        recorder = _recorder(FakeSession())
+        with mock.patch(
+            "pyguitest_recorder.recorder.choose_backend",
+            return_value=FakeBackend(fails=False),
+        ):
+            recorder.start()
+        try:
+            assert recorder._pending_events() is None
+        finally:
+            recorder.stop()
+
+
+class TestCooperativeInterrupts:
+    """On X11 an interrupt stops capture; it is never raised into `run`."""
+
+    def test_only_the_x11_backend_asks_for_it(self):
+        for name, expected in (("xrecord", True), ("win32", False), ("macos", False)):
+            recorder = Recorder(settings=Settings())
+            recorder._backend = mock.Mock()
+            recorder._backend.name = name
+            assert recorder.cooperative_interrupts is expected, name
+
+    def test_with_no_backend_it_is_not_cooperative(self):
+        assert Recorder(settings=Settings()).cooperative_interrupts is False
+
+    def test_abandoning_the_tail_ends_the_run_early_and_says_so(self):
+        recorder = _recorder(FakeSession())
+
+        class Backend(FakeBackend):
+            def events(self_inner):
+                for i in range(6):
+                    if i == 2:
+                        recorder.abandon_tail()
+                    yield RawEvent(
+                        kind="key_press", timestamp=1.0 + i, keysym="a", text="a"
+                    )
+
+        with mock.patch(
+            "pyguitest_recorder.recorder.choose_backend", return_value=Backend()
+        ):
+            recorder.start()
+        recording = recorder.run()
+        assert any(
+            "interrupted a second time" in note for note in recording.environment.notes
+        )
+        typed = "".join(getattr(e, "text", "") for e in recording.events)
+        assert 0 < len(typed) < 6
+
+    def test_a_stop_from_another_thread_still_consumes_what_was_queued(self):
+        import threading
+
+        recorder = _recorder(FakeSession())
+
+        class Backend(FakeBackend):
+            def events(self_inner):
+                yield RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a")
+                stopper = threading.Thread(target=recorder.stop)
+                stopper.start()
+                stopper.join()
+                # What capture had already delivered is still in the queue.
+                yield RawEvent(kind="key_press", timestamp=1.1, keysym="b", text="b")
+
+        with mock.patch(
+            "pyguitest_recorder.recorder.choose_backend", return_value=Backend()
+        ):
+            recorder.start()
+        recording = recorder.run()
+        assert "".join(getattr(e, "text", "") for e in recording.events) == "ab"
 
 
 class TestTheCollectedTail:
