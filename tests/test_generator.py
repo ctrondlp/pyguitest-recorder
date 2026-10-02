@@ -1716,6 +1716,16 @@ _TOGGLE = (
     f"            {_ROW}.expand()\n"
 )
 
+# A GTK3 tree row is published as a `table cell`, and a click in its
+# disclosure gutter is the same toggle as the double click `_TOGGLE` covers.
+_CELL = 'gui.element(role=Role.TABLE_CELL, name="Documents")'
+_CELL_TOGGLE = (
+    f"if {_CELL}.expanded:\n"
+    f"            {_CELL}.collapse()\n"
+    "        else:\n"
+    f"            {_CELL}.expand()\n"
+)
+
 
 @pytest.mark.needs_ruff
 @pytest.mark.parametrize("expanded", [False, True])
@@ -1767,6 +1777,78 @@ def test_locators_absolute_keeps_the_coordinate_for_an_expandable_row(window):
     )
     assert ".expand()" not in source
     assert "gui.double_click()" in source
+
+
+def test_a_click_in_a_tree_rows_disclosure_gutter_replays_as_the_toggle(window):
+    # Measured live on GTK3: a row is opened *and* closed by a single click on
+    # the triangle left of its cell -- a double click there toggles twice and
+    # changes nothing. Rendered as the toggle, the click names the row instead
+    # of falling to a coordinate, and reads the row's state at replay rather
+    # than trusting a recorded `expanded` read after the fact.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(Click(target=Target(x=63, y=141, window=window, element=row)))
+    assert _CELL_TOGGLE in source
+    assert ".select()" not in source
+    assert validate(source) == []
+
+
+def test_a_click_on_a_tree_rows_cell_body_is_still_a_select(window):
+    # The same row, clicked on the cell rather than its triangle, selects: the
+    # gutter is the only strip that toggles, and a `select()` there would leave
+    # the row shut where the recording opened it.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(Click(target=Target(x=340, y=141, window=window, element=row)))
+    assert ".select()" in source
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
+def test_a_click_outside_a_rows_own_band_is_not_a_toggle(window):
+    # The gutter is only the row's own vertical band: a point level with no
+    # row, or past a leaf's, is not the triangle of any row.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(Click(target=Target(x=63, y=400, window=window, element=row)))
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
+def test_a_gutter_click_on_a_non_expandable_element_is_not_a_toggle(window):
+    icon = ElementRef(
+        role="icon", name="Computer", extents=(83, 131, 24, 24), selectable=True
+    )
+    source = render(Click(target=Target(x=63, y=141, window=window, element=icon)))
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
+def test_locators_absolute_keeps_the_coordinate_for_a_gutter_click(window):
+    row = ElementRef(
+        role="table cell", name="Documents", extents=(83, 131, 552, 21), expanded=False
+    )
+    source = render(
+        Click(target=Target(x=63, y=141, window=window, element=row)),
+        locators="absolute",
+    )
+    assert ".expand()" not in source
+    assert "gui.click()" in source
 
 
 def test_a_double_click_on_a_named_element_stays_one_gesture(window):

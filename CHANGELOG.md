@@ -5,6 +5,37 @@ was released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A click on a GTK3 tree row's disclosure triangle recorded as a bare
+  coordinate, so the generated script never opened the row.** The triangle that
+  opens -- and closes -- a row is a *single* click in the strip just left of the
+  row's cell, measured live at about 30px left of the cell's x and one 18px
+  indent further in for each level below the top. That point is outside the
+  rectangle AT-SPI reports for the row, so the hit test answers the *view*
+  (`tree table 'Folders'`) and the only locator left was a coordinate: the one
+  that stops working the moment the window moves. Found by a record -> generate
+  -> replay -> re-record round trip against a two-level GTK3 tree on a private
+  Xvfb, where the replayed script folded the tree back while the recording it
+  was made from held no name for the click at all.
+
+  The resolver now recovers the row from the view's own children -- an
+  expandable row whose vertical band holds the point and whose rectangle begins
+  to its right -- and the generator renders that click as the
+  `expand()`/`collapse()` toggle, decided at replay, that a double click on a
+  disclosure control already gets. A click on the row's *cell* is deliberately
+  untouched: that one still selects, which is what clicking the body of a GTK3
+  tree row does. On the same round trip `Documents` and `Reports` now record as
+  named `table cell` elements with a toggle apiece, where every triangle click
+  used to be a `tree table 'Folders'` coordinate.
+
+  One thing the toggle does not reproduce, measured on that round trip and left
+  as it is: the triangle click that opened a row *also selected* it, and
+  `expand()`/`collapse()` do not, so a recording that ends on a row's triangle
+  can come back with that row unselected. Selecting a row is not part of opening
+  it, and a `select()` written on the off chance would act where the recording
+  did not ask for it.
+
 ## [0.8.2] — 2026-10-01
 
 ### Changed

@@ -316,6 +316,18 @@ worth reconstructing, only that replay must not let two clicks the recording
 already decided were separate collapse back into one on replay.
 """
 
+_DISCLOSURE_GUTTER = 40
+"""Pixels left of a row's own rectangle its disclosure triangle can sit in.
+
+The generator's copy of the width `windows/resolver.py` measures with, kept
+equal deliberately: the resolver is what decides a click landed on a row's
+disclosure triangle rather than its cell, and this is what tells the two
+renders apart afterwards. A GTK3 tree row is *opened* by a single click in
+that strip -- measured live: the triangle is about 30px left of the cell's x,
+a click on the cell body only selects, and a double click toggles twice and
+leaves the row as it was.
+"""
+
 _KEY_ACTION_SETTLE_FLOOR = 0.15
 _KEY_ACTION_SETTLE_CAP = 1.0
 """The window a dropped gap after a keystroke is restored within.
@@ -1245,6 +1257,13 @@ class PythonGenerator:
         if event.button == 1 and event.count == 2 and self._expand_click(event, state):
             state.bare_click_pending = False
             return
+        if (
+            event.button == 1
+            and event.count == 1
+            and self._disclosure_click(event, state)
+        ):
+            state.bare_click_pending = False
+            return
         if event.button == 1 and event.count == 2 and self._double_click(event, state):
             state.bare_click_pending = False
             return
@@ -1340,6 +1359,48 @@ class PythonGenerator:
         element = event.target.element
         if element is None or not element.expandable:
             return False
+        return self._render_toggle(element, state)
+
+    def _disclosure_click(self, event: Click, state: _State) -> bool:
+        """Render a single click on a disclosure gutter as expand()/collapse().
+
+        The mouse path onto the same control `_expand_click` handles, and the
+        one a GTK3 tree actually answers to. A row there is opened -- and
+        closed -- by a *single* click on the triangle in the gutter left of its
+        cell, measured live; a double click on that same triangle toggles twice
+        and leaves the row as it was, which is why `_expand_click` never fired
+        for a row opened by hand on this platform.
+
+        Without this the click is answered by the row's cell, which renders as
+        `select()` -- a real call that does the wrong thing, leaving the row
+        closed -- or by the view itself, which offers no action and falls all
+        the way to a coordinate. Which strip is the gutter is decided from the
+        element's own rectangle: the point has to be within the row's vertical
+        band and to the *left* of where the cell begins, the only place the
+        triangle can be.
+        """
+        element = event.target.element
+        if element is None or not element.expandable or element.extents is None:
+            return False
+        ex, ey, _width, height = element.extents
+        x, y = event.target.x, event.target.y
+        if not (ey <= y <= ey + height and ex - _DISCLOSURE_GUTTER <= x < ex):
+            return False
+        return self._render_toggle(element, state)
+
+    def _render_toggle(self, element: ElementRef, state: _State) -> bool:
+        """Render the replay-decided expand()/collapse() toggle for an element.
+
+        Read at replay -- collapse if open, expand if not -- rather than as a
+        direction fixed from the `expanded` the recording captured: that read is
+        not reliably from before the click (see `_expand_click`), so replaying
+        the toggle itself reproduces the recording from whatever state it
+        started in.
+
+        Shared by both mouse routes onto a disclosure control, the double click
+        of `_expand_click` and the single gutter click of `_disclosure_click`,
+        which differ only in the gesture that gets here.
+        """
         locator = self._element_expr(element, state)
         if locator is None:
             return False

@@ -104,6 +104,45 @@ manager reports, which is ordinary. Being *larger than the whole window* is
 not, and that is what this catches.
 """
 
+DISCLOSURE_GUTTER = 40
+"""Pixels left of a row's own rectangle its disclosure triangle can sit in.
+
+A GTK3 tree row is *opened* by a single click on the triangle in the strip
+just left of the row's cell, so that point is outside the rectangle AT-SPI
+reports for the row and a plain containment test refuses it. Measured live on
+this repository's own GTK3 probe window: the triangle sits about 30px left of
+the cell's x, and the cell begins at 83 at the top level and one indent (18px)
+further in per level below it.
+"""
+
+DISCLOSURE_CONTAINERS = frozenset({"tree table", "tree"})
+"""Views whose rows AT-SPI hit-tests too coarsely to name.
+
+A point in a GTK3 tree row's disclosure gutter is answered with the *view* --
+`tree table` -- rather than the row, so the click it belongs to has no name
+and the generated script keeps a coordinate. Only these two roles are refined:
+a plain `table` or `list` has no disclosure gutter, and walking one on every
+press would be cost for nothing.
+"""
+
+_ROW_ROLES = frozenset({"table cell", "tree item", "list item", "table row"})
+"""What a tree view's row is published as, across AT-SPI toolkits.
+
+GTK3 answers `table cell` for the rows of a `tree table`; a toolkit that
+publishes a real hierarchy answers `tree item`, and a flat view `list item`.
+"""
+
+DISCLOSURE_REACH = 400
+"""How far right of a view's own edge a disclosure gutter can possibly be.
+
+Every level of a tree indents its rows, so the triangle of a deep row sits
+further in than the last one's: about 40px at the top level and 18px more per
+level below it. This is the bound that keeps the child read
+`_refine_disclosure` makes off the path of a press in the middle of a wide
+view, where no row's triangle can be -- 20-odd levels deep, which is further
+than a tree anyone drives by hand goes.
+"""
+
 DECORATION_SLACK = 40
 """Pixels outside a window's client rect still treated as that window's own.
 
@@ -787,7 +826,11 @@ class DesktopResolver:
         element = self._element(x, y) if self._resolves_elements else None
         if element is not None and not self._is_widget(element):
             return Target(x=x, y=y, screen=screen, window=window)
-        if element is not None and not self._covers(element, x, y):
+        if (
+            element is not None
+            and not self._in_disclosure_gutter(element, x, y)
+            and not self._covers(element, x, y)
+        ):
             return Target(x=x, y=y, screen=screen, window=window)
         if element is not None and not self._belongs(element, window):
             return Target(x=x, y=y, screen=screen, window=window)
@@ -1086,6 +1129,70 @@ class DesktopResolver:
             f"for ({x}, {y})); this toolkit's hit-testing cannot be trusted"
         )
         return False
+
+    def _in_disclosure_gutter(self, element: ElementRef, x: int, y: int) -> bool:
+        """Whether this point is the disclosure gutter of an expandable element.
+
+        The one exception `_covers` has: a tree row is opened from a point
+        *outside* its own rectangle -- see `DISCLOSURE_GUTTER` -- so plain
+        containment refuses the very row whose triangle was clicked, and the
+        recording loses the name it had just found. Only an element that can
+        actually expand, and only within the gutter's width of its left edge,
+        so this cannot rescue a genuinely unrelated point.
+        """
+        if not element.expandable or element.extents is None:
+            return False
+        ex, ey, _width, height = element.extents
+        return ey <= y <= ey + height and ex - DISCLOSURE_GUTTER <= x < ex
+
+    def _refine_disclosure(self, container: Any, x: int, y: int) -> Any:
+        """The expandable row this point is the disclosure gutter of, if any.
+
+        Answers a gap the GTK3 click round trip falls into: the triangle that
+        *opens* a tree row is a single click in the strip left of the row's
+        cell, and AT-SPI answers the view for that point rather than the row --
+        so the recording holds a container with no click action, and the
+        generated script is a coordinate, the one locator guaranteed to break
+        when the window moves. Measured live: `element_at` on the triangle of
+        `Documents` (cell x 83) and of `Reports` (cell x 101, one indent in)
+        both answer `tree table 'Folders'`.
+
+        The row is found by its own geometry: an expandable descendant whose
+        vertical band holds the point and whose rectangle begins to its right.
+        Returns `container` unchanged when nothing matches, so a press anywhere
+        else in the view resolves exactly as it did before.
+        """
+        if getattr(container, "role", "") not in DISCLOSURE_CONTAINERS:
+            return container
+        extents = self._extents(container)
+        if extents is None or not _placed(extents):
+            return container
+        # Only a point within reach of a gutter can be one: a press further
+        # right than any row could be indented is some cell's own body, and
+        # reading the view's children to be told so is a round trip per press
+        # on a wide view for nothing. See `DISCLOSURE_REACH`.
+        if not extents[0] <= x < extents[0] + DISCLOSURE_REACH:
+            return container
+        try:
+            rows = self.session.elements(
+                within=container,
+                predicate=lambda e: (
+                    e.role in _ROW_ROLES and getattr(e, "expandable", False)
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a view that closed mid-read is closed
+            return container
+        for row in rows:
+            try:
+                rect = self._extents(row)
+                if rect is None or not _placed(rect):
+                    continue
+                rx, ry, _width, height = rect
+                if ry <= y <= ry + height and rx - DISCLOSURE_GUTTER <= x < rx:
+                    return row
+            except Exception:  # noqa: BLE001 - a row going stale is ordinary
+                continue
+        return container
 
     def _belongs(self, element: ElementRef, window: WindowRef | None) -> bool:
         """Whether an element and the window under the same point agree.
@@ -1674,6 +1781,7 @@ class DesktopResolver:
             if found is None:
                 return None
             element, rect = found
+            element = self._refine_disclosure(element, x, y)
             described = self._describe_element(element)
             # A rectangle here means `_popup_at` answered, which is also what
             # tells `_other_toplevel_of` to leave this element alone. So does
