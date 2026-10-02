@@ -1119,7 +1119,9 @@ class DisclosureSession(ElementSession):
         if element is self.documents:
             return (83, 131, 552, 21)
         if element is self.notes:
-            return (83, 154, 552, 21)
+            # Tiled against `documents`, the way a tree view's rows are: the
+            # second begins on the line the first one ends on.
+            return (83, 152, 552, 21)
         return super().extents(element)
 
 
@@ -1711,6 +1713,16 @@ def test_a_gutter_point_picks_the_row_whose_own_band_holds_it():
     # what says which row's triangle it is; the second row is not the first.
     made = disclosure_resolver()
     assert made.resolve(63, 164).element.name == "Notes"
+
+
+def test_a_gutter_point_on_the_line_between_two_rows_is_the_lower_one():
+    # Rows tile, so the line one ends on is the first of the next, and the band
+    # is read half-open the way `_has_point` reads every rectangle here. An
+    # inclusive band holds a point that belongs to the lower row in the upper
+    # row too, and this answers with the first match -- the row *above* the
+    # triangle that was clicked.
+    made = disclosure_resolver()
+    assert made.resolve(63, 152).element.name == "Notes"
 
 
 def test_a_leaf_rows_gutter_is_not_refined_into_a_row():

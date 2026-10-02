@@ -1830,6 +1830,24 @@ def test_a_click_outside_a_rows_own_band_is_not_a_toggle(window):
     assert ".collapse()" not in source
 
 
+def test_a_click_on_the_line_below_a_row_is_not_its_gutter(window):
+    # The band is read half-open, the way every rectangle in this generator is
+    # read: `y + height` is the first pixel line of the row below, not the last
+    # line of this one, so it is no more this row's triangle than a point past
+    # it. The resolver's copy of the same strip answers an inclusive band with
+    # the first row it matches, which is the row *above* the one clicked.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(Click(target=Target(x=63, y=152, window=window, element=row)))
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+
+
 def test_a_gutter_click_on_a_non_expandable_element_is_not_a_toggle(window):
     icon = ElementRef(
         role="icon", name="Computer", extents=(83, 131, 24, 24), selectable=True
@@ -1849,6 +1867,53 @@ def test_locators_absolute_keeps_the_coordinate_for_a_gutter_click(window):
     )
     assert ".expand()" not in source
     assert "gui.click()" in source
+
+
+@pytest.mark.needs_ruff
+def test_a_double_click_on_a_tree_rows_disclosure_gutter_replays_nothing(window):
+    # Two clicks on the triangle toggle twice and leave the row as it was --
+    # measured live on GTK3 -- so the pair has no line of its own. Read as the
+    # one toggle a double click on an expandable row gets, it would leave the
+    # row open where the recording left it shut, and `normalize.py` merges the
+    # two presses into one Click(count=2) without asking what they landed on.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(
+        Click(target=Target(x=63, y=141, window=window, element=row), count=2)
+    )
+    assert ".expand()" not in source
+    assert ".collapse()" not in source
+    assert ".select()" not in source
+    assert "gui.double_click()" not in source
+    # Contiguous as wrapped: `_comment` wraps the wording at the project's own
+    # limit, so the fragment that has to be asserted is the one that survives
+    # wrapping whole.
+    assert "pair cancels out and nothing is replayed" in source
+    assert validate(source) == []
+
+
+def test_a_nameless_gutter_pair_keeps_the_coordinate_double_click(window):
+    # Nothing can name the row under `--locators absolute`, and a coordinate
+    # double click replays the pair faithfully -- both toggles, by position.
+    # Consuming the gesture there would be losing it rather than replaying it.
+    row = ElementRef(
+        role="table cell",
+        name="Documents",
+        extents=(83, 131, 552, 21),
+        expanded=False,
+        selectable=True,
+    )
+    source = render(
+        Click(target=Target(x=63, y=141, window=window, element=row), count=2),
+        locators="absolute",
+    )
+    assert ".expand()" not in source
+    assert "gui.double_click()" in source
 
 
 def test_a_double_click_on_a_named_element_stays_one_gesture(window):

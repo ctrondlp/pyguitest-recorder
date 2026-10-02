@@ -113,6 +113,14 @@ reports for the row and a plain containment test refuses it. Measured live on
 this repository's own GTK3 probe window: the triangle sits about 30px left of
 the cell's x, and the cell begins at 83 at the top level and one indent (18px)
 further in per level below it.
+
+The strip is a rectangle like any other -- 40px wide, the row's own height,
+its right edge on the row's own left -- and `_has_point` reads it the way it
+reads every other one here: half-open, so the edge a row ends on belongs to
+the row that begins there rather than to both. `generator/python.py` holds the
+same width and the same reading, deliberately: the resolver decides that a
+click landed on a triangle rather than a cell, and that copy is what tells the
+two renders apart again afterwards. See `_in_disclosure_gutter`.
 """
 
 DISCLOSURE_CONTAINERS = frozenset({"tree table", "tree"})
@@ -1139,11 +1147,15 @@ class DesktopResolver:
         recording loses the name it had just found. Only an element that can
         actually expand, and only within the gutter's width of its left edge,
         so this cannot rescue a genuinely unrelated point.
+
+        The strip is a rectangle, read with `_has_point` like every other one
+        in this file: rows tile, so the line between two of them is the lower
+        row's own first line rather than the upper row's last.
         """
         if not element.expandable or element.extents is None:
             return False
         ex, ey, _width, height = element.extents
-        return ey <= y <= ey + height and ex - DISCLOSURE_GUTTER <= x < ex
+        return _has_point((ex - DISCLOSURE_GUTTER, ey, DISCLOSURE_GUTTER, height), x, y)
 
     def _refine_disclosure(self, container: Any, x: int, y: int) -> Any:
         """The expandable row this point is the disclosure gutter of, if any.
@@ -1158,7 +1170,8 @@ class DesktopResolver:
         both answer `tree table 'Folders'`.
 
         The row is found by its own geometry: an expandable descendant whose
-        vertical band holds the point and whose rectangle begins to its right.
+        vertical band holds the point -- `_has_point`, half-open, as in
+        `_in_disclosure_gutter` -- and whose rectangle begins to its right.
         Returns `container` unchanged when nothing matches, so a press anywhere
         else in the view resolves exactly as it did before.
         """
@@ -1188,7 +1201,13 @@ class DesktopResolver:
                 if rect is None or not _placed(rect):
                     continue
                 rx, ry, _width, height = rect
-                if ry <= y <= ry + height and rx - DISCLOSURE_GUTTER <= x < rx:
+                # Half-open, via `_has_point`: two tiled rows both hold the
+                # point on the edge between them under an inclusive test, and
+                # this answers with the first match -- the row *above* the
+                # triangle that was actually clicked.
+                if _has_point(
+                    (rx - DISCLOSURE_GUTTER, ry, DISCLOSURE_GUTTER, height), x, y
+                ):
                     return row
             except Exception:  # noqa: BLE001 - a row going stale is ordinary
                 continue
