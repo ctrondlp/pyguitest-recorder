@@ -1083,6 +1083,73 @@ class ElementSession(FakeSession):
         return self._extents
 
 
+class DisclosureSession(ElementSession):
+    """A GTK3 tree view whose hit test answers the view, not the row.
+
+    Measured live on this repository's own probe window: `element_at` on a
+    row's disclosure triangle -- the strip to the left of the cell -- answers
+    the `tree table`, and only the view's own children say which row the point
+    belongs to. `Documents` and `Notes` are the two expandable rows; the view
+    is what `element_at` hands back.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("geometry", (30, 30, 620, 780))
+        super().__init__(**kwargs)
+        self.tree = FakeElement("tree table", "Folders", pid=77)
+        self.documents = FakeElement(
+            "table cell", "Documents", pid=77, parent=self.tree
+        )
+        self.documents.expanded = False
+        self.documents.expandable = True
+        self.notes = FakeElement("table cell", "Notes", pid=77, parent=self.tree)
+        self.notes.expanded = False
+        self.notes.expandable = True
+        self.element = self.tree
+
+    def elements(self, within=None, predicate=None, **kwargs):
+        if within is not self.tree:
+            return []
+        rows = [self.documents, self.notes]
+        return [row for row in rows if predicate is None or predicate(row)]
+
+    def extents(self, element):
+        if element is self.tree:
+            return (43, 105, 594, 692)
+        if element is self.documents:
+            return (83, 131, 552, 21)
+        if element is self.notes:
+            # Tiled against `documents`, the way a tree view's rows are: the
+            # second begins on the line the first one ends on.
+            return (83, 152, 552, 21)
+        return super().extents(element)
+
+
+class UnreadableView(DisclosureSession):
+    """A tree view whose rows cannot be listed at all."""
+
+    def elements(self, within=None, predicate=None, **kwargs):
+        raise RuntimeError("the view closed mid-read")
+
+
+class CountingDisclosureSession(DisclosureSession):
+    """A disclosure view that counts how often its children are listed."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.child_reads = 0
+
+    def elements(self, within=None, predicate=None, **kwargs):
+        self.child_reads += 1
+        return super().elements(within=within, predicate=predicate, **kwargs)
+
+
+def disclosure_resolver(session_class=DisclosureSession):
+    """A resolver whose session hit-tests a GTK3 tree the way GTK3 does."""
+    session = session_class(window=FakeWindow(title="Target", pid=77))
+    return DesktopResolver(session=session, elements=True, windows=False, macos=False)
+
+
 def element_resolver(windows=None, macos=None, **kwargs):
     """An element resolver whose session answers about elements too.
 
@@ -1615,6 +1682,89 @@ def test_an_unexpandable_elements_state_is_described_as_none():
     target = element_resolver(element=element).resolve(130, 130)
     assert target.element.expanded is None
     assert not target.element.expandable
+
+
+def test_a_click_in_a_tree_rows_disclosure_gutter_names_the_row():
+    # Measured live on GTK3: the triangle that *opens* a row is a single click
+    # in the strip left of the cell, and the hit test answers the view for it.
+    # Without recovering the row the click has no name, and the generated
+    # script keeps a coordinate -- the locator that breaks when the window moves.
+    made = disclosure_resolver()
+    target = made.resolve(63, 141)
+    assert target.element is not None
+    assert target.element.name == "Documents"
+    assert target.element.role == "table cell"
+    assert target.element.extents == (83, 131, 552, 21)
+    assert target.element.expandable
+
+
+def test_a_gutter_click_does_not_warn_that_hit_testing_cannot_be_trusted():
+    # The row lies outside the point by design, and `_covers` answers that
+    # with a warning about a toolkit whose hit test cannot be trusted. True
+    # of a bad answer, and wrong here: nothing was disbelieved, so a note
+    # saying so would send a reader after a defect that is not there.
+    made = disclosure_resolver()
+    made.resolve(63, 141)
+    assert not any("cannot be trusted" in note for note in made.warnings)
+
+
+def test_a_gutter_point_picks_the_row_whose_own_band_holds_it():
+    # Both rows share the gutter's x range, so the point's vertical band is
+    # what says which row's triangle it is; the second row is not the first.
+    made = disclosure_resolver()
+    assert made.resolve(63, 164).element.name == "Notes"
+
+
+def test_a_gutter_point_on_the_line_between_two_rows_is_the_lower_one():
+    # Rows tile, so the line one ends on is the first of the next, and the band
+    # is read half-open the way `_has_point` reads every rectangle here. An
+    # inclusive band holds a point that belongs to the lower row in the upper
+    # row too, and this answers with the first match -- the row *above* the
+    # triangle that was clicked.
+    made = disclosure_resolver()
+    assert made.resolve(63, 152).element.name == "Notes"
+
+
+def test_a_leaf_rows_gutter_is_not_refined_into_a_row():
+    # A row that cannot expand has no triangle, so its gutter is just the view.
+    made = disclosure_resolver()
+    made.session.documents.expandable = False
+    target = made.resolve(63, 141)
+    assert target.element.name == "Folders"
+    assert target.element.role == "tree table"
+
+
+def test_a_tree_view_whose_rows_cannot_be_read_still_resolves():
+    # Listing the view's children is an extra read per press on a tree, so a
+    # view that closes mid-read has to leave the answer it would have given.
+    made = disclosure_resolver(session_class=UnreadableView)
+    target = made.resolve(63, 141)
+    assert target.element.name == "Folders"
+
+
+def test_a_click_on_a_tree_rows_own_cell_body_is_left_alone():
+    # The body of the row is inside the cell's rectangle, where a click
+    # *selects*: only the gutter is the toggle, so nothing is refined here.
+    made = disclosure_resolver()
+    made.session.element = made.session.documents
+    target = made.resolve(368, 141)
+    assert target.element.role == "table cell"
+    assert target.element.name == "Documents"
+
+
+def test_a_press_past_a_gutters_reach_reads_no_children():
+    # A press further right than any row could be indented is some cell's own
+    # body, and listing the view's children to be told so is a round trip this
+    # recorder pays once per press already.
+    made = disclosure_resolver(session_class=CountingDisclosureSession)
+    made.resolve(500, 141)
+    assert made.session.child_reads == 0
+
+
+def test_a_press_near_a_views_edge_lists_its_children_once():
+    made = disclosure_resolver(session_class=CountingDisclosureSession)
+    made.resolve(63, 141)
+    assert made.session.child_reads == 1
 
 
 def test_the_ancestry_walks_the_elements_own_parents():

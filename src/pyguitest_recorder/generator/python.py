@@ -316,6 +316,20 @@ worth reconstructing, only that replay must not let two clicks the recording
 already decided were separate collapse back into one on replay.
 """
 
+_DISCLOSURE_GUTTER = 40
+"""Pixels left of a row's own rectangle its disclosure triangle can sit in.
+
+The generator's copy of the width `windows/resolver.py` measures with, kept
+equal deliberately: the resolver is what decides a click landed on a row's
+disclosure triangle rather than its cell, and this is what tells the two
+renders apart afterwards. The strip is read half-open in both -- `x` below the
+cell's own left edge, `y` below the row's own bottom -- so the two also agree
+on which row a point on an edge between two rows belongs to. A GTK3 tree row
+is *opened* by a single click in that strip -- measured live: the triangle is
+about 30px left of the cell's x, a click on the cell body only selects, and a
+double click toggles twice and leaves the row as it was.
+"""
+
 _KEY_ACTION_SETTLE_FLOOR = 0.15
 _KEY_ACTION_SETTLE_CAP = 1.0
 """The window a dropped gap after a keystroke is restored within.
@@ -1242,6 +1256,13 @@ class PythonGenerator:
         turn a context menu into an ordinary activation -- a script that runs
         cleanly and does the wrong thing, which is the worst outcome here.
         """
+        if (
+            event.button == 1
+            and event.count in (1, 2)
+            and self._disclosure_click(event, state)
+        ):
+            state.bare_click_pending = False
+            return
         if event.button == 1 and event.count == 2 and self._expand_click(event, state):
             state.bare_click_pending = False
             return
@@ -1340,6 +1361,78 @@ class PythonGenerator:
         element = event.target.element
         if element is None or not element.expandable:
             return False
+        return self._render_toggle(element, state)
+
+    def _disclosure_click(self, event: Click, state: _State) -> bool:
+        """Render a click on a disclosure gutter as the gesture it was.
+
+        The mouse path onto the same control `_expand_click` handles, and the
+        one a GTK3 tree actually answers to. A row there is opened -- and
+        closed -- by a *single* click on the triangle in the gutter left of its
+        cell, measured live; a double click on that same triangle toggles twice
+        and leaves the row as it was, which is why `_expand_click` never fired
+        for a row opened by hand on this platform.
+
+        Which is why this runs ahead of `_expand_click`, and why the pair is
+        the case that has to be named here rather than there: `normalize.py`
+        merges two presses a few pixels and a fraction of a second apart into
+        one `Click(count=2)` without asking what either of them landed on, so a
+        double click in the gutter arrives as a single event targeting the row.
+        Read as the toggle any expandable double click gets, it leaves the row
+        open where the recording left it shut -- one toggle for a gesture that
+        asked for no change at all.
+
+        Nothing, though, only where the row can be named: a pair with no
+        locator leaves the coordinate double click as the render, which replays
+        both toggles by position. Dropping the gesture instead would be losing
+        it rather than replaying it.
+
+        Without this the single click is answered by the row's cell, which
+        renders as `select()` -- a real call that does the wrong thing, leaving
+        the row closed -- or by the view itself, which offers no action and
+        falls all the way to a coordinate. Which strip is the gutter is decided
+        from the element's own rectangle: the point has to be within the row's
+        vertical band -- half-open, the way every rectangle is read here -- and
+        to the *left* of where the cell begins, the only place the triangle can
+        be.
+        """
+        element = event.target.element
+        if (
+            event.count not in (1, 2)
+            or element is None
+            or not element.expandable
+            or element.extents is None
+        ):
+            return False
+        ex, ey, _width, height = element.extents
+        x, y = event.target.x, event.target.y
+        if not (ey <= y < ey + height and ex - _DISCLOSURE_GUTTER <= x < ex):
+            return False
+        if event.count == 2:
+            if not self._has_locator(element):
+                return False
+            self._comment(
+                "two clicks on the triangle toggle twice and leave the row as"
+                " it was, so the pair cancels out and nothing is replayed",
+                state,
+            )
+            return True
+        return self._render_toggle(element, state)
+
+    def _render_toggle(self, element: ElementRef, state: _State) -> bool:
+        """Render the replay-decided expand()/collapse() toggle for an element.
+
+        Read at replay -- collapse if open, expand if not -- rather than as a
+        direction fixed from the `expanded` the recording captured: that read is
+        not reliably from before the click (see `_expand_click`), so replaying
+        the toggle itself reproduces the recording from whatever state it
+        started in.
+
+        Shared by the two gestures onto a disclosure control that toggle: the
+        double click of `_expand_click` and the single gutter click of
+        `_disclosure_click`. The third, the gutter's *pair*, is the one that
+        renders as nothing at all; see `_disclosure_click`.
+        """
         locator = self._element_expr(element, state)
         if locator is None:
             return False
@@ -1933,15 +2026,26 @@ class PythonGenerator:
         state.capabilities.add("ELEMENT_ACTION")
         return f"{locator}.{action}"
 
+    def _has_locator(self, element: ElementRef) -> bool:
+        """Whether the locator options can name this element at all.
+
+        `_element_expr`'s own gate, split out for the one caller that has to
+        know the answer *before* anything is rendered: `_disclosure_click`
+        consumes a double click on a triangle rather than toggling on it, and
+        that is the better render only where the row could have been named.
+        Asking `_element_expr` instead would record the element capability and
+        can emit a disambiguating `within=` binding, for a call that is never
+        rendered.
+        """
+        return self.options.locators == "element" and element.addressable
+
     def _element_expr(self, element: ElementRef | None, state: _State) -> str | None:
         """Return the expression that finds this element, without an action.
 
         Split out from `_element_call` because a double click needs the
         element itself rather than a method on it -- see `_double_click`.
         """
-        if self.options.locators != "element":
-            return None
-        if element is None or not element.addressable:
+        if element is None or not self._has_locator(element):
             return None
         state.capabilities.add("ELEMENT_TREE")
         key: _ElementKey = (element.role, element.name, element.path)
