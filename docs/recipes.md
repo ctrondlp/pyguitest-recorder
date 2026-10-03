@@ -70,7 +70,7 @@ because the value of a check is exactly how much it would notice:
 | A text field, or a label with something to say | `expect_text(...)`, against what it read |
 | Any other named element | `expect_showing(...)` — the floor |
 | No element, but a window | `expect_window(...)` |
-| Neither | nothing, and the script's header says so |
+| Neither | nothing, and the notes at the end of the script say so |
 
 **These are pyguitest `Session` methods**, added in pyguitest 0.9, so a generated
 script is plain pyguitest source and depends on nothing but pyguitest. Earlier
@@ -84,10 +84,10 @@ and what it actually reads. And each one retries until its timeout — a check
 recorded the instant an action returns would otherwise race an application that
 has not finished redrawing.
 
-A check that could not be resolved to anything is reported in the header
-rather than dropped, so a script never looks like it verifies something it
-does not. `--no-checks` turns the key off and lets it through to the
-application instead.
+A check that could not be resolved to anything is reported as a note at the
+end of the file rather than dropped, so a script never looks like it verifies
+something it does not. `--no-checks` turns the key off and lets it through to
+the application instead.
 
 ## Rebinding the stop and check keys
 

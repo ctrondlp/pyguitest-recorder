@@ -5,6 +5,30 @@ was released.
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-10-03
+
+### Changed
+
+- **The pyguitest floor is now 0.16.2.** Two reads behind a recorded click were
+  answered from something a reader would not call the live desktop, and neither
+  raises on an older install, which is what the floor is for. On macOS
+  `Element.text` answered from a memoizing cache, and the resolver's read of it
+  is what decides the string a generated `expect_text(..., equals=...)` asserts:
+  a field the recording had just written to -- through the script's own
+  `set_text`, or by the application -- was described by what it held *before*
+  that write. At replay the same cache leaves `expect_text` re-reading one
+  value, the opposite of the re-read until timeout it promises. On Linux
+  `windows()` listed the override-redirect windows a window manager never takes
+  on -- a combo box's drop-down, a menu, the accessibility bridge's own hidden
+  toplevel -- each titled after the program and sharing its pid, so `window_at`
+  named the popup where the window list names the application's window, 40 asks
+  out of 40. Matching a window by pid then saw one application as several
+  windows, which is what a resolver resolving a click through both the
+  accessibility tree and the window list depends on not happening: it refused
+  the element it had resolved correctly, and the click came out as a bare
+  coordinate. The generator `PROFILE` stays `pyguitest-0.16`: no emitted call
+  changed, and this is the same patch step 0.16.1 was.
+
 ### Fixed
 
 - **A click on a GTK3 tree row's disclosure triangle recorded as a bare

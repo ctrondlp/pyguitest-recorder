@@ -204,7 +204,7 @@ gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
 What comes out depends on what was under the pointer — a checkbox gives
 `expect_checked`, a label with something to say gives `expect_text`, anything
 else named gives `expect_showing`. These are pyguitest `Session` methods, so a
-generated script depends on nothing but pyguitest — and it needs 0.16.1 or
+generated script depends on nothing but pyguitest — and it needs 0.16.2 or
 newer, as the install section explains. They name what was wrong instead of
 raising a bare
 `AssertionError`, and each retries until its timeout so a check cannot race a
@@ -265,7 +265,7 @@ On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
 [install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
 carries the full table, including Arch, openSUSE and FreeBSD.
 
-**pyguitest 0.16.1 or newer is required outright** — the floor the generated
+**pyguitest 0.16.2 or newer is required outright** — the floor the generated
 code is verified against. Generated scripts call the `expect_` family as
 pyguitest `Session` methods, which do not exist before 0.9.0; double-click a
 named element with `Element.double_click`, which 0.10.0 added; once `motion`
@@ -295,7 +295,11 @@ the topmost of two windows sharing a title rather than the one behind.
 0.16.1 is a patch step with the same character: on Linux, `Element.click()` on a
 GTK switch or toggle button did nothing, and the `input` backend's pointer
 landed one pixel short of an absolute position, so a recorded coordinate click
-missed by one.
+missed by one. 0.16.2 is a patch step with the same character again: on macOS
+`Element.text` answered from a cache, so a generated `expect_text` could assert
+what a field held before the recording's own write reached it, and on Linux
+`windows()` listed the override-redirect popups a window manager never manages,
+so a click could resolve to a drop-down instead of the application's window.
 `validate()` checks
 `gui.*` calls against the installed `Session` and what is called on an element
 against the installed `Element`, so a script naming a method this pyguitest does

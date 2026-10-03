@@ -216,10 +216,23 @@ dependencies = [
     # on a GTK switch or toggle button, which offers AT-SPI no `click` or
     # `press` action, did nothing and the script went on as if it had worked;
     # and the `input` backend's pointer landed one pixel short of every
-    # absolute position, so a recorded coordinate click missed by one. The
-    # floor keeps the meaning every step above gives it: the release this
-    # output was verified against, not the oldest that might work.
-    "pyguitest>=0.16.1",
+    # absolute position, so a recorded coordinate click missed by one.
+    #
+    # 0.16.2 raises it for two reads behind every recorded click, the same
+    # character once more. On macOS `Element.text` answered from a memoizing
+    # cache, and the resolver's read of it is what decides the string a
+    # generated `expect_text(..., equals=...)` asserts: a field the recording
+    # had just written to -- through the script's own `set_text`, or by an
+    # application that filled it in -- was described by what it held *before*
+    # that write. On Linux `windows()` listed the override-redirect windows a
+    # window manager never takes on, each titled after the program and sharing
+    # its pid, so `window_at` named a combo box's drop-down or a menu where the
+    # list names the application's window -- and a resolver matching a window
+    # by pid saw one application as several windows, refused the element it had
+    # resolved correctly, and emitted a bare coordinate. The floor keeps the
+    # meaning every step above gives it: the release this output was verified
+    # against, not the oldest that might work.
+    "pyguitest>=0.16.2",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
