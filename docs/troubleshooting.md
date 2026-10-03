@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Symptom first. The generated script's own header is worth reading before any
+Symptom first. The generated script's own footer is worth reading before any
 of this — every refusal to name an element is recorded there as a note, for
 that specific recording.
 
@@ -260,9 +260,9 @@ edit needed.
 
 That only fails when nothing in either element's path is both named and
 unique to it — two identically structured, identically named panes, say. In
-that case the script header carries a warning naming the collision, and the
-generated calls are left unscoped, matching whichever pyguitest's search
-finds first. Disambiguate by hand:
+that case the notes at the end of the script carry a `WARNING:` line naming
+the collision, and the generated calls are left unscoped, matching whichever
+pyguitest's search finds first. Disambiguate by hand:
 
 ```python
 gui.element(
@@ -319,7 +319,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.16.1 or newer is required
+older than the recording expects. **pyguitest 0.16.2 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),
@@ -345,7 +345,12 @@ told a control is not set when it plainly is -- which is why the floor is what
 it is. 0.16.1 is a patch step with the same character: on Linux,
 `Element.click()` on a GTK switch or toggle button did nothing, and the `input`
 backend's pointer landed one pixel short of an absolute position, so a recorded
-coordinate click missed by one. Older floors matter as well: `gui.button(...)`
+coordinate click missed by one. 0.16.2 is a patch step with the same character
+again: on macOS `Element.text` answered from a cache, so a generated
+`expect_text` could assert what a field held before the recording's own write
+reached it, and on Linux `windows()` listed the override-redirect popups a
+window manager never manages, so a click could resolve to a drop-down instead
+of the application's window. Older floors matter as well: `gui.button(...)`
 finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough

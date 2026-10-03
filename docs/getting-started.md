@@ -161,8 +161,8 @@ allows, and the two now say the same thing.
 
 If a script came out as coordinates and you expected names,
 [troubleshooting.md](troubleshooting.md#why-is-my-script-all-coordinates) is
-the page — and the generated file's own header already lists the reasons for
-that particular recording.
+the page — and the generated file's own notes, at the end, already list the
+reasons for that particular recording.
 
 ## 4. Make it an actual test
 
