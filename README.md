@@ -1,5 +1,6 @@
 # pyguitest-recorder
 
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/ctrondlp/pyguitest-recorder/blob/main/CONTRIBUTING.md)
 [![CI](https://github.com/ctrondlp/pyguitest-recorder/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ctrondlp/pyguitest-recorder/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/pyguitest-recorder)](https://pypi.org/project/pyguitest-recorder/)
 [![License](https://img.shields.io/pypi/l/pyguitest-recorder)](https://github.com/ctrondlp/pyguitest-recorder/blob/main/LICENSE)

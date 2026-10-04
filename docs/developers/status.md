@@ -451,7 +451,7 @@ half is in that repository's `docs/validation.md`, beside the runs it belongs to
 |---|---|
 | **Windows hook loss (High)** | **Fixed and measured.** Detected through the session's own last-input time and reported on the recording: 2.7s after a hook was removed by hand, live on Windows 11. See the section above. Re-installation is still deliberately unimplemented, and is now verifiable. |
 | **Windows double-click on a collapsed tree row (High)** | **Already fixed**, and by the review's own standard: a double click on an expandable row renders as a toggle decided *at replay* (`collapse()` if the row is open when the script runs, `expand()` if it is not), so the stale state read decides nothing. The review was reading the 2026-09-24 status entry, before that landed in 0.6.0. Visible again in the script today's live run generated. |
-| **Record -> replay -> state verification as a release gate (item 11)** | **macOS: run twice today**, compared event by event (see the sections above), and re-run again after pyguitest 0.14.0 with the same figures (80 differing event lines, 23 script lines). **Windows: the replay now runs through the recorded sequence** and reaches its later steps, stopping at a `SysListView32` cell whose only advertised action is the MSAA shim that declares none -- see above. The two bugs found in the check itself that day are fixed, so a standing gate is now a matter of that one rendering decision. |
+| **Record -> replay -> state verification as a release gate (item 11)** | **Closed 2026-10-04, on both platforms.** macOS: run twice that day, compared event by event (see the sections above), and re-run again after pyguitest 0.14.0 with the same figures (80 differing event lines, 23 script lines). **Windows: the replay now finishes the recorded sequence**, and the `SysListView32` stop this row used to describe is gone rather than worked around at replay -- 0.7.0's `_past_a_bare_text_leaf` names the row where the cell's text leaf was flaky, so the recording carries `gui.element(role=Role.LIST_ITEM, name="Gamma").select()`. Re-run live on Windows 11 (build 26200) on 2026-10-04: `validate` clean, the saved recording re-rendered identically, and **the replay passed -- every click, the menu action, the ListView selection, both radio groups and the nested tree item landed**. |
 | **AltGr and dead keys against a real non-US layout (Medium)** | **Partly, and honestly so.** Unit-tested (the AltGr fake-Control fold-back and the dead-key distinction are pinned in `tests/test_win32.py`) and unmeasured against a real German or French layout, which needs a machine whose layout is that -- not reachable from this session. The backend's docstring already draws the line at plain Shift and CapsLock, as X11's does. |
 | **UAC/UIPI boundaries (Medium)** | **Documented, and now with a diagnostic behind it.** A non-elevated hook still cannot reach a higher-integrity process, which stays the documented product boundary. What is new is the reading that catches the desktop it cannot see: input on a UAC prompt or the lock screen advances the session's last-input clock with no callback, so the recording carries "about Ns of input may be missing". Same-integrity-level workflows remain the only way to record an elevated application. |
 | **Adversarial accessibility trees (item 10)** | **The pyguitest half is closed, 2026-09-26; this half was already pinned, and is now named rather than assumed.** pyguitest gained one adversarial-tree class per platform -- `tests/test_uia_backend.py::TestTreesThatLie` and `tests/test_macos_backend.py::TestTreesThatLie` -- for the combinations this row used to call untested: every child reported at `(0, 0)`, one name in two windows of one process, a popup that closes between the capture and the read, a condition a provider answers with more than was asked, a parent chain that loops, a title that is not text, and the node and depth budgets a merely enormous tree has to stop at. Writing them found three defects in its own read paths -- a NULL element-array slot wrapped as a real element and handed to a caller inside a search's answer, a non-string name reaching a compiled-regex filter as a `TypeError` instead of "no match", and a macOS tree reporting an ancestor as its child walked into itself so one widget came back as twelve matches -- all three fixed (pyguitest's CHANGELOG). The four named combinations are pinned here too, spread over the suite rather than gathered into one class: the `(0, 0)` toolkit in `test_resolver.py::test_an_element_that_does_not_cover_the_point_is_refused`, with the cover check's slack and its scaled-screen exemption in the two tests beside it; duplicated names in `test_generator.py::test_two_same_named_buttons_are_scoped_by_their_dialog` and `test_a_check_on_an_ambiguous_element_is_scoped_too`; one process owning several windows in the toplevel-path tests and `TestProcessAncestry`; and a popup whose rectangle exists only while it is open in `test_a_press_consumed_after_its_popup_closed_is_still_named_for_the_item` and `test_a_menu_that_is_closed_claims_no_points`. What stays genuinely uncovered is a *real* toolkit lying -- the GTK4 `(0, 0)` finding was one, and a fake can only reproduce the lie it was told about -- plus a third platform's tree: a live-run item rather than a test-writing one. |
@@ -1380,3 +1380,58 @@ interface bindings, no way to test it without a live Windows box) and
 stays out of scope for a live-testing pass. A pre-click snapshot of just
 `expanded`, taken at raw-event time rather than at describe time, remains
 the other untried shape of a fix.
+
+## The win32 live check, re-run: item 11's `SysListView32` stop is gone (2026-10-04)
+
+**The Windows half of the release-gate item is closed, measured rather than
+argued.** `scripts/win32-live-capture-check.py` ran end to end against a real
+Windows 11 desktop (build 26200), reached -- as every run of it is -- through a
+scheduled task run with `/it`, since a plain SSH shell lands in Session 0 and
+cannot see, let alone drive, the interactive desktop's UI Automation tree.
+`validate` was clean, the saved recording re-rendered identically, and the
+replay finished the sequence:
+
+```
+validate: clean
+round trip: recording.json re-rendered identically
+replay: PASS -- every click, the menu action, the ListView selection, both
+radio groups and the nested tree item landed
+```
+
+A pass had already been recorded on pyguitest's side (its `docs/validation.md`,
+2026-09-30, after the `window_element` step cost came down); this is the
+re-measurement that lets the item be closed here, where it was tracked, rather
+than cited from the package it depends on.
+
+**What changed is upstream of the replay, and the generated script shows it.**
+The line that used to stop the run -- `gui.element(role=Role.TEXT,
+name="Gamma").click()`, the `SysListView32` cell whose only advertised action
+was the MSAA shim that declared none -- is not in this recording's script at
+all. In its place the script carries the row:
+
+```python
+gui.element(role=Role.PAGE_TAB, name="List").select()
+gui.element(role=Role.LIST_ITEM, name="Gamma").select()
+```
+
+That is 0.7.0's `_past_a_bare_text_leaf` doing exactly what it was written to do
+(see "Closed 2026-09-27", above): the resolver names the `list item` at the
+point, which has always published a real `invoke` and `select`, instead of the
+nested `text` run whose action list flipped between empty and a bogus "do
+default action" from run to run. Nothing fell back to a coordinate and no route
+was chosen from a caught exception, because the flaky leaf is never handed to
+the shim in the first place -- which is the whole point of fixing this
+structurally rather than at replay.
+
+**The run itself, for the record.** 155 raw events covering the probe window's
+whole control set, resolved by `DesktopResolver`: the entry, both title-bar
+buttons, all four page tabs, the combo box and one of its items, the check box,
+the ListView row, the menu action, a right click, a scroll, a double click, both
+radio groups and the three tree rows, with two synchronization steps inferred.
+Two of the notes the recording carries are the known ones rather than new
+findings: the hook sees the whole desktop, so an unrelated editor window open
+beside the probe appeared in the resolved window set, and four keystrokes
+arrived injected by another process rather than typed by anything in the
+session. Neither changed the outcome, and the check's own docstring already says
+to close what should not be recorded.
+
