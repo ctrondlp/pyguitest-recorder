@@ -231,6 +231,29 @@ class Settings:
     a few seconds of motion into a thousand-line script.
     """
 
+    click_via: Literal["auto", "pointer", "action"] = "auto"
+    """The route a named element's `click()` is emitted with, or the ladder.
+
+    The recorder captures a pointer press and release and then resolves it to
+    a named element. `Element.click()` replays that through pyguitest's own
+    ladder by default -- the accessible action where there is one, the pointer
+    otherwise -- so a click that *was* a pointer click comes back as an action
+    click, the one place replay diverges from what was recorded. `"pointer"`
+    closes it: the generated call is `element.click(via="pointer")`, the user
+    pathway only, which is the mechanism the recorder actually saw. `"action"`
+    is the opposite extreme, `element.click(via="action")`, the accessible
+    action only, for a replay that must not inject a pointer at all. `"auto"`
+    (the default) emits a plain `element.click()` and keeps today's ladder, so
+    no existing recording changes output.
+
+    Applies to a single named click. A double click is already the pointer
+    pathway (`Element.double_click` has no action spelling), and `select()`,
+    `expand()` and `collapse()` name their own act, none of which takes a
+    `via=`. An installed pyguitest without `via=` (the floor this package
+    names predates it) renders the chosen route as a plain `click()` and the
+    generated script says so, rather than failing to import.
+    """
+
     max_waypoints: int = 32
     """Cap on `via` points under `motion = "recorded"`; 0 or less means no cap.
 

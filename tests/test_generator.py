@@ -951,6 +951,130 @@ def test_an_element_with_unrecorded_actions_still_prefers_the_element(window):
     assert 'gui.button("Save").click()' in source
 
 
+# -- click_via -----------------------------------------------------------
+
+
+@pytest.mark.needs_ruff
+def test_click_via_auto_keeps_todays_plain_click(window, save_button):
+    # The default: no via= is written, so the generated script is byte-for-byte
+    # what it was before the option existed -- pyguitest's own ladder decides.
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        click_via="auto",
+    )
+    assert 'gui.button("Save").click()' in source
+    assert "via=" not in source
+
+
+@pytest.mark.needs_ruff
+def test_click_via_pointer_emits_the_pointer_route(window):
+    button = ElementRef(role="push button", name="Save", extents=(100, 50, 80, 24))
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=button)),
+        click_via="pointer",
+    )
+    assert 'gui.button("Save").click(via="pointer")' in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_click_via_action_emits_the_action_route(window, save_button):
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        click_via="action",
+    )
+    assert 'gui.button("Save").click(via="action")' in source
+    assert validate(source) == []
+
+
+def test_click_via_pointer_names_an_actionless_element(window):
+    # Under the ladder an element with no click action falls to a coordinate
+    # (see test_a_click_on_an_element_with_no_atspi_actions_...); the pointer
+    # route needs only a rectangle to aim at, so the name survives.
+    label = ElementRef(
+        role="label", name="Office", extents=(40, 300, 120, 24), actions=()
+    )
+    source = render(
+        Click(target=Target(x=60, y=310, window=window, element=label)),
+        click_via="pointer",
+    )
+    assert 'click(via="pointer")' in source
+    assert "Role.LABEL" in source
+    assert "move_mouse" not in source
+    assert validate(source) == []
+
+
+def test_click_via_pointer_without_a_rectangle_stays_a_coordinate(window):
+    # The pointer route's one requirement is a rectangle to aim at; without it
+    # the click has to stay a coordinate, and the comment says why.
+    label = ElementRef(role="label", name="Office", extents=None, actions=("click",))
+    source = render(
+        Click(target=Target(x=60, y=310, window=window, element=label)),
+        click_via="pointer",
+    )
+    assert 'click(via="pointer")' not in source
+    assert "gui.click()" in source
+    assert "published no rectangle to aim" in source
+
+
+def test_click_via_pointer_declares_the_pointer_capabilities(window):
+    save = ElementRef(role="push button", name="Save", extents=(100, 50, 80, 24))
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save)),
+        click_via="pointer",
+    )
+    assert "Capability.ELEMENT_GEOMETRY" in source
+    assert "Capability.POINTER_MOVE" in source
+    assert "Capability.POINTER_BUTTON" in source
+    assert "Capability.ELEMENT_ACTION" not in source
+
+
+def test_click_via_action_declares_the_action_capability(window, save_button):
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        click_via="action",
+    )
+    assert "Capability.ELEMENT_ACTION" in source
+    assert "Capability.POINTER_BUTTON" not in source
+
+
+def test_click_via_pointer_does_not_touch_a_double_click(window):
+    # A double click is already the pointer pathway (Element.double_click has no
+    # action spelling), so the option leaves it alone rather than annotating it.
+    icon = ElementRef(role="icon", name="Computer", extents=(10, 20, 64, 64))
+    source = render(
+        Click(target=Target(x=40, y=50, window=window, element=icon), count=2),
+        click_via="pointer",
+    )
+    assert ".double_click()" in source
+    assert "double_click(via=" not in source
+
+
+def test_click_via_pointer_does_not_touch_a_select(window):
+    # select() names its own act and takes no via=, whichever route is chosen.
+    item = ElementRef(role="tree item", name="Q1", actions=(), selectable=True)
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=item)),
+        click_via="pointer",
+    )
+    assert ".select()" in source
+    assert "select(via=" not in source
+
+
+@pytest.mark.needs_ruff
+def test_an_unrecognised_click_via_falls_back_to_the_default(window, save_button):
+    # Nothing validates config *values*, only keys, so a typo arrives intact.
+    # Falling back to the recorded behaviour is the conservative answer, the
+    # same way an unknown motion value does.
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        click_via="pointr",
+    )
+    assert 'gui.button("Save").click()' in source
+    assert "via=" not in source
+    assert validate(source) == []
+
+
 def test_a_scroll_puts_the_pointer_back_where_it_was_recorded(window):
     # The wheel acts on whatever is under the pointer, so a scroll emitted
     # without a move scrolled whichever widget the previous action left it on.

@@ -225,6 +225,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="cap on via points under --recorded-motion (32); 0 or less for no cap",
     )
     render.add_argument(
+        "--click-via",
+        dest="click_via",
+        choices=("auto", "pointer", "action"),
+        default=None,
+        metavar="ROUTE",
+        help='how a named element\'s click is emitted: "auto" (Element.click(), '
+        'pyguitest\'s own ladder -- the default), "pointer" (via="pointer", '
+        'the user pathway the recording actually captured), or "action" '
+        '(via="action", the accessible action only)',
+    )
+    render.add_argument(
         "--max-timeout",
         type=float,
         default=None,
@@ -364,6 +375,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "session_file",
         "locators",
         "motion",
+        "click_via",
         "max_waypoints",
         "max_timeout",
         "timeout_factor",
@@ -407,6 +419,7 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
     return GeneratorOptions(
         locators=settings.locators,
         motion=settings.motion,
+        click_via=settings.click_via,
         max_waypoints=settings.max_waypoints,
         comments=settings.comments,
         capability_preamble=settings.capability_preamble,
