@@ -91,11 +91,37 @@ def key():
 
 
 def pytest_configure(config):
-    """Register the one marker this suite defines."""
+    """Register the markers this suite defines."""
     config.addinivalue_line(
         "markers",
         "needs_ruff: asserts on output `ruff format` normalized; skipped without it",
     )
+    config.addinivalue_line(
+        "markers",
+        "needs_via: asserts on output `click(via=...)`; skipped without pyguitest's via=",
+    )
+
+
+def _click_supports_via() -> bool:
+    """Whether the installed pyguitest's `Element.click` accepts a `via=`.
+
+    The click_via tests assert the generated `click(via=...)`, a keyword the
+    generator only writes when the installed pyguitest actually accepts it.
+    A pyguitest below the release that added `via=` makes the generator
+    degrade to a plain `click()`, so those assertions cannot pass -- and must
+    skip, the way the formatter-dependent tests do without `ruff`.
+    """
+    import inspect
+
+    try:
+        import pyguitest
+    except ImportError:  # pragma: no cover - pyguitest is a hard dependency
+        return False
+    try:
+        parameters = inspect.signature(pyguitest.Element.click).parameters
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover
+        return False
+    return "via" in parameters
 
 
 def pytest_collection_modifyitems(config, items):
@@ -115,12 +141,19 @@ def pytest_collection_modifyitems(config, items):
     quietly stop checking the layout the generated scripts are actually read
     and edited in, which is the thing `_format` exists to guarantee.
     """
-    if shutil.which("ruff") is not None:
-        return
-    skip = pytest.mark.skip(
-        reason="`ruff` is not on PATH, so generated output is unformatted; "
-        "install it (pip install ruff) to run the rendering assertions"
-    )
-    for item in items:
-        if "needs_ruff" in item.keywords:
-            item.add_marker(skip)
+    if shutil.which("ruff") is None:
+        skip = pytest.mark.skip(
+            reason="`ruff` is not on PATH, so generated output is unformatted; "
+            "install it (pip install ruff) to run the rendering assertions"
+        )
+        for item in items:
+            if "needs_ruff" in item.keywords:
+                item.add_marker(skip)
+    if not _click_supports_via():
+        skip = pytest.mark.skip(
+            reason="the installed pyguitest's Element.click() has no via= "
+            "keyword; install a newer pyguitest to run the click_via assertions"
+        )
+        for item in items:
+            if "needs_via" in item.keywords:
+                item.add_marker(skip)

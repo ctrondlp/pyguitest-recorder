@@ -967,6 +967,7 @@ def test_click_via_auto_keeps_todays_plain_click(window, save_button):
 
 
 @pytest.mark.needs_ruff
+@pytest.mark.needs_via
 def test_click_via_pointer_emits_the_pointer_route(window):
     button = ElementRef(role="push button", name="Save", extents=(100, 50, 80, 24))
     source = render(
@@ -978,6 +979,7 @@ def test_click_via_pointer_emits_the_pointer_route(window):
 
 
 @pytest.mark.needs_ruff
+@pytest.mark.needs_via
 def test_click_via_action_emits_the_action_route(window, save_button):
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button)),
@@ -987,6 +989,7 @@ def test_click_via_action_emits_the_action_route(window, save_button):
     assert validate(source) == []
 
 
+@pytest.mark.needs_via
 def test_click_via_pointer_names_an_actionless_element(window):
     # Under the ladder an element with no click action falls to a coordinate
     # (see test_a_click_on_an_element_with_no_atspi_actions_...); the pointer
@@ -1004,6 +1007,7 @@ def test_click_via_pointer_names_an_actionless_element(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_via
 def test_click_via_pointer_without_a_rectangle_stays_a_coordinate(window):
     # The pointer route's one requirement is a rectangle to aim at; without it
     # the click has to stay a coordinate, and the comment says why.
@@ -1017,6 +1021,7 @@ def test_click_via_pointer_without_a_rectangle_stays_a_coordinate(window):
     assert "published no rectangle to aim" in source
 
 
+@pytest.mark.needs_via
 def test_click_via_pointer_declares_the_pointer_capabilities(window):
     save = ElementRef(role="push button", name="Save", extents=(100, 50, 80, 24))
     source = render(
@@ -1072,6 +1077,37 @@ def test_an_unrecognised_click_via_falls_back_to_the_default(window, save_button
     )
     assert 'gui.button("Save").click()' in source
     assert "via=" not in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_via
+def test_click_via_action_leaves_an_actionless_element_unclicked(window):
+    # The action route exists for a replay that must not inject a pointer, so
+    # an element with no click action is left unclicked with a note, rather
+    # than falling through to gui.click() at a coordinate the way the ladder
+    # does.
+    label = ElementRef(role="label", name="Office", extents=(40, 300, 120, 24), actions=())
+    source = render(
+        Click(target=Target(x=60, y=310, window=window, element=label)),
+        click_via="action",
+    )
+    assert "gui.click()" not in source
+    assert "click(via=" not in source
+    assert "left it unclicked" in source
+    assert validate(source) == []
+
+
+def test_click_via_unsupported_route_warns_even_without_a_header(monkeypatch, window, save_button):
+    # include_header=False drops the footer where warnings normally land, so
+    # the lost-route note has to survive as a body comment instead of
+    # vanishing with the header.
+    monkeypatch.setattr(generator_module, "_element_keywords", lambda: {"click": frozenset()})
+    source = render(
+        Click(target=Target(x=180, y=90, window=window, element=save_button)),
+        click_via="pointer",
+    )
+    assert 'gui.button("Save").click()' in source
+    assert "no via=" in source
     assert validate(source) == []
 
 

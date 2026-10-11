@@ -1030,11 +1030,15 @@ class PythonGenerator:
         click_keywords = _element_keywords().get("click")
         state.via_supported = click_keywords is not None and "via" in click_keywords
         if self.options.click_via != "auto" and not state.via_supported:
-            state.warnings.append(
+            message = (
                 f"the installed pyguitest has no via= on Element.click(), so "
                 f"every named click under click_via = {self.options.click_via!r} "
                 "was rendered as a plain click()"
             )
+            if self.options.include_header:
+                state.warnings.append(message)
+            else:
+                state.lines.append(f"# WARNING: {message}")
         if self.options.locators == "element":
             state.element_scopes, scope_warnings = _compute_element_scopes(recording)
             state.warnings.extend(scope_warnings)
@@ -1310,6 +1314,10 @@ class PythonGenerator:
                 self._note_element_repeat(event, state)
                 return
             if self._select_click(event, state):
+                return
+            if self._effective_click_via(state) == "action":
+                self._note_action_unavailable(event, state)
+                state.bare_click_pending = False
                 return
         if state.bare_click_pending:
             state.capabilities.add("TIMING")
@@ -1608,6 +1616,32 @@ class PythonGenerator:
             f"# {element.name!r} was named, but published no rectangle to aim"
         )
         state.lines.append("# the pointer route at, so this stays a coordinate")
+
+    def _note_action_unavailable(self, event: Click, state: _State) -> None:
+        """Explain a click the action route left unclicked.
+
+        Under `click_via = "action"` a named element is replayed as its
+        accessible action or not at all -- the route exists for a replay that
+        must not inject a pointer, so an element with no click action cannot
+        fall through to a coordinate the way the ladder does. The click is
+        dropped and this says why.
+        """
+        element = event.target.element
+        if (
+            self._effective_click_via(state) != "action"
+            or not self.options.comments
+            or event.button != 1
+            or element is None
+            or not element.addressable
+            or element.clickable
+            or self.options.locators != "element"
+        ):
+            return
+        api = element_api(state.session_type)
+        state.lines.append(
+            f"# {element.name!r} was named, but offered {api} no click or"
+        )
+        state.lines.append("# press action, so the action route left it unclicked")
 
     def _note_repeat(self, event: Click, state: _State) -> None:
         """Explain a repeated click beyond a double.
