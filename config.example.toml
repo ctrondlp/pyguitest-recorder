@@ -75,6 +75,17 @@ infer_idle = true
 
 [generator]
 locators = "element"        # "element", "relative" or "absolute"
+click_via = "auto"          # "auto", "pointer" or "action": the route a named
+                            # element's click() is emitted with. "auto" is a
+                            # plain click(), pyguitest's own ladder -- the
+                            # recorded pointer click comes back as the
+                            # accessible action where there is one. "pointer"
+                            # is click(via="pointer"), the user pathway the
+                            # recording actually captured; "action" is
+                            # click(via="action"), the accessible action only.
+                            # Only single named clicks take this: a double
+                            # click is already the pointer pathway, and select
+                            # / expand / collapse name their own act.
 motion = "teleport"         # "teleport", "natural", "recorded" or "verbatim":
                             # how a pointer move is rendered. "teleport" is
                             # gui.move_mouse(), exactly as recorded. "natural"

@@ -423,6 +423,14 @@ class GeneratorOptions:
     one menu trip -- and it wants `record_motion` for anything to replay.
     """
 
+    click_via: Literal["auto", "pointer", "action"] = "auto"
+    """The route a named element's `click()` is emitted with, or the ladder.
+
+    See `Settings.click_via` for the three routes and what each is for; this
+    is the generator's own copy, so a caller building `GeneratorOptions`
+    directly gets the same default without reaching for a `Settings`.
+    """
+
     max_waypoints: int = 32
     """Cap on the `via` points under `motion = "recorded"`; 0 or less is no cap.
 
@@ -529,6 +537,15 @@ class _State:
     the installed library, and asking imports pyguitest and walks its
     namespace -- which a recording with hundreds of motion events would
     otherwise do hundreds of times.
+    """
+    via_supported: bool = False
+    """Whether the installed pyguitest's `Element.click` accepts a `via=`.
+
+    The `click_via` option writes `click(via=...)`, a keyword an older
+    pyguitest does not have. Computed once per render for the same reason
+    `natural_motion` is, and used by `_effective_click_via` to degrade a
+    chosen route to a plain `click()` -- which `render` has already warned
+    about -- rather than emitting a call the installed library would refuse.
     """
     focused_window: str | None = None
     """The window variable the script has most recently focused, so keyboard
@@ -1010,6 +1027,18 @@ class PythonGenerator:
         state = _State()
         state.natural_motion = _NATURAL_MOTION in _session_methods()
         state.session_type = recording.environment.session_type
+        click_keywords = _element_keywords().get("click")
+        state.via_supported = click_keywords is not None and "via" in click_keywords
+        if self.options.click_via in ("pointer", "action") and not state.via_supported:
+            message = (
+                f"the installed pyguitest has no via= on Element.click(), so "
+                f"every named click under click_via = {self.options.click_via!r} "
+                "was rendered as a plain click()"
+            )
+            if self.options.include_header:
+                state.warnings.append(message)
+            else:
+                state.lines.append(f"# WARNING: {message}")
         if self.options.locators == "element":
             state.element_scopes, scope_warnings = _compute_element_scopes(recording)
             state.warnings.extend(scope_warnings)
@@ -1277,7 +1306,7 @@ class PythonGenerator:
                 and self._select_click(event, state)
             ):
                 return
-            call = self._element_call(element, state, "click()")
+            call = self._click_call(element, state)
             if call is not None:
                 state.lines.extend([call] * event.count)
                 state.pointer = None
@@ -1285,6 +1314,10 @@ class PythonGenerator:
                 self._note_element_repeat(event, state)
                 return
             if self._select_click(event, state):
+                return
+            if self._effective_click_via(state) == "action":
+                self._note_action_unavailable(event, state)
+                state.bare_click_pending = False
                 return
         if state.bare_click_pending:
             state.capabilities.add("TIMING")
@@ -1299,6 +1332,7 @@ class PythonGenerator:
         self._move(event.target, state)
         self._note_button_fallback(event, state)
         self._note_unclickable_fallback(event, state)
+        self._note_pointer_fallback(event, state)
         button = "" if event.button == 1 else str(event.button)
         if event.count == 2:
             state.lines.append(f"gui.double_click({button})")
@@ -1306,6 +1340,50 @@ class PythonGenerator:
             state.lines.extend([f"gui.click({button})"] * event.count)
             self._note_repeat(event, state)
         state.bare_click_pending = True
+
+    def _effective_click_via(self, state: _State) -> str:
+        """The route the `click_via` option resolves to for this render.
+
+        `"auto"` where the option is unset, unknown, or the installed pyguitest
+        has no `via=` keyword to write -- the last is `render`'s degradation,
+        which it has already warned about. An unknown value falls back the way
+        `motion` does: silently, to the recorded behaviour, rather than
+        guessing one of the new routes a typo might have meant.
+        """
+        via = self.options.click_via
+        if via not in ("auto", "pointer", "action"):
+            return "auto"
+        if via != "auto" and not state.via_supported:
+            return "auto"
+        return via
+
+    def _click_call(self, element: ElementRef | None, state: _State) -> str | None:
+        """The named element's `click()`, or None where it has to stay a coordinate.
+
+        The route changes not only the keyword written but what the element
+        must offer for a named click to be emitted at all. The action route --
+        and the default ladder -- needs a click action, so a label with none
+        falls to a coordinate exactly as it always has; the pointer route needs
+        a rectangle to aim at instead, and does not care whether the element
+        publishes an action, so an actionable-less element that used to fall to
+        a bare coordinate now keeps its name. The gate is checked before the
+        locator is asked for, for the same reason `_element_call`'s is:
+        `_element_expr` can emit a disambiguating `within=` line a refused call
+        must not leave behind.
+        """
+        via = self._effective_click_via(state)
+        if via == "pointer":
+            if element is None or element.extents is None:
+                return None
+            locator = self._element_expr(element, state)
+            if locator is None:
+                return None
+            state.capabilities.update(
+                {"ELEMENT_GEOMETRY", "POINTER_MOVE", "POINTER_BUTTON"}
+            )
+            return f'{locator}.click(via="pointer")'
+        action = "click()" if via == "auto" else 'click(via="action")'
+        return self._element_call(element, state, action)
 
     def _select_click(self, event: Click, state: _State) -> bool:
         """Render a single click as `Element.select()`, where that is the act.
@@ -1505,6 +1583,7 @@ class PythonGenerator:
             or not element.addressable
             or element.clickable
             or self.options.locators != "element"
+            or self._effective_click_via(state) == "pointer"
         ):
             return
         api = element_api(state.session_type)
@@ -1512,6 +1591,57 @@ class PythonGenerator:
             f"# {element.name!r} was named, but offered {api} no click or"
         )
         state.lines.append("# press action, so this has to stay a coordinate")
+
+    def _note_pointer_fallback(self, event: Click, state: _State) -> None:
+        """Explain a coordinate click the pointer route could not name.
+
+        Under `click_via = "pointer"` a named element falls to a coordinate
+        only when it publishes no rectangle to aim at -- the one thing the
+        pointer route needs. `_note_unclickable_fallback`'s account ("no click
+        or press action") is the action route's refusal, and would misdescribe
+        this one, so the two are told apart by which route is in force.
+        """
+        element = event.target.element
+        if (
+            self._effective_click_via(state) != "pointer"
+            or not self.options.comments
+            or event.button != 1
+            or element is None
+            or not element.addressable
+            or element.extents is not None
+            or self.options.locators != "element"
+        ):
+            return
+        state.lines.append(
+            f"# {element.name!r} was named, but published no rectangle to aim"
+        )
+        state.lines.append("# the pointer route at, so this stays a coordinate")
+
+    def _note_action_unavailable(self, event: Click, state: _State) -> None:
+        """Explain a click the action route left unclicked.
+
+        Under `click_via = "action"` a named element is replayed as its
+        accessible action or not at all -- the route exists for a replay that
+        must not inject a pointer, so an element with no click action cannot
+        fall through to a coordinate the way the ladder does. The click is
+        dropped and this says why.
+        """
+        element = event.target.element
+        if (
+            self._effective_click_via(state) != "action"
+            or not self.options.comments
+            or event.button != 1
+            or element is None
+            or not element.addressable
+            or element.clickable
+            or self.options.locators != "element"
+        ):
+            return
+        api = element_api(state.session_type)
+        state.lines.append(
+            f"# {element.name!r} was named, but offered {api} no click or"
+        )
+        state.lines.append("# press action, so the action route left it unclicked")
 
     def _note_repeat(self, event: Click, state: _State) -> None:
         """Explain a repeated click beyond a double.

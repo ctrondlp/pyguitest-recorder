@@ -256,3 +256,11 @@ def test_the_check_key_is_configurable(tmp_path):
     path.write_text('[analyzer]\ncheck_key = "F10"\n')
     settings, _ = load_settings(path)
     assert settings.check_key == "F10"
+
+
+def test_click_via_is_configurable_and_defaults_to_auto(tmp_path):
+    assert Settings().click_via == "auto"
+    path = tmp_path / "config.toml"
+    path.write_text('[generator]\nclick_via = "pointer"\n')
+    settings, _ = load_settings(path)
+    assert settings.click_via == "pointer"

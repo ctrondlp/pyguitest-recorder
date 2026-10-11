@@ -5,6 +5,26 @@ was released.
 
 ## [Unreleased]
 
+### Added
+
+- **A `click_via` option lets a generated script replay the click pathway the
+  recording captured, instead of the element-name ladder.** The recorder
+  captures a pointer press and release, then resolves it to a named element and
+  emits `gui.button("OK").click()` -- which replays through pyguitest's own
+  ladder, the accessible action where there is one, so a click that *was* a
+  pointer click comes back as an action click. `click_via = "pointer"` emits
+  `click(via="pointer")` instead, the user pathway only; `click_via = "action"`
+  emits `click(via="action")`, the accessible action only; the default
+  `"auto"` keeps today's output byte-for-byte. Two things change with the
+  route, not just the keyword: a pointer click names any element with a
+  rectangle to aim at, so an actionable-less element that used to fall to a
+  bare coordinate now keeps its name, and the generated `gui.require(...)`
+  names the pointer capabilities rather than `ELEMENT_ACTION`. A double click
+  is already the pointer pathway, so `Element.double_click` is untouched.
+  Configurable from the file (`click_via`) or the new `--click-via` flag. An
+  installed pyguitest without `via=` (the floor this package names predates
+  it) still renders -- as plain `click()` -- and the generated script says so.
+
 ## [0.8.3] — 2026-10-03
 
 ### Changed

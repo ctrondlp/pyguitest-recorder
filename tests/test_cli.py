@@ -786,6 +786,17 @@ def test_motion_has_flags_and_not_only_config_keys():
     assert _overrides(parser.parse_args([]))["max_waypoints"] is None
 
 
+def test_click_via_has_a_flag():
+    from pyguitest_recorder.cli import _overrides
+
+    parser = build_parser()
+    for route in ("auto", "pointer", "action"):
+        args = parser.parse_args(["--click-via", route])
+        assert _overrides(args)["click_via"] == route
+    # Unset overrides nothing, so a config file's choice survives.
+    assert _overrides(parser.parse_args([]))["click_via"] is None
+
+
 # -- trimming ----------------------------------------------------------
 
 
