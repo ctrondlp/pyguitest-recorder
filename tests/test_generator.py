@@ -1086,7 +1086,9 @@ def test_click_via_action_leaves_an_actionless_element_unclicked(window):
     # an element with no click action is left unclicked with a note, rather
     # than falling through to gui.click() at a coordinate the way the ladder
     # does.
-    label = ElementRef(role="label", name="Office", extents=(40, 300, 120, 24), actions=())
+    label = ElementRef(
+        role="label", name="Office", extents=(40, 300, 120, 24), actions=()
+    )
     source = render(
         Click(target=Target(x=60, y=310, window=window, element=label)),
         click_via="action",
@@ -1097,11 +1099,15 @@ def test_click_via_action_leaves_an_actionless_element_unclicked(window):
     assert validate(source) == []
 
 
-def test_click_via_unsupported_route_warns_even_without_a_header(monkeypatch, window, save_button):
+def test_click_via_unsupported_route_warns_even_without_a_header(
+    monkeypatch, window, save_button
+):
     # include_header=False drops the footer where warnings normally land, so
     # the lost-route note has to survive as a body comment instead of
     # vanishing with the header.
-    monkeypatch.setattr(generator_module, "_element_keywords", lambda: {"click": frozenset()})
+    monkeypatch.setattr(
+        generator_module, "_element_keywords", lambda: {"click": frozenset()}
+    )
     source = render(
         Click(target=Target(x=180, y=90, window=window, element=save_button)),
         click_via="pointer",

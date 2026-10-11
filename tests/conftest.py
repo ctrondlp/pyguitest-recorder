@@ -98,7 +98,8 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "needs_via: asserts on output `click(via=...)`; skipped without pyguitest's via=",
+        "needs_via: asserts on output `click(via=...)`; skipped without "
+        "pyguitest's via=",
     )
 
 

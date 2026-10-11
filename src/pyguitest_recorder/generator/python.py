@@ -1029,7 +1029,7 @@ class PythonGenerator:
         state.session_type = recording.environment.session_type
         click_keywords = _element_keywords().get("click")
         state.via_supported = click_keywords is not None and "via" in click_keywords
-        if self.options.click_via != "auto" and not state.via_supported:
+        if self.options.click_via in ("pointer", "action") and not state.via_supported:
             message = (
                 f"the installed pyguitest has no via= on Element.click(), so "
                 f"every named click under click_via = {self.options.click_via!r} "
