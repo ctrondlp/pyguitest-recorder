@@ -5,6 +5,8 @@ was released.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-13
+
 ### Added
 
 - **A `click_via` option lets a generated script replay the click pathway the
@@ -24,6 +26,37 @@ was released.
   Configurable from the file (`click_via`) or the new `--click-via` flag. An
   installed pyguitest without `via=` (the floor this package names predates
   it) still renders -- as plain `click()` -- and the generated script says so.
+
+### Documentation
+
+- **"Why is my script all coordinates?" now covers a third family of cause.**
+  It described two (the recorder could not reach the accessibility layer, or
+  reached it and did not believe what it was told); there is now a third, the
+  lookup that never came back. pyguitest bounds each individual accessibility
+  call and raises `BackendCallTimeout` when one wedges rather than merely runs
+  slowly -- confirmed live on GhostBSD and Pop!_OS/COSMIC that a single AT-SPI
+  call can lock up completely. The resolver already degrades on it (its
+  `except Exception` paths catch it, since `BackendCallTimeout` derives from
+  `PyGUITestError` and so from `Exception`) and emits a coordinate, which is
+  the right trade, but with no corroboration comment to explain why. Worth
+  writing down because of what it used to be: before that bound existed, this
+  was not a coordinate in the output at all -- it was the recorder hanging,
+  unkillable short of SIGKILL, with the session lost. Also notes that a
+  recording suddenly all coordinates on a desktop that used to name things
+  points at a degraded accessibility bus rather than any of the refusals, and
+  that restarting `at-spi2` is the first thing to try.
+
+  **No code change was needed**, which was the question being asked. Audited
+  against pyguitest's uncommitted `BackendCallTimeout` work: the resolver
+  wraps every pyguitest call it makes in `except Exception` already; this
+  package keeps no copy of the macOS window-layer filter that changed there
+  (and dropped `gi` entirely some time ago, so it duplicates no AT-SPI
+  walking); and generated scripts import only `Capability` and `Role`, no
+  error types, so a new exception needs no generator support. `focus_window`
+  benefits from the macOS `activate_window` fix without this side changing.
+  The `pyguitest>=0.16.2` floor and the `pyguitest-0.16` generator profile
+  both still hold -- nothing here requires the new behaviour, it just degrades
+  better when it is present.
 
 ## [0.8.3] — 2026-10-03
 

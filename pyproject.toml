@@ -232,7 +232,7 @@ dependencies = [
     # resolved correctly, and emitted a bare coordinate. The floor keeps the
     # meaning every step above gives it: the release this output was verified
     # against, not the oldest that might work.
-    "pyguitest>=0.16.2",
+    "pyguitest>=0.17.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
