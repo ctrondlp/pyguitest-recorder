@@ -23,9 +23,22 @@ was released.
   bare coordinate now keeps its name, and the generated `gui.require(...)`
   names the pointer capabilities rather than `ELEMENT_ACTION`. A double click
   is already the pointer pathway, so `Element.double_click` is untouched.
-  Configurable from the file (`click_via`) or the new `--click-via` flag. An
-  installed pyguitest without `via=` (the floor this package names predates
-  it) still renders -- as plain `click()` -- and the generated script says so.
+  Configurable from the file (`click_via`) or the new `--click-via` flag. The
+  floor below carries `via=`, so the keyword is there on any install that
+  satisfies it; a pyguitest without it -- a local tree, a vendored copy, an
+  install that ignored the dependency -- still renders, as plain `click()`,
+  and the generated script says so rather than emitting a call the library
+  would refuse.
+
+### Changed
+
+- **The pyguitest floor is now 0.17.0, and the generator profile moves with
+  it to `pyguitest-0.17`.** `click_via` writes `Element.click(via=...)`, which
+  is pyguitest 0.17.0's keyword, so this is the first release whose output
+  needs that version to replay rather than merely degrade against it. The same
+  release is what makes a wedged accessibility call raise `BackendCallTimeout`
+  instead of hanging, which is the behaviour the resolver's coordinate
+  fallback below is written against.
 
 ### Documentation
 
@@ -54,9 +67,10 @@ was released.
   walking); and generated scripts import only `Capability` and `Role`, no
   error types, so a new exception needs no generator support. `focus_window`
   benefits from the macOS `activate_window` fix without this side changing.
-  The `pyguitest>=0.16.2` floor and the `pyguitest-0.16` generator profile
-  both still hold -- nothing here requires the new behaviour, it just degrades
-  better when it is present.
+  The audit's own conclusion was that the floor could stay at `0.16.2` and the
+  profile at `pyguitest-0.16`, since nothing on this side *requires* the new
+  behaviour -- it just degrades better when it is present. `click_via` is what
+  moved them anyway; see **Changed**, above.
 
 ## [0.8.3] — 2026-10-03
 
