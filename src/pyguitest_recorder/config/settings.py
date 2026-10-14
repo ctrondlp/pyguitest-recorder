@@ -249,9 +249,10 @@ class Settings:
     Applies to a single named click. A double click is already the pointer
     pathway (`Element.double_click` has no action spelling), and `select()`,
     `expand()` and `collapse()` name their own act, none of which takes a
-    `via=`. An installed pyguitest without `via=` (the floor this package
-    names predates it) renders the chosen route as a plain `click()` and the
-    generated script says so, rather than failing to import.
+    `via=`. The floor this package names carries `via=`, so the keyword is
+    there on any install that satisfies it; one without it renders the chosen
+    route as a plain `click()` and the generated script says so, rather than
+    failing to import.
     """
 
     max_waypoints: int = 32

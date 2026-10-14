@@ -20,9 +20,9 @@ that specific recording.
 
 ## Why is my script all coordinates?
 
-This is the most common question, and there are only two families of answer:
-the recorder could not *reach* the accessibility layer, or it reached it and
-did not *believe* what it was told.
+This is the most common question, and there are three families of answer: the
+recorder could not *reach* the accessibility layer, it reached it and did not
+*believe* what it was told, or the lookup never came back.
 
 **Start with `--doctor`.** If element resolution is off, that is the whole
 answer — see [the next section](#doctor-says-element-resolution-is-off). A
@@ -71,6 +71,24 @@ inconsistent.
 
 **Rectangle checks are skipped entirely where any screen is scaled**, since
 AT-SPI extents and window geometry are then not reliably in the same units.
+
+**The third family: a lookup that never came back.** pyguitest bounds each
+individual accessibility call and raises `BackendCallTimeout` when one does
+not return at all -- confirmed live on GhostBSD and Pop!_OS/COSMIC that a
+single AT-SPI call can wedge completely, not merely run slowly. The resolver
+treats that like every other backend failure and degrades to a coordinate,
+which is the right trade (a coordinate that works beats a named element that
+cannot be looked up), but it means a widget whose subtree wedges records as a
+coordinate with no corroboration comment to explain it.
+
+Before that bound existed this was not a coordinate in the output at all --
+it was the whole recorder hanging, unkillable by anything short of SIGKILL,
+with the session lost. So if you have seen a recording freeze on one
+particular control historically, this is what it was, and an up-to-date
+pyguitest turns it into a coordinate instead of a lost recording. A whole
+recording that is suddenly all coordinates on a desktop where it used to name
+things points at a degraded accessibility bus rather than at any of the
+refusals above; restarting `at-spi2` is the first thing to try.
 
 If the application is yours, this is fixable at the source:
 [testable-guis.md](testable-guis.md) is written to be handed to its
@@ -319,7 +337,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.16.2 or newer is required
+older than the recording expects. **pyguitest 0.17.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),
@@ -350,7 +368,15 @@ again: on macOS `Element.text` answered from a cache, so a generated
 `expect_text` could assert what a field held before the recording's own write
 reached it, and on Linux `windows()` listed the override-redirect popups a
 window manager never manages, so a click could resolve to a drop-down instead
-of the application's window. Older floors matter as well: `gui.button(...)`
+of the application's window. 0.17.0 is the bluntest step of the lot, and the
+only one that raises on sight rather than misbehaving quietly: on a desktop
+with dogtail 2.1.0 -- Debian 13 and Pop!_OS/COSMIC, both confirmed live --
+`active_window()` called a camelCase alias that version had dropped, and the
+pyatspi constant underneath it came from a module whose own import fails
+there, so `gui.focus_window(...)` and `gui.wait_window_focus(...)` were
+unusable outright. Generated scripts emit both. The same release stops a
+wedged accessibility call hanging a script forever, raising
+`BackendCallTimeout` instead. Older floors matter as well: `gui.button(...)`
 finds nothing on a current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
