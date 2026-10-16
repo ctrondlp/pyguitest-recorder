@@ -1337,3 +1337,84 @@ class TestALostWindowsHookIsReported:
             )
         )
         assert not [n for n in recording.environment.notes if "input the hooks" in n]
+
+
+class TestExcludeWindows:
+    """`exclude_windows`: events in a matching window never enter the recording.
+
+    The deliberate exception to "marked, never dropped" -- see the setting's
+    own docstring. What is checked here is the recorder half: `_add` is the
+    single gate for both the live stream and the normalizer's flush, and the
+    recording's notes say how many events were withheld without naming the
+    windows they were withheld from.
+    """
+
+    def _recorder(self, window, **settings: Any) -> Recorder:
+        recorder = Recorder(settings=Settings(**settings))
+        recorder._normalizer = Normalizer(
+            resolver=FakeResolver(window=window), started=0.0
+        )
+        return recorder
+
+    def _click(self) -> list[RawEvent]:
+        return [
+            RawEvent(kind="button_press", timestamp=1.0, x=50, y=50, button=1),
+            RawEvent(kind="button_release", timestamp=1.1, x=50, y=50, button=1),
+        ]
+
+    def _finish(self, recorder: Recorder) -> None:
+        """What `run` does at the end: flush the normalizer through the gate."""
+        for event in recorder._normalizer.flush():
+            recorder._add(event)
+
+    def _vault(self):
+        from pyguitest_recorder.model import WindowRef
+
+        return WindowRef(title="Secrets - KeePassXC", app_id="org.keepassxc.KeePassXC")
+
+    def test_a_click_in_an_excluded_window_is_withheld(self):
+        recorder = self._recorder(self._vault(), exclude_windows=("*KeePassXC*",))
+        recorder._consume(self._click())
+        self._finish(recorder)
+        assert recorder.recording.events == []
+        assert recorder._excluded_events > 0
+
+    def test_the_same_click_records_when_no_pattern_matches(self):
+        recorder = self._recorder(self._vault(), exclude_windows=("*Bitwarden*",))
+        recorder._consume(self._click())
+        self._finish(recorder)
+        assert recorder.recording.events != []
+        assert recorder._excluded_events == 0
+
+    def test_typing_into_an_excluded_window_is_withheld(self):
+        recorder = self._recorder(self._vault(), exclude_windows=("*KeePassXC*",))
+        recorder._consume(
+            [
+                RawEvent(
+                    kind="key_press", timestamp=1.0, keysym="a", text="a", x=5, y=5
+                ),
+                RawEvent(kind="key_release", timestamp=1.05, keysym="a", x=5, y=5),
+            ]
+        )
+        self._finish(recorder)
+        texts = [e for e in recorder.recording.events if getattr(e, "text", None)]
+        assert texts == []
+
+    def test_run_notes_what_was_withheld_by_count_and_pattern(self):
+        recorder = self._recorder(self._vault(), exclude_windows=("*sxc*",))
+        recorder._backend = _SilentBackend(*self._click())
+        recording = recorder.run()
+        assert recording.events == []
+        notes = [n for n in recording.environment.notes if "withheld" in n]
+        assert len(notes) == 1
+        # The count and the user's own pattern, never the matched window's
+        # title -- that would put the excluded name back into the file.
+        assert "'*sxc*'" in notes[0]
+        assert "KeePassXC" not in notes[0]
+
+    def test_run_writes_no_note_when_nothing_was_withheld(self):
+        recorder = self._recorder(self._vault(), exclude_windows=("*Bitwarden*",))
+        recorder._backend = _SilentBackend(*self._click())
+        recording = recorder.run()
+        assert recording.events != []
+        assert not any("withheld" in n for n in recording.environment.notes)

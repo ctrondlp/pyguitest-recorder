@@ -264,3 +264,38 @@ def test_click_via_is_configurable_and_defaults_to_auto(tmp_path):
     path.write_text('[generator]\nclick_via = "pointer"\n')
     settings, _ = load_settings(path)
     assert settings.click_via == "pointer"
+
+
+def test_exclude_windows_defaults_empty_and_accepts_a_toml_array(tmp_path):
+    assert Settings().exclude_windows == ()
+    path = tmp_path / "config.toml"
+    path.write_text('[privacy]\nexclude_windows = ["*Bitwarden*", "signal"]\n')
+    settings, _ = load_settings(path)
+    # Normalized to the tuple the field declares, whatever TOML handed over.
+    assert settings.exclude_windows == ("*Bitwarden*", "signal")
+
+
+def test_exclude_windows_from_the_command_line_list_is_normalized_too():
+    merged = Settings().merged(exclude_windows=["*Vault*"])
+    assert merged.exclude_windows == ("*Vault*",)
+
+
+def test_an_empty_exclude_pattern_is_refused_by_name():
+    # Empty matches nothing under fnmatch while reading like "everything".
+    with pytest.raises(ConfigError, match="exclude_windows"):
+        Settings(exclude_windows=("",))
+
+
+def test_a_non_string_exclude_pattern_is_refused_at_load_time(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[privacy]\nexclude_windows = [3]\n")
+    with pytest.raises(ConfigError, match="exclude_windows"):
+        load_settings(path)
+
+
+def test_exclude_windows_with_record_raw_is_a_self_defeating_combination():
+    # The raw stream is captured before windows are resolved, so it keeps
+    # everything exclusion promised to withhold; a session file carrying both
+    # would look scrubbed while being nothing of the kind.
+    with pytest.raises(ConfigError, match="record_raw"):
+        Settings(exclude_windows=("*Vault*",), record_raw=True)

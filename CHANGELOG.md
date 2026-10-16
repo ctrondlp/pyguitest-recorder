@@ -5,6 +5,67 @@ was released.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-16
+
+### Added
+
+- **`--exclude-window PATTERN` / `exclude_windows` keeps named windows out of
+  a recording entirely.** Case-insensitive glob patterns matched against each
+  window's title and app_id (`*Bitwarden*`, `org.keepassxc.keepassxc`);
+  anything typed, clicked or dragged in a matching window never reaches the
+  session file or the generated script, and a drag with either endpoint in
+  one is withheld whole. This is the one sanctioned exception to the
+  package's "marked, never dropped" rule, and it says so: the recording's
+  notes carry how many events were withheld and under which patterns — never
+  the matched titles, which would put the excluded names back into the file.
+  Exclusion needs the window to have been identified, so it cannot withhold a
+  bare coordinate click on a desktop whose hit-testing failed, and it is a
+  convenience against accidental capture, not a boundary against a recording
+  made in bad faith. Combining it with `--record-raw` is refused outright:
+  the raw stream is captured before windows are resolved, so a session file
+  carrying both would look scrubbed while being nothing of the kind.
+
+### Fixed
+
+- **The X11 live check's xmessage fallback had silently never worked.**
+  xmessage names its window "xmessage" whatever text it is given and draws
+  it under the check's own 100px size minimum, so on a box without zenity
+  or xterm the check failed at setup rather than falling back — seen live
+  on KaOS, which has neither. The last resort is now the check's own GTK
+  probe window (`scripts/check_app.py`), which is already what the second
+  window uses; with it, the full record → generate → validate → replay
+  cycle runs and passes on KaOS.
+
+- **`--require-version` / `require_version` opens generated scripts with
+  `gui.require_version(...)`**, naming the pyguitest line the generator's
+  output was checked against (derived from `PROFILE`, so the two cannot
+  drift) — an older install then fails at the script's first statement with
+  both versions named and the upgrade command, instead of mid-run with an
+  `AttributeError` on an API that release does not have. Off by default: a
+  script replayed where it was recorded runs against the pyguitest that
+  generated it, and a hard floor would only refuse replays that might have
+  worked; turn it on for scripts that travel. Needs pyguitest 0.18.0, which
+  ships `require_version` — hence this release's dependency floor.
+
+### Changed
+
+- **The X11 live check now replays what it generates.**
+  `scripts/live-capture-check.py` ends by running the generated script
+  against fresh windows on the same private Xvfb — the half the Windows
+  check always had and this one never did, so a script could validate clean
+  and never have been executed by anything. It fails on a non-zero exit, a
+  120-second overrun, or a replay that destroyed the scene it was aimed at;
+  `--no-replay` skips it for a machine whose pyguitest cannot inject on the
+  private server. Run twice on a real machine before landing: validate
+  clean, round trip identical, replay PASS, exit 0.
+- **The Wayland-recording stance in `docs/developers/architecture.md` now
+  separates what is permanent from what is open.** Passive observation (what
+  XRecord does) stays impossible by design; the Input Capture portal is the
+  consent-shaped route that exists — with the honest caveats that it diverts
+  input rather than copying it, that a recorder would have to capture and
+  re-inject in a loop, and that some compositors (COSMIC) do not implement
+  the portal at all. An open investigation, not a plan.
+
 ## [0.9.1] — 2026-10-15
 
 ### Fixed

@@ -131,6 +131,11 @@ include_header = true       # the docstring naming versions and desktop
 # Copyright (c) ACME. Regenerate with pyguitest-recorder --regenerate.
 # """
 capability_preamble = true  # emit gui.require(...) naming what the script uses
+# Open the script with gui.require_version(...) naming the pyguitest line it
+# was generated against. Off by default: a script replayed where it was
+# recorded runs against the pyguitest that generated it; turn it on for
+# scripts that travel to machines that may run an older pyguitest.
+require_version = false
 default_timeout = 10.0
 # Ceiling on one inferred wait, however long the observed gap. A wait returns
 # as soon as its condition holds, so this only ever costs a wait that was
@@ -157,6 +162,10 @@ suppress_atspi_chatter = false   # silence GLib's unrelated AT-SPI/dbind log noi
 sensitive = false           # treat all typed text as secret
 redact_sensitive = true     # password-field text becomes an environment lookup
 record_raw = false          # keep the raw event stream (includes keystrokes)
+# Windows whose events never enter the recording at all: case-insensitive
+# globs matched against each window's title and app_id. Cannot be combined
+# with record_raw, which would keep what this promises to withhold.
+exclude_windows = []        # e.g. ["*Bitwarden*", "org.keepassxc.keepassxc"]
 
 [output]
 # output = "recorded.py"

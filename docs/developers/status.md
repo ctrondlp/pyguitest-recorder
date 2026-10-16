@@ -1047,15 +1047,26 @@ clicks there degrade to coordinates rather than to wrong elements.
 
 ## Known gaps
 
-- **`scripts/live-capture-check.py` itself records and regenerates but still
+- ~~**`scripts/live-capture-check.py` itself records and regenerates but still
   never replays**, where the Windows one replays by default. Every replay in
   this file, including the private-Xvfb round trips above, was run by hand
-  rather than by that script. A replay alone is not enough either: the worst
-  bug of the GhostBSD day produced a script that validated clean *and* ran
-  clean, and only reading an end state back -- the tab count, the
-  calculator's display -- showed it doing the wrong thing, which is why every
-  hand-run replay above reads a real end state back rather than stopping at
-  a clean exit.
+  rather than by that script.~~ **Narrowed 2026-10-16:** the check now ends by
+  running the generated script against fresh windows on the same private
+  server and fails on a non-zero exit, a 120s overrun, or a scene the replay
+  destroyed (`--no-replay` skips it). Observed twice on a Fedora 45 machine:
+
+      validate: clean
+      round trip: recording.json re-rendered identically
+      replay: PASS -- the generated script ran clean against fresh windows
+
+  (exit status 0, both runs). What is still true from the original entry: a clean exit is a weaker read
+  than a real end-state verification -- the worst bug of the GhostBSD day
+  produced a script that validated clean *and* ran clean, and only reading an
+  end state back (the tab count, the calculator's display) showed it doing
+  the wrong thing. The replay step covers everything the script asserts for
+  itself (`expect_window`, element lookups, the API floor); a richer
+  end-state read against the zenity entry needs an element-level read-back
+  the bare-server scenario does not reliably have.
 - **A click that dismisses a modal dialog is recorded as a click on whatever
   is underneath it.** Found, reproduced and characterised on 2026-09-23 (see
   the modal-dialog section above), with a replay that leaves the dialog open

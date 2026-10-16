@@ -3184,3 +3184,46 @@ def test_a_check_is_scoped_like_the_click_on_the_same_element(window):
     # The click, the check and the wait each carry it.
     assert source.count("within=torturetest") == 3
     assert validate(source) == []
+
+
+class TestRequireVersionPreamble:
+    """`require_version`: the opt-in version floor at the top of the body.
+
+    Off by default -- a script replayed where it was recorded runs against
+    the pyguitest that generated it. On, the floor opens the body ahead of
+    the capability preamble, and the version is derived from PROFILE so the
+    two cannot drift.
+    """
+
+    def _click(self, window):
+        return Click(
+            timestamp=1.0,
+            delay=0.0,
+            target=Target(x=200, y=200, window=window),
+        )
+
+    def test_off_by_default(self, window):
+        source = render(self._click(window))
+        assert "require_version" not in source
+
+    def test_on_it_opens_the_body_with_the_profile_version(self, window):
+        source = render(self._click(window), require_version=True)
+        version = generator_module.PROFILE.removeprefix("pyguitest-")
+        wanted = f'gui.require_version("{version}")'
+        assert wanted in source
+        body = [
+            line.strip()
+            for line in source.splitlines()
+            if line.startswith("        ") and line.strip()
+        ]
+        assert body[0] == wanted
+
+    def test_the_floor_precedes_the_capability_preamble(self, window):
+        source = render(self._click(window), require_version=True)
+        if "gui.require(" not in source:
+            pytest.skip("this recording asked for no capabilities")
+        assert source.index("gui.require_version(") < source.index("gui.require(")
+
+    def test_the_emitted_call_validates_against_the_installed_pyguitest(self, window):
+        source = render(self._click(window), require_version=True)
+        assert validate(source) == []

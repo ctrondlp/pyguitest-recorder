@@ -28,7 +28,7 @@ from typing import Any, Literal
 from .analyzer import Normalizer, NormalizerOptions
 from .backends.base import CaptureBackend, CaptureUnavailable
 from .config import Settings
-from .model import Assertion, Environment, Recording
+from .model import Assertion, Environment, Event, Recording, excluded
 from .stopkey import StopKey
 from .windows import ContextResolver, DesktopResolver, NullResolver
 
@@ -578,6 +578,13 @@ class Recorder:
     _lag_reported_at: float = field(default=0.0, init=False)
     """When `on_lag` was last called, so it is not called per event."""
 
+    _excluded_events: int = field(default=0, init=False)
+    """Events withheld because their window matched `exclude_windows`.
+
+    Counted so the recording can say that something was withheld without
+    saying what -- see `_add`, and the settings docstring for why this is
+    the one sanctioned exception to "marked, never dropped"."""
+
     def __post_init__(self) -> None:
         """Build the recogniser this recorder's settings ask for."""
         self._stop_key = StopKey.from_settings(self.settings)
@@ -661,7 +668,7 @@ class Recorder:
             # application's, not the recorder's, so they belong in the recording.
             self._consume(self._stop_key.release())
             for event in self._normalizer.flush():
-                self.recording.add(event)
+                self._add(event)
         finally:
             with self._lifecycle:
                 was_consuming = self._consuming
@@ -688,6 +695,17 @@ class Recorder:
             self.recording.environment.notes.append(_hook_lost_note(gap))
         if self._injected_keys:
             self.recording.environment.notes.append(_injected_note(self._injected_keys))
+        if self._excluded_events:
+            # The sanctioned exception to "marked, never dropped": the events
+            # are gone on purpose, so the note names how many and under which
+            # patterns -- never which windows actually matched, which would
+            # put the excluded titles back into the file.
+            patterns = ", ".join(repr(p) for p in self.settings.exclude_windows)
+            self.recording.environment.notes.append(
+                f"{self._excluded_events} event(s) were withheld from this "
+                f"recording because their window matched exclude_windows "
+                f"({patterns})"
+            )
         self._collect_warnings()
         return self.recording
 
@@ -884,9 +902,26 @@ class Recorder:
             if self.settings.record_raw:
                 self.recording.raw.append(raw.to_dict())
             for event in self._normalizer.feed(raw):
-                self.recording.add(event)
+                if not self._add(event):
+                    continue
                 if self.on_check is not None and isinstance(event, Assertion):
                     self.on_check(event)
+
+    def _add(self, event: Event) -> bool:
+        """Add one normalized event, unless its window is excluded.
+
+        The single gate every normalized event passes on its way into the
+        recording -- `_consume` for the live stream and `run` for what the
+        normalizer flushes at the end -- so `exclude_windows` cannot be
+        bypassed by one of the two paths forgetting to check. Returns whether
+        the event was kept, so `_consume` does not announce a check that was
+        just withheld.
+        """
+        if excluded(event, self.settings.exclude_windows):
+            self._excluded_events += 1
+            return False
+        self.recording.add(event)
+        return True
 
     def _collect_warnings(self) -> None:
         """Carry what the resolver learned while recording into the notes.

@@ -171,6 +171,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = parser.add_argument_group("generation")
     render.add_argument(
+        "--require-version",
+        dest="require_version",
+        action="store_true",
+        default=None,
+        help="open the script with gui.require_version(...) naming the"
+        " pyguitest line it was generated against -- for scripts that travel"
+        " to machines that may run an older pyguitest; off by default",
+    )
+    render.add_argument(
         "--absolute-coordinates",
         dest="locators",
         action="store_const",
@@ -323,6 +332,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="keep the raw event stream for diagnostics (includes keystrokes)",
     )
+    privacy.add_argument(
+        "--exclude-window",
+        dest="exclude_windows",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help="leave out every event in windows whose title or app_id matches"
+        " this case-insensitive glob (e.g. '*Bitwarden*'); repeatable",
+    )
 
     parser.add_argument(
         "--doctor",
@@ -380,6 +398,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "max_timeout",
         "timeout_factor",
         "comments",
+        "require_version",
         "include_header",
         "header",
         "suppress_keymap_warning",
@@ -389,6 +408,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "sensitive",
         "redact_sensitive",
         "record_raw",
+        "exclude_windows",
         "debug",
     )
     values = {name: getattr(args, name, None) for name in names}
@@ -423,6 +443,7 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         max_waypoints=settings.max_waypoints,
         comments=settings.comments,
         capability_preamble=settings.capability_preamble,
+        require_version=settings.require_version,
         function_name=settings.function_name,
         default_timeout=settings.default_timeout,
         max_timeout=sync.max_timeout,
