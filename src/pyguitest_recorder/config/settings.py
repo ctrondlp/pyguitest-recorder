@@ -264,6 +264,17 @@ class Settings:
     """
     comments: bool = True
     capability_preamble: bool = True
+    require_version: bool = False
+    """Open generated scripts with `gui.require_version(...)`, naming the
+    pyguitest line this generator's output was checked against (`PROFILE`).
+
+    Off by default: a script replayed where it was recorded runs against the
+    pyguitest that generated it, and a hard floor would only refuse replays
+    that might have worked. Turn it on for scripts that travel -- handed to a
+    team, committed to CI, kept for months -- where an older pyguitest should
+    fail at the first line with both versions named rather than mid-run with
+    an AttributeError on an API that release does not have.
+    """
     default_timeout: float = 10.0
     max_timeout: float = 300.0
     """Ceiling on one inferred wait, however long the gap that asked for it.
@@ -328,6 +339,23 @@ class Settings:
     redact_sensitive: bool = True
     record_raw: bool = False
 
+    exclude_windows: tuple[str, ...] = ()
+    """Windows whose events are left out of the recording entirely.
+
+    Case-insensitive glob patterns matched against each window's title and
+    app_id -- `*Bitwarden*` for a vault whose title carries the entry name,
+    `signal` for that app_id exactly. Anything typed, clicked or dragged in
+    a matching window never reaches the session file or the generated
+    script. This is the one deliberate exception to the package's rule that
+    everything seen is marked rather than dropped: the recording's notes say
+    how many events were withheld and under which patterns, but the events
+    themselves are gone -- that is the point. Exclusion needs the window to
+    have been identified: it cannot withhold a bare coordinate click on a
+    desktop whose hit-testing failed (see `window_context`), and it is a
+    convenience against accidental capture, not a boundary against a
+    recording made in bad faith.
+    """
+
     # -- output ----------------------------------------------------------
     output: str | None = None
     session_file: str | None = None
@@ -348,6 +376,7 @@ class Settings:
         self._validate_motion_needs_record_motion()
         self._validate_check_key_is_not_the_stop_key()
         self._validate_header_needs_include_header()
+        self._validate_exclude_windows()
 
     def _validate_timeout_numbers(self) -> None:
         """Reject a `timeout_factor`, `default_timeout` or `max_timeout` unusable value.
@@ -448,6 +477,39 @@ class Settings:
             raise ConfigError(
                 "header is set but include_header = False would discard it; "
                 "either drop header or leave include_header on"
+            )
+
+    def _validate_exclude_windows(self) -> None:
+        """Normalize `exclude_windows` and reject what it cannot keep a promise about.
+
+        A TOML array arrives as a list and the command line builds one too, so
+        both are normalized to the tuple the field declares. Each entry must
+        be a non-empty string: an empty pattern matches nothing under fnmatch
+        yet reads like "exclude everything", and a non-string is a config
+        mistake worth naming at load time rather than a TypeError mid-match.
+
+        The combination with `record_raw` is refused outright. The raw stream
+        is captured before any window is resolved, so it keeps every
+        keystroke and coordinate the exclusion just promised to withhold --
+        a session file carrying both would look scrubbed while being nothing
+        of the kind, which is worse than either setting alone.
+        """
+        patterns = self.exclude_windows
+        if isinstance(patterns, list):
+            patterns = tuple(patterns)
+            self.exclude_windows = patterns
+        for pattern in patterns:
+            if not isinstance(pattern, str) or not pattern:
+                raise ConfigError(
+                    "exclude_windows entries must be non-empty strings, "
+                    f"got {pattern!r}"
+                )
+        if patterns and self.record_raw:
+            raise ConfigError(
+                "exclude_windows cannot be honoured with record_raw: the raw "
+                "stream is captured before windows are resolved, so it would "
+                "keep everything exclusion promised to withhold -- drop one "
+                "of the two"
             )
 
     def merged(self, **overrides: Any) -> Settings:

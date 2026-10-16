@@ -3,9 +3,11 @@
 
 Everything in `tests/` stops at the point where bytes arrive from the wire.
 This is the other half: an actual X server, an actual application, actual
-input, and the whole pipeline -- capture, normalize, infer, generate, validate
--- run over it. It is what turns "written" into "known to work" for the one
-backend a unit test cannot reach.
+input, and the whole pipeline -- capture, normalize, infer, generate, validate,
+**replay** -- run over it. The generated script is run against fresh windows at
+the end, which is what turns "renders and validates" into "does what it says":
+a script can validate clean and still do the wrong thing, and until the replay
+step every X11 replay to date had been run by hand.
 
 It runs against a **private, throwaway X server**, never the desktop you are
 sitting in front of. XRecord sees every application's keystrokes, so pointing
@@ -231,13 +233,38 @@ def start_server(number: int) -> subprocess.Popen[bytes]:
 
 
 def start_app(display: str) -> subprocess.Popen[bytes]:
-    """Put something on the server that has a window and takes typing."""
-    for command in (
+    """Put something on the server that has a window and takes typing.
+
+    The last resort is this check's own GTK probe window rather than
+    xmessage: xmessage names its window "xmessage" whatever text it is given
+    and draws it well under MIN_APP_SIZE, so `app_rectangle` can never find
+    it by title or accept it by size -- that rung had silently never worked,
+    seen live on a KaOS box with neither zenity nor xterm installed, where
+    the *second* window (already this same GTK script) came up fine while
+    the primary app could not.
+    """
+    probe = Path(__file__).resolve().parent / "check_app.py"
+    commands = [
         ["zenity", "--entry", "--title=" + APP_TITLE, "--text=Name"],
         ["xterm", "-T", APP_TITLE],
-        ["xmessage", "-center", APP_TITLE],
-    ):
-        if shutil.which(command[0]) is None:
+    ]
+    if probe.is_file():
+        commands.append(
+            [
+                sys.executable,
+                str(probe),
+                "--title",
+                APP_TITLE,
+                "--at",
+                "40",
+                "40",
+                "--size",
+                "420",
+                "320",
+            ]
+        )
+    for command in commands:
+        if command[0] != sys.executable and shutil.which(command[0]) is None:
             continue
         app = subprocess.Popen(
             command,
@@ -248,7 +275,10 @@ def start_app(display: str) -> subprocess.Popen[bytes]:
         time.sleep(3)
         if app.poll() is None:
             return app
-    raise Failure("no test application available (tried zenity, xterm, xmessage)")
+    raise Failure(
+        "no test application available (tried zenity, xterm, and this "
+        "check's own GTK probe window, which needs PyGObject)"
+    )
 
 
 MIN_APP_SIZE = 100
@@ -475,8 +505,8 @@ def send_input(
     connection.close()
 
 
-def check(display: str, record_motion: bool = False) -> int:
-    """Capture, render, and report. Returns the process exit status.
+def check(display: str, record_motion: bool = False, do_replay: bool = True) -> int:
+    """Capture, render, replay, and report. Returns the process exit status.
 
     Driven through `Recorder` rather than the capture backend alone, so the
     window resolver, the environment block and the panic key are exercised too
@@ -549,6 +579,10 @@ def check(display: str, record_motion: bool = False) -> int:
     problems = validate(source)
     print("validate:", problems or "clean")
     problems += round_trip(recording, source)
+    if do_replay:
+        problems += replay(source, display)
+    else:
+        print("replay: skipped (--no-replay)")
     return 1 if problems else 0
 
 
@@ -618,6 +652,60 @@ def report(recording: Recording) -> None:
         print(f"    note: {note}")
 
 
+def replay(source: str, display: str) -> list[str]:
+    """Run the generated script against fresh windows, and report what failed.
+
+    The half this check never had: it recorded, generated and validated, but
+    the script itself had never been *run* -- while the win32 check replays by
+    default -- so a script could validate clean, run clean by hand months
+    later, and still have been shipped by a green check that proved only its
+    syntax. The windows the recording was made against are gone by now (the
+    capture half terminates them), so the scene is rebuilt the way a replay in
+    anger would rebuild it: same applications, same titles, and -- with no
+    window manager to have an opinion -- the same places.
+
+    What exit 0 proves is everything the script asserts on its own behalf:
+    every `expect_window` found its window, every element lookup resolved, and
+    no call named an API the installed pyguitest lacks. The rectangle check
+    afterwards is the cheap scene read a bare server allows -- the window the
+    script drove is still there and still answerable, so the run did not end
+    by destroying what it was aimed at.
+    """
+    app = start_app(display)
+    second_app = start_second_window(display)
+    try:
+        fd, name = tempfile.mkstemp(suffix=".py")
+        os.close(fd)
+        script = Path(name)
+        script.write_text(source, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "DISPLAY": display},
+            )
+        except subprocess.TimeoutExpired:
+            return ["the replay did not finish within 120s"]
+        finally:
+            script.unlink(missing_ok=True)
+        if result.returncode != 0:
+            print("replay stdout:\n", result.stdout)
+            print("replay stderr:\n", result.stderr)
+            return [f"the replay exited {result.returncode}"]
+        try:
+            app_rectangle(display, APP_TITLE)
+        except Failure as exc:
+            return [f"after the replay, the application window is gone: {exc}"]
+        print("replay: PASS -- the generated script ran clean against fresh windows")
+        return []
+    finally:
+        for process in (app, second_app):
+            if process is not None:
+                process.terminate()
+
+
 def round_trip(recording: Recording, source: str) -> list[str]:
     """Save the recording, read it back, and check it renders the same.
 
@@ -655,6 +743,13 @@ def main() -> int:
         help="record every pointer position rather than only the rests, which is "
         "the setting whose cost this check exists to measure",
     )
+    parser.add_argument(
+        "--no-replay",
+        action="store_true",
+        help="skip running the generated script against fresh windows -- the "
+        "half that proves it does what it says, kept skippable for a machine "
+        "whose pyguitest cannot inject on the private server",
+    )
     args = parser.parse_args()
 
     reexec_on_a_private_bus()
@@ -674,7 +769,9 @@ def main() -> int:
         os.environ["DISPLAY"] = display
         a11y = start_a11y_bus()
         print("accessibility bus:", "private" if a11y else "none (elements off)")
-        return check(display, record_motion=args.record_motion)
+        return check(
+            display, record_motion=args.record_motion, do_replay=not args.no_replay
+        )
     except Failure as exc:
         print(f"live-capture-check: {exc}", file=sys.stderr)
         return 2

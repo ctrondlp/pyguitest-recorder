@@ -46,6 +46,14 @@ It is also the fastest way to try a different rendering: the same recording
 with `--absolute-coordinates`, or with `--no-sync-inference`, tells you what
 those flags actually change without re-performing the interaction.
 
+For a script that will *travel* — handed to a team, committed to CI, kept for
+months — `--require-version` opens it with `gui.require_version(...)` naming
+the pyguitest line it was generated against, so an older install fails at the
+first statement with both versions named instead of mid-run with an
+`AttributeError`. Off by default: a script replayed where it was recorded
+runs against the pyguitest that generated it, and a hard floor would only
+refuse replays that might have worked.
+
 ## Checks: what makes it a test
 
 A recording of actions alone passes as long as nothing raises. Press
@@ -160,6 +168,24 @@ touches a login.
 `--no-redact` does the opposite and writes password-field text into the script
 as a literal. There is no good reason to use it outside debugging the redactor
 itself.
+
+`--exclude-window PATTERN` keeps whole windows out of the recording rather
+than redacting what was typed into them — anything typed, clicked or dragged
+in a window whose title or app_id matches the pattern never reaches the
+session file or the script at all. Patterns are case-insensitive globs and the
+flag repeats:
+
+```sh
+pyguitest-recorder --exclude-window '*Bitwarden*' --exclude-window 'signal'
+```
+
+The recording's notes say how many events were withheld and under which
+patterns, and nothing else — naming the matched windows would put the excluded
+titles back into the file. Two honest limits: exclusion needs the window to
+have been *identified*, so a desktop whose hit-testing fails (bare coordinate
+clicks everywhere) has nothing to exclude by; and `--record-raw` is refused in
+combination, because the raw stream is captured before windows are resolved
+and would keep everything exclusion promised to withhold.
 
 **A saved `--save-session` recording is a credential-bearing artifact** even
 with redaction on, because redaction happens at generation time. Treat the

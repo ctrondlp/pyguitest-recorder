@@ -24,6 +24,8 @@ from .events import (
     WindowRef,
     describe_assertion,
     event_from_dict,
+    excluded,
+    windows_of,
 )
 from .recording import Environment, Recording
 
@@ -53,4 +55,6 @@ __all__ = [
     "WindowRef",
     "describe_assertion",
     "event_from_dict",
+    "excluded",
+    "windows_of",
 ]

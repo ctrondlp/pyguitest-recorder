@@ -6,7 +6,8 @@ why a recording came out the way it did.
 
 ## Why Wayland has no capture backend
 
-This is a property of the platform, not a missing feature.
+Passive observation — the thing XRecord does — is a property of the platform,
+not a missing feature.
 
 pyguitest classifies reading global keyboard or pointer state as
 `Capability.INPUT_STATE_QUERY`, tier 6 — *"deliberately prevented"* — and
@@ -15,6 +16,19 @@ do. No ordinary Wayland client can observe another client's input on any
 compositor, and no backend added later changes that: injection on Wayland took
 portals, libei and per-compositor IPC, but observation is the thing compositors
 exist to prevent.
+
+What is *not* permanently closed is the consent-shaped route. The Input
+Capture portal (`org.freedesktop.portal.InputCapture`, spoken by python-libei's
+`InputCaptureSession`) lets a user deliberately hand their keyboard and pointer
+to an application — but it *diverts* input rather than copying it: it was built
+for input-leap-style pointer crossing, so while a capture is active the desktop
+being recorded does not receive the input being captured. A recorder on top of
+it would have to capture and re-inject in a loop, on the compositors that
+implement the portal at all (COSMIC, for one, does not). Whether that loop can
+be made faithful enough to record from is an open investigation, not a plan —
+the AT-SPI event-based acquisition idea at the end of this section is the
+other candidate — but either way the accurate statement is that "Wayland
+recording is impossible" was only ever true of passive capture.
 
 X11's RECORD extension, Windows' low-level input hooks and macOS's
 `CGEventTap` are the exceptions — one per platform, which is why they are the

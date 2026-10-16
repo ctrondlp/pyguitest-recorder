@@ -88,7 +88,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.17"
+PROFILE = "pyguitest-0.18"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -114,6 +114,12 @@ button requires; and `find_window`/`wait_for_window` named the window behind
 one it shared a title with. Nothing emitted here names a method 0.15.1
 lacked, so this is not a step `validate()` could have caught -- an older
 install simply gets one of those calls wrong, which is what the floor is for.
+
+0.18 is the release that ships `Session.require_version`, which is what
+`GeneratorOptions.require_version` emits -- and the call's own argument is
+derived from this constant (`_require_version_line`), so the version a
+generated script demands and the profile its header claims are one value,
+not two.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -446,6 +452,18 @@ class GeneratorOptions:
     """
 
     capability_preamble: bool = True
+    require_version: bool = False
+    """Open the script with `gui.require_version(...)` naming PROFILE's line.
+
+    Off by default -- a script replayed where it was recorded runs against
+    the pyguitest that generated it, and a hard floor would only refuse
+    replays that might have worked. On, the first statement in the body is
+    the version floor, ahead of the capability preamble: for scripts that
+    travel, where an older pyguitest should fail at the first line with both
+    versions named rather than mid-run with an AttributeError. The version
+    is derived from PROFILE rather than written here, so the two cannot
+    drift.
+    """
     comments: bool = True
     function_name: str = "main"
     default_timeout: float = 10.0
@@ -2477,6 +2495,14 @@ class PythonGenerator:
         body = _collapse_taps(_drop_unused_bindings(state.lines))
         if self.options.capability_preamble and state.capabilities:
             body = _require_lines(state.capabilities) + [""] + body
+        if self.options.require_version:
+            # First in the body, ahead of the capability preamble: the API
+            # floor is the older-machine failure, and it should fire before a
+            # capability check that may not even exist on that pyguitest.
+            opener = [_require_version_line()]
+            if not (self.options.capability_preamble and state.capabilities):
+                opener.append("")
+            body = opener + body
         out.extend(f"        {line}" if line else "" for line in body)
         if not any(line and not line.startswith("#") for line in body):
             # A body of comments alone (every event turned out unaddressable)
@@ -2576,6 +2602,17 @@ def _drop_unused_bindings(body: list[str]) -> list[str]:
         if not any(used.search(line) for i, line in enumerate(body) if i != index):
             out[index] = body[index].split(" = ", 1)[1]
     return out
+
+
+def _require_version_line() -> str:
+    """The version-floor opener, derived from PROFILE so the two cannot drift.
+
+    PROFILE is "pyguitest-0.18"-shaped; the call takes the dotted release
+    alone. `Session.require_version` treats it as a floor, not a pin, so a
+    newer pyguitest replays the script without complaint -- see that method's
+    own docstring for the exact comparison.
+    """
+    return f'gui.require_version("{PROFILE.removeprefix("pyguitest-")}")'
 
 
 def _require_lines(capabilities: set[str]) -> list[str]:

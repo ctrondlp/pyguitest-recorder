@@ -21,6 +21,7 @@ absolute one.
 
 from __future__ import annotations
 
+import fnmatch
 import math
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from enum import Enum
@@ -52,6 +53,8 @@ __all__ = [
     "Comment",
     "EVENT_TYPES",
     "event_from_dict",
+    "windows_of",
+    "excluded",
 ]
 
 
@@ -520,6 +523,57 @@ class Comment(Event):
 
     text: str = ""
     origin: Origin = Origin.MANUAL
+
+
+def windows_of(event: Event) -> tuple[WindowRef, ...]:
+    """Every window an event is attributed to, in the order it names them.
+
+    One for most events, two for a drag whose endpoints resolved to
+    different windows, zero for events with no window attribution at all --
+    a bare coordinate click where hit-testing found nothing, a Pause, a
+    Sync. Exists so a policy about windows (`excluded` is the one it was
+    written for) does not have to know which field each event kind keeps
+    its attribution in.
+    """
+    found: list[WindowRef] = []
+    for target in (
+        getattr(event, "target", None),
+        getattr(event, "start", None),
+        getattr(event, "end", None),
+    ):
+        if isinstance(target, Target) and target.window is not None:
+            found.append(target.window)
+    window = getattr(event, "window", None)
+    if isinstance(window, WindowRef):
+        found.append(window)
+    return tuple(found)
+
+
+def excluded(event: Event, patterns: tuple[str, ...]) -> bool:
+    """Whether an event landed in a window the user asked to keep out.
+
+    True when any window the event is attributed to has a title or app_id
+    matching any pattern -- case-insensitive globs, so `*Bitwarden*` matches
+    a vault's full window title and `signal` matches that app_id exactly.
+    Matching either property is deliberate: titles are what a person sees
+    and app_ids are what survives a title that drifts (see WindowRef).
+
+    An event with no window attribution never matches: exclusion is a
+    promise about windows that were identified, and a desktop where
+    hit-testing fails is already recording bare coordinates (see
+    `window_context`), which name nothing to exclude by. For a drag, either
+    endpoint's window is enough -- half a gesture into a private window is
+    still a gesture into it.
+    """
+    if not patterns:
+        return False
+    for window in windows_of(event):
+        names = [n.lower() for n in (window.title, window.app_id) if n]
+        for pattern in patterns:
+            wanted = pattern.lower()
+            if any(fnmatch.fnmatchcase(name, wanted) for name in names):
+                return True
+    return False
 
 
 EVENT_TYPES: dict[str, type[Event]] = {

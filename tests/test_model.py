@@ -680,3 +680,81 @@ def test_a_fractional_click_count_is_refused_by_name():
                 "target": {"x": 1, "y": 2},
             }
         )
+
+
+class TestWindowExclusion:
+    """`windows_of` and `excluded`: the policy half of `exclude_windows`.
+
+    Matching is deliberately against both title and app_id, case-insensitive,
+    glob semantics -- a vault's title carries the entry name (`*Bitwarden*`)
+    while an app_id is stable and exact (`org.keepassxc.keepassxc`).
+    """
+
+    def _vault(self):
+        return WindowRef(title="Secrets - KeePassXC", app_id="org.keepassxc.KeePassXC")
+
+    def test_windows_of_reads_the_target(self):
+        from pyguitest_recorder.model import windows_of
+
+        event = Click(target=Target(x=1, y=2, window=self._vault()))
+        assert [w.title for w in windows_of(event)] == ["Secrets - KeePassXC"]
+
+    def test_windows_of_reads_both_drag_endpoints(self):
+        from pyguitest_recorder.model import windows_of
+
+        other = WindowRef(title="Editor")
+        event = Drag(
+            start=Target(x=1, y=2, window=self._vault()),
+            end=Target(x=9, y=9, window=other),
+        )
+        assert [w.title for w in windows_of(event)] == ["Secrets - KeePassXC", "Editor"]
+
+    def test_windows_of_reads_the_window_field(self):
+        from pyguitest_recorder.model import WindowActivate, windows_of
+
+        event = WindowActivate(window=self._vault())
+        assert len(windows_of(event)) == 1
+
+    def test_an_unattributed_event_has_no_windows_and_never_matches(self):
+        from pyguitest_recorder.model import excluded, windows_of
+
+        event = Click(target=Target(x=1, y=2))
+        assert windows_of(event) == ()
+        assert not excluded(event, ("*",))
+
+    def test_excluded_matches_the_title_case_insensitively(self):
+        from pyguitest_recorder.model import excluded
+
+        event = Click(target=Target(x=1, y=2, window=self._vault()))
+        assert excluded(event, ("*keepassxc*",))
+
+    def test_excluded_matches_the_app_id_exactly(self):
+        from pyguitest_recorder.model import excluded
+
+        event = Click(target=Target(x=1, y=2, window=self._vault()))
+        assert excluded(event, ("org.keepassxc.keepassxc",))
+
+    def test_a_glob_is_not_a_substring(self):
+        # "keepassxc" with no asterisks matches only a title or app_id that
+        # IS that string -- the documented contract, so a user who meant
+        # substring matching finds out from the docs, not from silence.
+        from pyguitest_recorder.model import excluded
+
+        event = Click(target=Target(x=1, y=2, window=WindowRef(title="KeePassXC says")))
+        assert not excluded(event, ("keepassxc",))
+        assert excluded(event, ("keepassxc*",))
+
+    def test_either_drag_endpoint_is_enough(self):
+        from pyguitest_recorder.model import excluded
+
+        event = Drag(
+            start=Target(x=1, y=2, window=WindowRef(title="Editor")),
+            end=Target(x=9, y=9, window=self._vault()),
+        )
+        assert excluded(event, ("*KeePassXC*",))
+
+    def test_no_patterns_excludes_nothing(self):
+        from pyguitest_recorder.model import excluded
+
+        event = Click(target=Target(x=1, y=2, window=self._vault()))
+        assert not excluded(event, ())

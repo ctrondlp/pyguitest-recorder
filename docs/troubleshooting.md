@@ -388,7 +388,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.17.0 or newer is required
+older than the recording expects. **pyguitest 0.18.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),
@@ -427,8 +427,13 @@ pyatspi constant underneath it came from a module whose own import fails
 there, so `gui.focus_window(...)` and `gui.wait_window_focus(...)` were
 unusable outright. Generated scripts emit both. The same release stops a
 wedged accessibility call hanging a script forever, raising
-`BackendCallTimeout` instead. Older floors matter as well: `gui.button(...)`
-finds nothing on a current at-spi2 before 0.5.0.
+`BackendCallTimeout` instead. 0.18.0 is the release that ships
+`Session.require_version`, which a script generated under `--require-version`
+opens with — and the one floor step that explains itself: on an older
+pyguitest that line *is* the AttributeError this section begins with, which
+is exactly what the option exists to replace with a sentence naming both
+versions. Older floors matter as well: `gui.button(...)` finds nothing on a
+current at-spi2 before 0.5.0.
 
 ## The script waits too long, or not long enough
 
