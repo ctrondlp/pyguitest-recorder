@@ -134,3 +134,69 @@ def test_from_settings_reads_the_chord_and_its_timing():
         Settings(stop_key="Pause", stop_key_presses=1, stop_key_interval=0.5)
     )
     assert (stop.chord, stop.presses, stop.interval) == ("Pause", 1, 0.5)
+
+
+def test_a_chord_completes_when_its_modifier_is_released_between_presses():
+    # Two separate ctrl+F12 chords -- ctrl down, F12, ctrl up, ctrl down,
+    # F12 -- which is what a person pressing it twice produces, and what
+    # `gui.send_keys("^({F12})")` twice produces from a script. The `ctrl`
+    # release between the presses used to end the run and hand the presses
+    # back, so the count never passed one and the recorder printed "(1/2)"
+    # for ever. Only the chord's own modifiers are transparent, and only
+    # mid-run.
+    stop = StopKey.from_settings(Settings(stop_key="ctrl+F12"))
+    assert stop.feed(key(1.0, keysym="Control_L")) == Outcome(
+        [key(1.0, keysym="Control_L")]
+    )
+    assert stop.feed(key(1.01, keysym="F12")) == Outcome([], registered=True)
+    stop.feed(key(1.02, keysym="F12", kind="key_release"))
+    # The gesture that used to break it.
+    stop.feed(key(1.03, keysym="Control_L", kind="key_release"))
+    assert stop.pending_presses == 1
+    stop.feed(key(1.04, keysym="Control_L"))
+    assert stop.feed(key(1.05, keysym="F12")).stop
+
+
+def test_holding_the_modifier_across_both_taps_still_completes():
+    # The one gesture that worked before, which must keep working.
+    stop = StopKey.from_settings(Settings(stop_key="ctrl+F12"))
+    stop.feed(key(1.0, keysym="Control_L"))
+    assert stop.feed(key(1.01, keysym="F12")) == Outcome([], registered=True)
+    stop.feed(key(1.02, keysym="F12", kind="key_release"))
+    assert stop.feed(key(1.03, keysym="F12")).stop
+
+
+def test_an_unrelated_modifier_still_ends_the_run():
+    # Transparency is only for the modifiers this chord names. Shift is not
+    # one of them, so it ends the run exactly as any other key would -- the
+    # property that keeps a single application Escape out of the recorder.
+    stop = StopKey.from_settings(Settings(stop_key="ctrl+F12"))
+    stop.feed(key(1.0, keysym="Control_L"))
+    stop.feed(key(1.01, keysym="F12"))
+    outcome = stop.feed(key(1.02, keysym="Shift_L"))
+    assert not outcome.stop
+    assert [e.keysym for e in outcome.record] == ["F12", "Shift_L"]
+
+
+def test_a_held_modifier_is_neither_registered_nor_counted_as_passed():
+    # ctrl down, F12 (run starts), F12 up, ctrl up, ctrl down -- then the
+    # user types something else. The modifier events rode along with the
+    # run, and are handed back with it in order, but only the one F12 is a
+    # stop-key press that became a keystroke: the backend's "(1/2)" must not
+    # advance on the ctrl press, and the closing "1 press went into the
+    # script" must not say two.
+    stop = StopKey.from_settings(Settings(stop_key="ctrl+F12"))
+    stop.feed(key(1.0, keysym="Control_L"))
+    assert stop.feed(key(1.01, keysym="F12")).registered
+    stop.feed(key(1.02, keysym="F12", kind="key_release"))
+    stop.feed(key(1.03, keysym="Control_L", kind="key_release"))
+    assert stop.feed(key(1.04, keysym="Control_L")) == Outcome([])
+    outcome = stop.feed(key(1.05, keysym="a"))
+    assert [e.keysym for e in outcome.record] == [
+        "F12",
+        "F12",
+        "Control_L",
+        "Control_L",
+        "a",
+    ]
+    assert stop.passed == 1

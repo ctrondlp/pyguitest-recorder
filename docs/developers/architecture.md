@@ -130,6 +130,42 @@ this script all coordinates?" is the first thing its reader asks. The
 rectangle checks are skipped where any screen is scaled, since AT-SPI extents
 and window geometry are then not reliably in the same units.
 
+## Naming an element correctly is only half of it
+
+Everything above happens while recording, and all of it is about not naming
+the *wrong* element. A generated script has the same problem again at replay
+time, against a desktop that has moved on, and for a long time it had none of
+the same protection: the lookups it emitted were unscoped.
+
+That is not a small difference. The accessible tree spans every running
+process, so `gui.menu_item("Help")` asks the whole desktop. Measured on
+GhostBSD while replaying: it resolved to pid 1663, `mate-panel`, whose own
+`Help` entry is not even on screen, while the application under test had one
+at `(245, 61, 56, 31)`. The recorder had been careful about pid at record
+time and then written a script that threw that care away.
+
+Every lookup a script emits is now scoped to the window-ish ancestor the
+recording saw -- `dialog`, `frame`, `window` or `application`, nearest
+first, so an element inside a dialog is scoped to the dialog rather than the
+frame behind it. Clicks, recorded checks and inferred waits all take the
+same scope from one place (`_scope_for`), because the first two promised that
+parity in their docstrings and quietly lost it when scoping arrived.
+
+Two rules keep it honest:
+
+- **A container whose name is its own selection is never the anchor.** Qt
+  publishes a tab bar's accessible name as its *selected tab's* label and a
+  combo box's as its current item, with nothing stable in the description.
+  Anchoring there produced `gui.element(role="page tab list",
+  name="Displays")`, which stopped resolving the moment anything selected
+  another tab -- including at replay start, where the application opens on
+  its first tab. Measured live: three tab bars answered `Alpha`, `One` and
+  `Buttons & Toggles`, and selecting the Displays tab renamed the third.
+- **An unresolvable collision gets no scope at all.** Where two same-named
+  elements cannot be told apart by ancestry, giving both the same window
+  scope would read as though something had distinguished them. They stay
+  unscoped and the existing warning is the whole story.
+
 ## Typing goes where focus is, not where the pointer is
 
 Hit-testing is not the only question worth asking, and on GTK4 it is not a

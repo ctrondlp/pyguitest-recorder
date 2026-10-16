@@ -185,6 +185,28 @@ XRecord/X11-only, so a press landing on a genuinely native-Wayland surface (no
 XWayland presence at all) never reaches the recorder in the first place — see
 `docs/developers/architecture.md#why-wayland-has-no-capture-backend`.
 
+**A chord with a modifier used to be unstoppable by the obvious gesture —
+fixed in 0.9.1.** Pressing `ctrl+F12` twice as two separate chords puts a
+`ctrl` release between the two presses, and that was neither a matching
+press nor the stop key's own release, so it ended the run: the count never
+passed one and the recorder logged `ctrl+F12 (1/2)` for ever. Only holding
+the modifier down across every tap completed it. This affected anyone
+pressing the chord, not only scripts — and it was invisible for a long time
+because the default stop key is a bare `Escape`, which has no modifier.
+
+On 0.9.1 and later either gesture works. On an earlier version, hold the
+modifier across both taps: from a script that is
+`gui.send_keys("^({F12 2})")`, where the modifier group holds Ctrl for the
+whole group and `{KEY N}` repeats within it, rather than
+`gui.send_keys("^({F12})")` twice.
+
+**Stop the recorder as soon as whatever you were recording finishes.** A
+recording left open keeps capturing everything, from every window, in
+plaintext — including an unrelated window someone types into while you are
+working out why the stop key did not take. `--regenerate <session>.json --to
+<seconds>` trims the tail afterwards, but the session file still holds what
+was captured.
+
 ## Text I typed came out as `SECRET_1`
 
 Typed text is withheld from the script, and replaced by an environment variable
@@ -264,6 +286,23 @@ that — so every press is recorded as an ordinary keystroke and nothing says so
 
 ## The script clicked the wrong thing
 
+**Up to 0.9.0, a lookup could resolve into a different application
+entirely.** Generated element lookups were unscoped, and the accessible tree
+on a real desktop spans every running process: on GhostBSD,
+`gui.menu_item("Help")` resolved to `mate-panel` rather than the application
+under test, whose own 'Help' was on screen while the panel's was not. Every
+lookup is now scoped to the window-ish ancestor the recording saw — a dialog
+winning over the frame behind it — so a regenerated script carries
+`within=` where an older one did not. If you are reading an older generated
+script, that is the difference, and regenerating from the saved session is
+the fix.
+
+**A tab bar is never used as that scope.** Qt publishes a tab bar's
+accessible name as its *selected tab's* label, so `role="page tab list",
+name="Displays"` named whatever happened to be selected while recording and
+stopped resolving the moment anything selected another tab. Combo boxes
+behave the same way. Both roles are skipped when a scope is chosen.
+
 **If it clicked a coordinate**, the window moved, resized, or opened at a
 different position than when it was recorded. That is the failure mode
 coordinates have; the fix is making the target findable by name — see
@@ -292,6 +331,18 @@ Generated scripts are meant to be edited; this is one of the places where a
 user adds something the recording could not know.
 
 ## The script fails at replay
+
+**A click on a control that opens a modal dialog can hang, and the cure is
+`click_via`.** The recorder captures a *pointer* click and emits an element
+click, which replays through pyguitest's ladder — the accessible action where
+one exists. For a button that opens a modal dialog those two are not
+equivalent: the toolkit does not answer the action until the modal loop
+returns, so the call never comes back. Measured both ways:
+`gui.button("About TortureTest").click()` on AT-SPI raised "Did not receive a
+reply", and `gui.button("Save As").click()` on UI Automation returned
+`0x80131505`, a timeout. Regenerate with `--click-via pointer` to replay the
+route that was actually recorded. The `auto` default is still right for
+everything else, and still the default so no existing output changes.
 
 **On the first line, with a typed exception**, that is `gui.require(...)`
 working: the session you are replaying on lacks a capability the recording

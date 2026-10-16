@@ -30,6 +30,98 @@ claiming everything works.
 | macOS window/element context (which backends, and the wording of every note) | run live on the same Mac -- `probe_context` and a full round trip, both halves resolving, no notes; see below |
 | win32 hook health (a hook Windows removed silently) | run live on Windows 11 -- a real hook removed by hand, reported 2.7s later; see below |
 
+## The torture fixture: recorded on three platforms, replayed, four bugs (2026-10-14)
+
+The first time anything *replayed* what this package writes. Recording and
+regeneration have been exercised for a year; replay had not, and it found
+four defects in one sitting -- three of them fixed here, none of which
+recording or regeneration could have surfaced.
+
+The subject was [pyguitest-torture-test][fixture], a 702-widget Qt
+application with 105 uniquely-named controls, driven by its own per-platform
+driver while this recorder captured. That is all three platforms a recording
+is possible on: `x11` (GhostBSD), `win32` (Windows 11) and `macos`. The
+Wayland boxes cannot be recorded at all -- no Wayland capture backend, and
+their drivers click through AT-SPI actions, which emit no input events.
+
+| Platform | Events | Distinct names | Of those, verified controls | Unexplained |
+|---|---|---|---|---|
+| GhostBSD / x11 | 376 (302 observed) | 29 | 11 | 1 |
+| Windows 11 / win32 | 771 (669 observed) | 84 | 40 | 1 |
+| macOS / macos | 182 (130 observed) | 70 | 49 | 3 |
+
+**Not one fabricated name.** Each script's named elements were checked
+against the fixture's own `EXPECTED_CONTROLS` and then against its source.
+The five "unexplained" resolve on inspection: a tab's own long description
+string, Windows' `System` window menu, two table-cell coordinates, and
+`Academy Engraved LET` -- a font the macOS font chooser offered, which
+exists on that machine and in no source file.
+
+### What replay found
+
+1. **A scope anchored to a name that was not an identity.** `gui.element(
+   role="page tab list", name="Displays")` died within seconds on
+   `ElementNotFound`. Fixed: selection-named roles are refused as anchors.
+2. **Unscoped lookups resolving into other applications** -- `mate-panel`
+   rather than the fixture. Fixed: every lookup, check and wait is scoped to
+   its recorded window. See
+   [architecture.md](architecture.md#naming-an-element-correctly-is-only-half-of-it).
+3. **A window binding silently reassigning a scope binding.** With every
+   lookup scoped, a frame named `TortureTest` bound as `torturetest_2` and a
+   later `expect_window("TortureTest")` took the same identifier, so
+   `within=` was handed a `Window`. pyguitest refuses that outright, which
+   is how it surfaced. Latent until scoping made it common: the reservation
+   ran one way only.
+4. **A click on a *closed* combo box resolves to the item it displays** --
+   **not fixed.** The script carried five
+   `gui.element(role=Role.LIST_ITEM, name="100%", within=...).select()`
+   lines and died on the first: selecting a list item needs the popup open,
+   and at replay time it is shut. The click was on the combo box, whose
+   current value UIA publishes as a `LIST_ITEM` child. Note the contrast
+   with the ListView row in the 2026-10-04 row above, where the same shape
+   is correct -- that list really was open. Telling, and the reason this is
+   recorded rather than guessed at: the recording *also* captured the `Down`
+   and `Return` that actually changed the value, so those five lines are
+   redundant as well as wrong.
+
+### The thing to know before recording a driver again
+
+With those lines removed the Windows replay reached line 261 of 1991 and
+failed on `expect_window("Open File")`. The trace says why:
+
+    [  23.5s] line  256 (+  1.0s) gui.menu_item("File", ...).click(via="pointer")
+    [  23.5s] line  257 (+  0.0s) gui.move_mouse(torturetest_x + 203, ...)
+    [  23.5s] line  258 (+  0.0s) gui.click()
+
+The menu is opened and the item under it clicked in the same instant, so the
+click lands before the menu has rendered. Nothing is wrong with the
+inference: it inserts the waits it *observed*, and what it observed was a
+driver clicking at machine speed while capture ran seconds behind. A person
+leaves gaps to find. **A recorder is a fidelity instrument for human input;
+recording a machine driving the same application yields a script that is
+accurate about what happened and not replayable as it stands.**
+
+### Also learned
+
+- **An accessible-action click on a modal-opening control deadlocks.** The
+  driver clicks with the pointer; the generator emits an element click,
+  which replays through the accessible action. For a button that opens a
+  modal dialog those are not equivalent: AT-SPI answered "Did not receive a
+  reply" and UIA returned `0x80131505`, a timeout, because neither replies
+  until the modal loop does. `--click-via pointer` replays the route that
+  was actually recorded.
+- **Stopping a recording from a script needs the modifier held across both
+  presses**: `gui.send_keys("^({F12 2})")`. Sending `^({F12})` twice presses
+  and releases Ctrl each time, and the intervening key resets the
+  consecutive-press streak -- it logs `(1/2)` forever, at any gap. Verified
+  on both `win32` and `x11`.
+- **A recording left open keeps capturing everything.** Eight minutes of it
+  here swallowed an unrelated VS Code window and the text typed into it, in
+  plaintext. `--regenerate <session>.json --to <seconds>` trims the tail
+  afterwards; the session file still holds what was captured.
+
+[fixture]: https://github.com/ctrondlp/pyguitest-torture-test
+
 ## macOS capture: run live, and the three bugs it found (2026-09-26)
 
 **The backend captures real events from a live window server.** Everything below was

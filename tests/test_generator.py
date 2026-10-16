@@ -1526,8 +1526,10 @@ def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
     )
     assert 'gui.element(role="dialog", name="Save As")' in source
     assert 'gui.element(role="dialog", name="Preferences")' in source
-    assert 'gui.element(role=Role.PUSH_BUTTON, name="Save", within=' in source
+    # The sugar is kept, scoped: `gui.button` takes `within=` like the rest.
+    assert 'gui.button("Save", within=' in source
     # No unscoped mention of the ambiguous pair -- every use of it is scoped.
+    assert 'gui.button("Save")' not in source
     assert 'gui.element(role=Role.PUSH_BUTTON, name="Save")' not in source
     assert "could not be told apart" not in source
     assert validate(source) == []
@@ -1617,14 +1619,19 @@ def test_an_unresolvable_collision_warns_instead_of_guessing(window):
 
 
 def test_the_same_element_mentioned_twice_is_not_treated_as_a_collision(window):
-    # One widget, clicked twice -- same role, name AND path -- must still
-    # render as an ordinary unscoped lookup, not trigger scoping.
+    # One widget, clicked twice -- same role, name AND path -- is not a
+    # collision, so nothing has to tell it apart from anything. It still
+    # carries the scope every lookup carries, its own dialog, which is a
+    # different thing from a disambiguating ancestor: no warning, and the
+    # container is bound once and shared by both clicks rather than being
+    # searched for twice.
     element = ElementRef(role="push button", name="Retry", path=(("dialog", "Sync"),))
     source = render(
         Click(target=Target(x=1, y=2, window=window, element=element)),
         Click(target=Target(x=3, y=4, window=window, element=element)),
     )
-    assert "within=" not in source
+    assert source.count('gui.element(role="dialog", name="Sync")') == 1
+    assert source.count('gui.button("Retry", within=sync).click()') == 2
     assert "could not be told apart" not in source
     assert validate(source) == []
 
@@ -3043,3 +3050,137 @@ def test_a_run_of_quotes_in_a_recording_field_cannot_close_the_header():
     ]
     assert calls == []
     assert 'os.system("echo PWNED")' in ast.get_docstring(tree)
+
+
+@pytest.mark.needs_ruff
+def test_a_tab_bar_is_never_the_scope_anchor(window):
+    # A Qt tab bar publishes its *selected* tab as its own accessible name
+    # and leaves its description empty, so ("page tab list", "Displays") is
+    # not an identity -- it is a reading of what happened to be selected
+    # while recording. Anchoring `within=` on it produced a script that died
+    # at `gui.element(role="page tab list", name="Displays")` on replay,
+    # because the application opens on its first tab and the tab bar is
+    # named after that one instead. Measured live: three tab bars answered
+    # 'Alpha', 'One' and 'Buttons & Toggles', and selecting the Displays tab
+    # renamed the third to 'Displays'.
+    here = ElementRef(
+        role="page tab",
+        name="Buttons & Toggles",
+        path=(("frame", "TortureTest"), ("page tab list", "Displays")),
+    )
+    there = ElementRef(
+        role="page tab",
+        name="Buttons & Toggles",
+        path=(("frame", "Preferences"), ("page tab list", "Displays")),
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=here)),
+        Click(target=Target(x=3, y=4, window=window, element=there)),
+    )
+    # The tab bar must not be bound as a scope, by any spelling.
+    assert 'name="Displays"' not in source
+    assert "page tab list" not in source
+    # The frame above it is stable and unshared, so that is the anchor.
+    assert 'gui.element(role="frame", name="TortureTest")' in source
+    assert 'gui.element(role="frame", name="Preferences")' in source
+    assert "within=" in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_combo_box_is_never_the_scope_anchor(window):
+    # Same defect, same cause, one role along: Qt names a combo box after its
+    # current item, which is why pyguitest's own `dropdown()` reads the
+    # description for the stable id. With no stabler ancestor to fall back
+    # to, the honest answer is the collision warning rather than a scope
+    # that will not resolve.
+    here = ElementRef(
+        role="push button",
+        name="Apply",
+        path=(("combo box", "100%"),),
+    )
+    there = ElementRef(
+        role="push button",
+        name="Apply",
+        path=(("combo box", "50%"),),
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=here)),
+        Click(target=Target(x=3, y=4, window=window, element=there)),
+    )
+    assert 'name="100%"' not in source
+    assert 'name="50%"' not in source
+    assert "combo box" not in source
+    # Nothing stabler sits above either button, so there is no anchor to be
+    # had: the calls come out unscoped, and the collision is reported to the
+    # recorder rather than papered over with a scope that cannot resolve.
+    assert "within=" not in source
+    assert source.count('gui.button("Apply").click()') == 2
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_lookup_is_scoped_to_the_window_it_was_recorded_in(window):
+    # An unscoped lookup searches the whole accessible tree, which on a real
+    # desktop is every running application rather than the one under test.
+    # Measured on GhostBSD replaying a recording: `gui.menu_item("Help")`
+    # resolved to pid 1663, /usr/local/bin/mate-panel, whose own 'Help' is
+    # not showing -- while the fixture's sat on screen at (245,61) under pid
+    # 12037 -- so the replay failed clicking the desktop panel's menu. The
+    # recorder rejects a wrong-pid hit-test at record time; the script it
+    # writes has to be scoped too.
+    element = ElementRef(
+        role="menu item",
+        name="Help",
+        path=(("application", "torture_test"), ("frame", "TortureTest")),
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+    assert 'gui.element(role="frame", name="TortureTest")' in source
+    assert 'gui.menu_item("Help", within=torturetest)' in source
+    # The bare, desktop-wide lookup must not appear at all.
+    assert 'gui.menu_item("Help")' not in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_dialog_beats_the_frame_behind_it_as_the_scope(window):
+    # The nearer of the two: a field in a dialog is scoped to the dialog, so
+    # the lookup cannot match a same-named field in the window underneath.
+    element = ElementRef(
+        role="push button",
+        name="Save",
+        path=(("frame", "TortureTest"), ("dialog", "Save As")),
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+    assert 'gui.button("Save", within=save_as)' in source
+    assert "TortureTest" not in source.split("def main")[1]
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_check_is_scoped_like_the_click_on_the_same_element(window):
+    # `_expect` and `_wait_for_element` both promise, in their docstrings, to
+    # be scoped the way a click on the same element is. When window scoping
+    # arrived they kept using the collision scope alone, so a recorded check
+    # still emitted a desktop-wide lookup -- the exact thing that resolved
+    # into mate-panel rather than the application under test. All three now
+    # ask `_scope_for`, and this is what keeps them agreeing.
+    element = ElementRef(
+        role="entry",
+        name="Full Name",
+        path=(("frame", "TortureTest"),),
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=element)),
+        Assertion(
+            check="text",
+            target=Target(x=1, y=2, window=window, element=element),
+            expected="torture",
+        ),
+        WaitForElement(element=element),
+    )
+    # The frame is bound once and shared, not searched for three times.
+    assert source.count('gui.element(role="frame", name="TortureTest")') == 1
+    # The click, the check and the wait each carry it.
+    assert source.count("within=torturetest") == 3
+    assert validate(source) == []
