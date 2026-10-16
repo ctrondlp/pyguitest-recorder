@@ -32,9 +32,21 @@ from .config import Settings
 __all__ = ["Outcome", "StopKey"]
 
 
-def _presses(events: list[RawEvent]) -> int:
-    """How many of these are presses rather than releases."""
-    return sum(1 for event in events if event.kind == "key_press")
+def _presses(events: list[RawEvent], key: str = "") -> int:
+    """How many of these are presses of `key` rather than releases.
+
+    `key` filters because a run can hold events that are not the chord's key
+    at all: the chord's own modifiers pass through `_belongs` so that
+    releasing and re-pressing them between taps does not break the run, and
+    counting those as presses made a two-press chord stop on the modifier.
+    Empty `key` counts every press, which is what a chord with no modifiers
+    always amounted to.
+    """
+    return sum(
+        1
+        for event in events
+        if event.kind == "key_press" and (not key or event.keysym == key)
+    )
 
 
 @dataclass(frozen=True)
@@ -107,8 +119,13 @@ class StopKey:
 
     @property
     def pending_presses(self) -> int:
-        """How many presses of the current run are being held."""
-        return _presses(self._held)
+        """How many presses of the current run are being held.
+
+        Presses of the chord's *key*: a held modifier is part of the run
+        without advancing it. See `_presses`.
+        """
+        _, key = parse_chord(self.chord)
+        return _presses(self._held, key)
 
     def feed(self, raw: RawEvent) -> Outcome:
         """Sort one raw event in, and say what it turned out to be.
@@ -124,17 +141,21 @@ class StopKey:
         mods = self._modifiers_after(raw)
         if not self._belongs(raw, mods):
             return Outcome([*self._hand_back(), raw])
+        # A press of the chord's key, as opposed to one of its modifiers
+        # passing through mid-run: only the former registers as progress.
+        _, key = parse_chord(self.chord)
+        counted = raw.kind == "key_press" and (not key or raw.keysym == key)
         if self._held and raw.timestamp - self._held[-1].timestamp > self.interval:
             # Too slow to be one run, so the earlier presses were the
             # application's and this one starts a new run of its own.
             record = self._hand_back()
             self._held = [raw]
-            return Outcome(record, registered=raw.kind == "key_press")
+            return Outcome(record, registered=counted)
         self._held.append(raw)
         if self.pending_presses >= max(1, self.presses):
             self._held = []
             return Outcome([], stop=True)
-        return Outcome([], registered=raw.kind == "key_press")
+        return Outcome([], registered=counted)
 
     def release(self) -> list[RawEvent]:
         """Hand back whatever is held, for a run that ended without completing.
@@ -157,7 +178,11 @@ class StopKey:
         stop, and are the recorder's.
         """
         spent, self._held = self._held, []
-        self.passed += _presses(spent)
+        _, key = parse_chord(self.chord)
+        # Presses of the key, not of a modifier the run let through: the
+        # count is "stop-key presses that became keystrokes", and a ctrl
+        # held mid-run is not one of those.
+        self.passed += _presses(spent, key)
         return spent
 
     def _modifiers_after(self, raw: RawEvent) -> set[str]:
@@ -175,10 +200,28 @@ class StopKey:
 
         Releases count as belonging to the run without advancing it, so the
         release between two presses does not read as the run being broken.
+        That holds for the chord's **modifiers** as well as for the key
+        itself: without it, a chord like `ctrl+F12` could only be completed
+        by holding ctrl down across every tap, because the `ctrl` release
+        between two separate chord presses would end the run and hand the
+        presses back. The count then never passes one, whoever is pressing
+        it -- measured driving it from a script, and the same gesture a
+        person makes tapping ctrl+F12 twice. A bare `Escape`, the default,
+        has no modifier and never showed it.
+
+        Any *other* key still ends the run, which is the property this
+        exists for: a single Escape meant for the application goes back to
+        the application.
         """
         if raw.kind not in ("key_press", "key_release"):
             return False
+        modifiers, key = parse_chord(self.chord)
+        if self._held and MODIFIERS.get(getattr(raw, "keysym", "") or "") in modifiers:
+            # One of this chord's own modifiers, mid-run: transparent, and
+            # advancing nothing, because `pending_presses` counts presses of
+            # the chord's key alone. Counting every press instead made a
+            # two-press chord stop on the modifier -- see `_presses`.
+            return True
         if raw.kind == "key_release":
-            _, key = parse_chord(self.chord)
             return bool(key) and raw.keysym == key and bool(self._held)
         return chord_matches(self.chord, mods, raw.keysym)

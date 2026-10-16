@@ -5,6 +5,90 @@ was released.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-15
+
+### Fixed
+
+- **A stop chord with a modifier could not be completed by pressing it
+  twice.** `--stop-key ctrl+F12`, pressed as two separate chords, produces
+  `ctrl` down, `F12`, `ctrl` up, `ctrl` down, `F12` — and the `ctrl` release
+  between the presses was neither a matching press nor the stop key's own
+  release, so it ended the run and handed the presses back. The count never
+  passed one and the recorder printed `ctrl+F12 (1/2)` for ever. Only holding
+  the modifier down across every tap worked, which is not the gesture anyone
+  makes, and is not what a script sending the chord twice produces either.
+  A chord's own modifiers are now transparent to a run in progress, while
+  any other key still ends it — so a single `Escape` meant for the
+  application still goes to the application. Invisible until now because the
+  default stop key is a bare `Escape`, which has no modifier at all. Found
+  driving the recorder from a script, and it applies equally to a person.
+
+  `pending_presses` counts presses of the chord's *key* as part of this.
+  It counted every press being held, which was accidentally right while
+  nothing but that key could be held, and became wrong the moment modifiers
+  passed through: the first version of this fix stopped the recording **on
+  the modifier press**. The same filter applies to the two other places a
+  held press is counted -- the `registered` signal behind the `(1/2)`
+  progress line, which must not advance on a `ctrl` press, and the closing
+  "N stop-key presses went into the script" count, which a run holding a
+  modifier would otherwise have inflated by one.
+
+- **A generated script no longer anchors `within=` to a container whose name
+  is its current selection.** Qt publishes a tab bar's accessible Name as
+  its *selected tab's* label and a combo box's as its current item, leaving
+  the description empty, so `gui.element(role="page tab list",
+  name="Displays")` was not an identity -- it was a reading of whatever
+  happened to be selected while recording. Replaying such a script died on
+  its first tab switch with `ElementNotFound`, because the application opens
+  on its first tab and the tab bar is named after that one instead.
+  `_disambiguating_ancestor` now skips those roles the way it already skips
+  nameless ancestors, and walks outward to a stable one; with none to be had
+  the existing collision warning is raised rather than a scope that cannot
+  resolve. Measured live on a Qt fixture: three tab bars answered 'Alpha',
+  'One' and 'Buttons & Toggles', and selecting the Displays tab renamed the
+  third to 'Displays'. Found by replaying a recording for the first time --
+  the live check records and regenerates, but has never replayed.
+
+- **Every generated element lookup is now scoped to the window it was
+  recorded in.** An unscoped `gui.menu_item("Help")` searches the whole
+  accessible tree, and on a real desktop that tree is every running
+  application: measured on GhostBSD, it resolved to pid 1663,
+  `/usr/local/bin/mate-panel`, whose own 'Help' entry is not even on screen,
+  while the fixture's sat at (245,61) under pid 12037 -- so a replay clicked
+  the desktop panel's menu and failed. The recorder already rejects a
+  wrong-pid hit-test while recording and says so in its notes; the script it
+  writes now carries the same scoping, taken from the window-ish ancestor
+  the recording saw. A dialog wins over the frame behind it, being the
+  nearer of the two, and the `gui.button`/`gui.checkbox`/... sugar is kept
+  rather than dropped to `gui.element`, because every element factory takes
+  `within=`.
+
+  Clicks, recorded checks (`expect_*`) and inferred waits
+  (`wait_for_element`) are all scoped identically. The last two promised
+  exactly that parity in their own docstrings -- "scoped the same way a
+  clicked element is" -- and did not have it once window scoping arrived, so
+  the decision now lives in one place that all three ask rather than in
+  three copies that have to agree. An unscoped wait is worth closing in its
+  own right: it can be satisfied by another application's same-named element
+  and return at once, turning a sync point into no sync at all.
+
+  An element whose collision could not be resolved by ancestry is
+  deliberately left unscoped: a scope shared by both halves of a real
+  ambiguity would read as though it had told them apart, and the existing
+  warning is the whole story there.
+
+- **A window binding no longer silently reassigns a scope binding.**
+  `_ancestor_var` reserved the identifiers already used by windows, but the
+  window binder did not reserve the ones used by scopes, so the reservation
+  only ran one way: a frame named "TortureTest" bound as `torturetest_2`,
+  then a later `expect_window("TortureTest")` chose the same identifier and
+  overwrote it, leaving `within=torturetest_2` holding a `Window`. pyguitest
+  refuses that outright -- "within= takes an Element, not a Window" -- which
+  is how it was caught, replaying on GhostBSD. Latent until now, because a
+  disambiguating ancestor had to happen to share a name with a window title;
+  with every lookup scoped to its frame, and a frame usually named after its
+  window, it became immediate.
+
 ## [0.9.0] — 2026-10-13
 
 ### Added

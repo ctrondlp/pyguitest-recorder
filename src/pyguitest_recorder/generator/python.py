@@ -592,6 +592,13 @@ class _State:
     `_compute_element_scopes`. Empty for a recording with no colliding
     (role, name) pair, which is the common case and costs nothing extra.
     """
+    ambiguous_elements: set[_ElementKey] = field(default_factory=set)
+    """Keys that collided and could not be told apart by ancestry.
+
+    They get no scope at all, not even a window one: a scope shared by
+    both halves of an unresolved collision would read as though it told
+    them apart. The header warning is the whole story for these.
+    """
 
     scope_vars: dict[tuple[str, str], str] = field(default_factory=dict)
     """Ancestor (role, name) -> the variable it was bound to, so two elements
@@ -877,7 +884,7 @@ def _iter_element_refs(recording: Recording) -> Iterator[ElementRef]:
 
 def _compute_element_scopes(
     recording: Recording,
-) -> tuple[dict[_ElementKey, tuple[str, str]], list[str]]:
+) -> tuple[dict[_ElementKey, tuple[str, str]], list[str], set[_ElementKey]]:
     """Which addressable elements need `within=` to replay correctly.
 
     Two elements collide when they share a (role, name) pyguitest would
@@ -888,9 +895,14 @@ def _compute_element_scopes(
     each such element gets whichever ancestor in its own path is not shared
     by any other member of the group -- see `_disambiguating_ancestor`.
 
+    Returns the scopes, the warnings, and the keys that collided without
+    being resolvable -- those get no scope at all, not even the window one
+    every other lookup gets, because a scope shared by both halves of an
+    unresolved collision would read as though it told them apart.
+
     A collision `_disambiguating_ancestor` cannot resolve (nothing in the
-    path is both named and unshared) is reported as a warning rather than
-    left silent: the generated script would otherwise emit the same
+    path is both named, stable and unshared) is reported as a warning rather
+    than left silent: the generated script would otherwise emit the same
     unscoped `gui.element(role=..., name=...)` for two different widgets,
     which matches whichever one pyguitest's search finds first -- exactly
     the "confidently wrong" failure this project exists to avoid.
@@ -903,6 +915,7 @@ def _compute_element_scopes(
         groups.setdefault((ref.role, ref.name), {})[key] = ref
     scopes: dict[_ElementKey, tuple[str, str]] = {}
     warnings: list[str] = []
+    ambiguous: set[_ElementKey] = set()
     for (role, name), members in groups.items():
         if len(members) < 2:
             continue
@@ -914,13 +927,50 @@ def _compute_element_scopes(
                 scopes[key] = ancestor
             else:
                 unresolved = True
+                ambiguous.add(key)
         if unresolved:
             warnings.append(
                 f"{len(members)} elements named {name!r} with role {role!r} could "
                 "not be told apart by ancestry; the generated script may click "
                 "the wrong one"
             )
-    return scopes, warnings
+    return scopes, warnings, ambiguous
+
+
+# Containers whose accessible name is their current *selection* rather than
+# an identity. Qt publishes a tab bar's Name as its selected tab's label and a
+# combo box's as its current item, leaving the description empty, so there is
+# no stable string to find either by. Measured on a live Qt application: three
+# tab bars answered 'Alpha', 'One' and 'Buttons & Toggles', and selecting the
+# Displays tab renamed the third to 'Displays'. Bound as a `within=` anchor,
+# that yields a script which stops resolving the moment the selection differs
+# -- including at replay start, where the application opens on its first tab
+# and the recording was made somewhere else entirely.
+_SELECTION_NAMED_ROLES = frozenset({"page tab list", "combo box"})
+
+# The ancestors that stand for "the window this element belongs to", used to
+# scope every lookup rather than only the colliding ones. An unscoped lookup
+# searches the whole accessible tree, which on a real desktop spans every
+# running application: measured on GhostBSD, `gui.menu_item("Help")` resolved
+# into mate-panel rather than the application under test, and the panel's
+# entry is not even on screen, so the replay failed clicking it. A dialog
+# beats the frame behind it because it is the nearer of the two.
+_WINDOW_ROLES = frozenset({"dialog", "frame", "window", "application"})
+
+
+def _window_scope(element: ElementRef) -> tuple[str, str] | None:
+    """The nearest named window-ish ancestor of `element`, if it has one.
+
+    Walked from the immediate parent outward, so an element inside a dialog
+    is scoped to that dialog rather than to the frame behind it. Returns None
+    for an element with no such ancestor recorded -- a bare element from a
+    synthesised recording, say -- and the lookup then stays unscoped, which
+    is the behaviour every caller had before.
+    """
+    for role, name in reversed(element.path):
+        if role in _WINDOW_ROLES and name:
+            return (role, name)
+    return None
 
 
 def _disambiguating_ancestor(
@@ -932,20 +982,25 @@ def _disambiguating_ancestor(
     with the least indirection) rather than from the root, and skips any
     ancestor with no name -- a nameless container cannot be found again by
     `gui.element(name=...)` either, so binding one would just move the
-    ambiguity rather than resolve it. A candidate is rejected if it appears
-    *anywhere* in another element's path, not just at the matching depth --
-    `_ancestor_var` binds it with an unscoped `gui.element(role=, name=)`,
-    which has no notion of depth, so an ancestor shared at a different depth
-    would still resolve ambiguously at replay time. Returns None when
-    nothing in the whole path is both named and unshared, which does happen
-    (two identically structured, identically named panes -- see
-    docs/troubleshooting.md) and is a real limit of ancestry-based
-    disambiguation, not a bug in finding it.
+    ambiguity rather than resolve it. An ancestor in `_SELECTION_NAMED_ROLES`
+    is skipped for the same reason one step on: its name *can* be searched
+    for, but it names whatever is selected right now rather than the
+    container, so it would not mean the same thing at replay time. A
+    candidate is rejected if it appears *anywhere* in another element's path,
+    not just at the matching depth -- `_ancestor_var` binds it with an
+    unscoped `gui.element(role=, name=)`, which has no notion of depth, so an
+    ancestor shared at a different depth would still resolve ambiguously at
+    replay time. Returns None when nothing in the whole path is named,
+    stable and unshared, which does happen (two identically structured,
+    identically named panes -- see docs/troubleshooting.md) and is a real
+    limit of ancestry-based disambiguation, not a bug in finding it.
     """
     path = ref.path
     for depth in range(1, len(path) + 1):
         candidate = path[-depth]
         if not candidate[1]:
+            continue
+        if candidate[0] in _SELECTION_NAMED_ROLES:
             continue
         if all(candidate not in other.path for other in others):
             return candidate
@@ -1040,7 +1095,11 @@ class PythonGenerator:
             else:
                 state.lines.append(f"# WARNING: {message}")
         if self.options.locators == "element":
-            state.element_scopes, scope_warnings = _compute_element_scopes(recording)
+            (
+                state.element_scopes,
+                scope_warnings,
+                state.ambiguous_elements,
+            ) = _compute_element_scopes(recording)
             state.warnings.extend(scope_warnings)
         if _shaped(self.options.motion) and not state.natural_motion:
             state.warnings.append(
@@ -1772,8 +1831,7 @@ class PythonGenerator:
         """
         state.capabilities.add("ELEMENT_TREE")
         args = self._role_arg(element.role, state)
-        key: _ElementKey = (element.role, element.name, element.path)
-        scope = state.element_scopes.get(key)
+        scope = self._scope_for(element, state)
         tail = f", {extra}" if extra else ""
         if scope is not None:
             within = self._ancestor_var(scope, state)
@@ -2038,12 +2096,7 @@ class PythonGenerator:
         args = self._role_arg(event.element.role, state)
         if event.element.name:
             args += f", name={_literal(event.element.name)}"
-            key: _ElementKey = (
-                event.element.role,
-                event.element.name,
-                event.element.path,
-            )
-            scope = state.element_scopes.get(key)
+            scope = self._scope_for(event.element, state)
             if scope is not None:
                 within = self._ancestor_var(scope, state)
                 args += f", within={within}"
@@ -2169,6 +2222,27 @@ class PythonGenerator:
         """
         return self.options.locators == "element" and element.addressable
 
+    def _scope_for(self, element: ElementRef, state: _State) -> tuple[str, str] | None:
+        """The `within=` scope for `element`: collision first, window second.
+
+        The one place this is decided, for the three emitters that need the
+        same answer -- a click (`_element_expr`), a check (`_expect`) and a
+        wait (`_wait_for_element`). A real collision's disambiguating
+        ancestor wins, because it is the more specific of the two. Failing
+        that, the window-ish ancestor the recording saw, so a lookup cannot
+        wander into another application: see `_window_scope`.
+
+        An element whose collision could not be resolved by ancestry is left
+        unscoped deliberately, which is why `ambiguous_elements` is consulted
+        here: both halves of such a pair would otherwise take the same window
+        scope and read as though something had told them apart.
+        """
+        key: _ElementKey = (element.role, element.name, element.path)
+        scope = state.element_scopes.get(key)
+        if scope is None and key not in state.ambiguous_elements:
+            scope = _window_scope(element)
+        return scope
+
     def _element_expr(self, element: ElementRef | None, state: _State) -> str | None:
         """Return the expression that finds this element, without an action.
 
@@ -2178,18 +2252,20 @@ class PythonGenerator:
         if element is None or not self._has_locator(element):
             return None
         state.capabilities.add("ELEMENT_TREE")
-        key: _ElementKey = (element.role, element.name, element.path)
-        scope = state.element_scopes.get(key)
+        scope = self._scope_for(element, state)
         if scope is None:
             sugar = _SUGAR.get(element.role)
             if sugar is not None:
                 return f"gui.{sugar}({_literal(element.name)})"
             args = self._role_arg(element.role, state)
             return f"gui.element({args}, name={_literal(element.name)})"
-        # No _SUGAR here even where one exists for this role: the sugar
-        # methods take no `within=`, exactly the scoping this element needs
-        # to avoid matching its same-named sibling elsewhere in the tree.
         within = self._ancestor_var(scope, state)
+        # The sugar is kept where one exists: every `gui.*` element factory
+        # takes `within=`, so scoping costs none of the readability. (It
+        # once did not, which is why this used to drop to `gui.element`.)
+        sugar = _SUGAR.get(element.role)
+        if sugar is not None:
+            return f"gui.{sugar}({_literal(element.name)}, within={within})"
         args = self._role_arg(element.role, state)
         return f"gui.element({args}, name={_literal(element.name)}, within={within})"
 
@@ -2299,7 +2375,12 @@ class PythonGenerator:
         state.capabilities.add("WINDOW_LIST")
         readable = window.title or window.app_id
         name = _identifier(
-            readable or "window", set(state.windows.values()) | _RESERVED
+            readable or "window",
+            # Scope variables too, not just the other windows: the
+            # reservation has to run both ways or whichever is bound second
+            # silently reassigns the first. See `_ancestor_var`, which has
+            # always reserved these window names.
+            set(state.windows.values()) | set(state.scope_vars.values()) | _RESERVED,
         )
         state.windows[key] = name
         wait = timeout if timeout is not None else self.options.default_timeout
