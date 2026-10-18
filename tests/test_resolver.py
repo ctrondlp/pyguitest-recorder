@@ -511,6 +511,10 @@ def test_an_element_from_another_process_is_refused(monkeypatch):
     assert target.element is None
     assert target.window is not None
     assert any("pid 4242" in warning for warning in made.warnings)
+    # The same fact is carried per-click so the generator can explain the bare
+    # coordinate it then emits, not only in the footer summary.
+    assert target.reason is not None
+    assert "pid 4242" in target.reason and "pid 77" in target.reason
 
 
 def test_the_mismatch_is_warned_about_once_not_per_event(monkeypatch):
@@ -666,6 +670,9 @@ def test_a_same_process_element_from_a_different_toplevel_is_refused():
     (warning,) = made.warnings
     assert "'Calculator'" in warning
     assert "'About MATE Calculator'" in warning
+    # A same-pid rejection names a different window, not another process.
+    assert target.reason is not None
+    assert "different window of the same process" in target.reason
 
 
 def test_an_open_popups_item_is_kept_though_its_path_names_the_parent_frame():
@@ -823,6 +830,10 @@ def test_an_element_with_no_window_to_corroborate_it_is_refused():
     # the Linux phrasing here failed the suite on Windows for no defect.
     assert any("ignored accessible elements" in warning for warning in made.warnings)
     assert any(foreign_element_reason() in warning for warning in made.warnings)
+    # The per-click reason must not claim same-process ownership it cannot show:
+    # there is no window here at all.
+    assert target.reason is not None and "no window was found" in target.reason
+    assert "same process" not in target.reason
 
 
 def test_without_window_context_at_all_the_element_is_kept():
@@ -853,6 +864,10 @@ def test_an_element_bigger_than_its_window_is_refused():
     target = made.resolve(100, 100)
     assert target.element is None
     assert any("different screen" in warning for warning in made.warnings)
+    # A pid was missing on both sides, so the reason must not claim same-process
+    # ownership -- it says the pid was missing and the geometry did not fit.
+    assert target.reason is not None and "process id was missing" in target.reason
+    assert "same process" not in target.reason
 
 
 def test_an_element_inside_its_window_is_kept():
@@ -906,6 +921,7 @@ def test_an_element_that_does_not_cover_the_point_is_refused():
     target = made.resolve(155, 131)
     assert target.element is None
     assert any("cannot be trusted" in warning for warning in made.warnings)
+    assert target.reason is not None and "did not actually cover" in target.reason
 
 
 def test_an_element_that_covers_the_point_is_kept():

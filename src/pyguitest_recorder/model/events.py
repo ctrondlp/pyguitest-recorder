@@ -242,6 +242,16 @@ class Target:
     screen: int = 0
     window: WindowRef | None = None
     element: ElementRef | None = None
+    reason: str | None = None
+    """Why `element` is None despite one being under the point, when that is so.
+
+    The resolver finds an accessible element at many points it then declines to
+    name -- one from another process, one that bottomed out at the toplevel, one
+    that did not cover the point. It records that in its footer warnings; this
+    carries the same fact per-click so the generator can say, on the coordinate
+    line it has to emit, why it could not name the target. None when an element
+    was named, or when nothing accessible was under the point at all.
+    """
 
     @property
     def relative(self) -> tuple[int, int] | None:
@@ -616,6 +626,7 @@ def _rebuild(cls: type, data: Any) -> Any:
             screen=data.get("screen", 0),
             window=_rebuild(WindowRef, data.get("window")),
             element=_rebuild(ElementRef, data.get("element")),
+            reason=data.get("reason"),
         )
     if cls is WindowRef:
         geometry = data.get("geometry")

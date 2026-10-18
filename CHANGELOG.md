@@ -5,6 +5,20 @@ was released.
 
 ## [Unreleased]
 
+### Changed
+
+- **A coordinate click the resolver could not name now says why, on the line
+  itself.** When the accessibility hit test finds an element under a point but
+  the resolver declines to name it — one from another process, one that
+  bottomed out at the toplevel, one that did not cover the point — the
+  generator used to emit a bare `gui.click()` with no explanation, even though
+  the resolver recorded the reason in its footer. The reason is now carried
+  per-click (`Target.reason`) and threaded onto the comment above the
+  coordinate, the same way a named-but-unclickable element already explains
+  itself. A point with nothing accessible under it at all stays silent as
+  before. Found while recording gnome-calculator, whose digit buttons resolved
+  to a cross-process answer and so generated uncommented coordinate clicks.
+
 ## [0.10.0] — 2026-10-16
 
 ### Added

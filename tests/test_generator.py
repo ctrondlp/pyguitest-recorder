@@ -261,6 +261,35 @@ def test_unknown_actions_do_not_become_a_select(window):
     assert ".select()" not in source
 
 
+def test_an_unresolved_element_explains_why_it_stayed_a_coordinate(window):
+    # The resolver found an accessible answer under the point but declined to
+    # name it, recording why on the target. The coordinate click should carry
+    # that reason rather than appear unexplained.
+    source = render(
+        Click(
+            target=Target(
+                x=1,
+                y=2,
+                window=window,
+                element=None,
+                reason="the accessible element under this point belonged to "
+                "another process (pid 3168, not the window's pid 7831)",
+            )
+        )
+    )
+    assert "gui.click()" in source
+    assert "# no element could be named here" in source
+    assert "pid 3168" in source
+
+
+def test_a_point_with_nothing_resolved_stays_silent(window):
+    # No element and no reason is genuinely nothing under the point, not a
+    # rejection to explain, so no fallback comment is added.
+    source = render(Click(target=Target(x=1, y=2, window=window, element=None)))
+    assert "gui.click()" in source
+    assert "no element could be named" not in source
+
+
 def test_locators_absolute_keeps_the_coordinate_for_a_selectable_element(window):
     # The setting that says to favour coordinates wins over the name, however
     # the element could have been acted on.

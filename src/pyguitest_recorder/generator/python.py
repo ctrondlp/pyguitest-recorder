@@ -1410,6 +1410,7 @@ class PythonGenerator:
         self._note_button_fallback(event, state)
         self._note_unclickable_fallback(event, state)
         self._note_pointer_fallback(event, state)
+        self._note_unresolved_fallback(event, state)
         button = "" if event.button == 1 else str(event.button)
         if event.count == 2:
             state.lines.append(f"gui.double_click({button})")
@@ -1693,6 +1694,32 @@ class PythonGenerator:
             f"# {element.name!r} was named, but published no rectangle to aim"
         )
         state.lines.append("# the pointer route at, so this stays a coordinate")
+
+    def _note_unresolved_fallback(self, event: Click, state: _State) -> None:
+        """Explain a coordinate click where no element could be named at all.
+
+        The three fallbacks above each speak of a *named* element that could
+        not be clicked; this is the opposite case the resolver records on the
+        target -- it found an accessible answer under the point but declined to
+        name it (one from another process, one that bottomed out at the
+        toplevel, one that did not cover the point), leaving a bare coordinate
+        click that otherwise carries no explanation at all. The reason is the
+        resolver's own, captured at record time (`Target.reason`); without it
+        there is nothing to say, so a point that simply had nothing accessible
+        under it stays silent as before.
+        """
+        if (
+            not self.options.comments
+            or event.target.element is not None
+            or event.target.reason is None
+            or self.options.locators != "element"
+        ):
+            return
+        self._comment(
+            f"no element could be named here: {event.target.reason}, so this"
+            " stays a coordinate click",
+            state,
+        )
 
     def _note_action_unavailable(self, event: Click, state: _State) -> None:
         """Explain a click the action route left unclicked.
