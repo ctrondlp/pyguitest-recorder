@@ -17,18 +17,27 @@ compositor, and no backend added later changes that: injection on Wayland took
 portals, libei and per-compositor IPC, but observation is the thing compositors
 exist to prevent.
 
-What is *not* permanently closed is the consent-shaped route. The Input
-Capture portal (`org.freedesktop.portal.InputCapture`, spoken by python-libei's
-`InputCaptureSession`) lets a user deliberately hand their keyboard and pointer
-to an application — but it *diverts* input rather than copying it: it was built
-for input-leap-style pointer crossing, so while a capture is active the desktop
-being recorded does not receive the input being captured. A recorder on top of
-it would have to capture and re-inject in a loop, on the compositors that
-implement the portal at all (COSMIC, for one, does not). Whether that loop can
-be made faithful enough to record from is an open investigation, not a plan —
-the AT-SPI event-based acquisition idea at the end of this section is the
-other candidate — but either way the accurate statement is that "Wayland
-recording is impossible" was only ever true of passive capture.
+The consent-shaped route was the one candidate left open here, and it was
+investigated and closed on 2026-10-18. The Input Capture portal
+(`org.freedesktop.portal.InputCapture`, spoken by python-libei's
+`InputCaptureSession`) lets a user deliberately hand their keyboard and
+pointer to an application — but it *diverts* input rather than copying it: it
+was built for input-leap-style pointer crossing, so while a capture is active
+the desktop being recorded does not receive the input being captured. The
+investigation confirmed the portal is current and available (GNOME 51 answers
+with interface version 2, `CreateSession2`, all capabilities) — availability
+is not the blocker; the diversion model is. A recorder on top of it would be
+a whole-desktop input proxy: activation is barrier-triggered, so capturing an
+ordinary in-session interaction means keeping the capture active for the
+entire recording and re-injecting every event through libei, with the proxy's
+latency sitting in the hot path of every keystroke of the very session being
+recorded — and whether the compositor re-captures the re-injected synthetic
+events (an infinite loop) is undefined by the spec. That is judged not viable
+as a recorder design, on the compositors that implement the portal at all
+(COSMIC, for one, does not). The AT-SPI event-based acquisition idea at the
+end of this section is the remaining open candidate — and the accurate
+statement remains that "Wayland recording is impossible" was only ever true
+of passive capture.
 
 X11's RECORD extension, Windows' low-level input hooks and macOS's
 `CGEventTap` are the exceptions — one per platform, which is why they are the
