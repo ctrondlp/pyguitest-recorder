@@ -149,6 +149,31 @@ def test_selectable_round_trips_through_to_dict_and_back():
     assert rebuilt.target.element.selectable is True
 
 
+def test_target_reason_round_trips_through_to_dict_and_back():
+    # _rebuild lists Target's fields by hand (same hazard as expanded above),
+    # so reason has to be reconstructed explicitly or it is silently dropped.
+    click = Click(
+        target=Target(
+            x=1,
+            y=2,
+            element=None,
+            reason="belonged to another process (pid 3168, not pid 7831)",
+        )
+    )
+    rebuilt = event_from_dict(click.to_dict())
+    assert isinstance(rebuilt, Click)
+    assert (
+        rebuilt.target.reason == "belonged to another process (pid 3168, not pid 7831)"
+    )
+    assert rebuilt.target.element is None
+
+
+def test_a_named_target_round_trips_with_no_reason(save_button):
+    click = Click(target=Target(x=1, y=2, element=save_button))
+    rebuilt = event_from_dict(click.to_dict())
+    assert rebuilt.target.reason is None
+
+
 def test_window_with_ambiguous_app_id_round_trips(save_button):
     ambiguous = WindowRef(app_id="plasmashell", app_id_ambiguous=True)
     click = Click(timestamp=0, delay=0, target=Target(x=1, y=2, window=ambiguous))

@@ -832,17 +832,73 @@ class DesktopResolver:
         self._from_popup = False
         window = self._window(x, y, screen)
         element = self._element(x, y) if self._resolves_elements else None
+        # Each early return drops a *found* element the checks declined to name,
+        # and records why on the target so the generator can explain the bare
+        # coordinate it then has to emit (see Target.reason). The checks keep
+        # their own fuller footer warning as a side effect; this is the
+        # per-click short form, which the checks' ordering here decides.
         if element is not None and not self._is_widget(element):
-            return Target(x=x, y=y, screen=screen, window=window)
+            return Target(
+                x=x,
+                y=y,
+                screen=screen,
+                window=window,
+                reason="the accessibility hit-test bottomed out at the window "
+                "itself, which names no clickable widget",
+            )
         if (
             element is not None
             and not self._in_disclosure_gutter(element, x, y)
             and not self._covers(element, x, y)
         ):
-            return Target(x=x, y=y, screen=screen, window=window)
+            return Target(
+                x=x,
+                y=y,
+                screen=screen,
+                window=window,
+                reason="the accessible element under this point did not actually "
+                "cover it",
+            )
         if element is not None and not self._belongs(element, window):
-            return Target(x=x, y=y, screen=screen, window=window)
+            return Target(
+                x=x,
+                y=y,
+                screen=screen,
+                window=window,
+                reason=self._foreign_reason(element, window),
+            )
         return Target(x=x, y=y, screen=screen, window=window, element=element)
+
+    def _foreign_reason(self, element: ElementRef, window: WindowRef | None) -> str:
+        """The short per-click form of a `_belongs` rejection, for `Target.reason`.
+
+        Reads the reason off the state `_belongs` itself decided on, in its
+        order: no window found at all; a pid missing on either side so
+        ownership could not be established and the geometry did not fit; a
+        different process; or a different toplevel of the same one. The
+        same-process wording is reached only where the pids actually prove it,
+        never as a catch-all.
+        """
+        if window is None:
+            return (
+                "the accessibility hit-test found an element, but no window was "
+                "found under this point for it to belong to"
+            )
+        if element.pid is None or window.pid is None:
+            return (
+                "the accessible element under this point could not be confirmed "
+                "to belong to the window (a process id was missing) and its "
+                "geometry did not fit the window"
+            )
+        if element.pid != window.pid:
+            return (
+                f"the accessible element under this point belonged to another "
+                f"process (pid {element.pid}, not the window's pid {window.pid})"
+            )
+        return (
+            "the accessible element under this point belonged to a different "
+            "window of the same process"
+        )
 
     def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the toplevel under this point, looking for no element in it.
