@@ -21,6 +21,14 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # Nightly, for the two pyguitest-axis jobs below: a break against the
+  # declared floor or against upstream git main is made upstream, so no
+  # push *here* is guaranteed to surface it before pyguitest releases it --
+  # the exact "red run the morning after" those jobs exist to pre-empt.
+  # Every other job skips on schedule: they test this repository's own
+  # code, which did not change overnight.
+  schedule:
+    - cron: "17 5 * * *"
 
 permissions:
   contents: read
@@ -28,6 +36,10 @@ permissions:
 jobs:
   tests:
     name: tests (Python ${{ matrix.python }})
+    # Skipped on the nightly schedule, like every job below that tests this
+    # repository's own code: nothing here changed overnight, only the
+    # pyguitest axis the two dedicated jobs re-check.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -50,8 +62,104 @@ jobs:
       - name: Run the test suite
         run: python -m pytest -q
 
+  # Every other job installs whatever pyguitest PyPI resolves today, so all
+  # of them together test exactly one point of the compatibility range this
+  # package claims: its newest edge. The floor in pyproject.toml -- the
+  # version the generator's output is verified against, per the comment on
+  # `dependencies` -- was a promise nothing executed, and pyguitest's main
+  # branch is the release the next bump will resolve to, so a break there
+  # surfaces here before it ships rather than as a red run the morning after.
+  # Versions *below* the floor are deliberately not tested: the floor exists
+  # to refuse them, and `validate()` against an older Session would pass
+  # vacuously -- the exact failure mode the floor was raised to close.
+  #
+  # Two jobs rather than one two-leg matrix, on purpose: `publish` must
+  # gate on the floor leg -- shipping a release whose declared floor
+  # demonstrably fails is the regression this exists to close -- while
+  # staying ungated on the main leg, whose red can be upstream churn no
+  # release here should wait out. `needs:` can name a job, not a matrix
+  # cell, so the legs have to be jobs.
+  pyguitest-floor:
+    name: pyguitest floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version: this job is about the pyguitest axis, and
+          # Python-to-Python differences are the `tests` matrix's business.
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[x11,dev]'
+
+      # Read back out of pyproject.toml rather than repeated here, so raising
+      # the floor cannot leave this job testing the old one. Matched by
+      # requirement *name*, not a string prefix, so a future pyguitest-\*
+      # dependency cannot be mistaken for pyguitest itself.
+      - name: Downgrade pyguitest to the declared floor
+        run: |
+          set -eu
+          floor=$(python -c "
+          import re, tomllib
+          from packaging.requirements import Requirement
+          with open('pyproject.toml', 'rb') as f:
+              deps = tomllib.load(f)['project']['dependencies']
+          spec = next(d for d in deps if Requirement(d).name == 'pyguitest')
+          print(re.search(r'>=\s*([0-9][0-9a-z.]*)', spec).group(1))
+          ")
+          pip install "pyguitest==$floor"
+
+      # In the log so a red run names its combination without re-running;
+      # pip freeze prints the resolved version (or a git URL with its sha).
+      - name: Show the combination under test
+        run: pip freeze | grep -i pyguitest
+
+      # One run, two verdicts: the suite's own exit code (through pipefail),
+      # and a refusal of capability-gated skips. conftest skips
+      # version-gated assertions when the installed pyguitest lacks the
+      # capability -- exactly what a floor install is positioned to trigger
+      # -- and a floor leg that quietly skipped them would claim the suite
+      # passed "against the declared floor" while testing less of it. Same
+      # pattern as the windows job's ruff guard below.
+      - name: Run the test suite, refusing capability-gated skips
+        run: |
+          set -eo pipefail
+          python -m pytest -q -rs 2>&1 | tee floor-run.txt
+          if grep -q "install a newer pyguitest" floor-run.txt; then
+            echo "::error::capability-gated tests were skipped against the declared floor"
+            exit 1
+          fi
+
+  pyguitest-main:
+    name: pyguitest main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[x11,dev]'
+
+      - name: Install pyguitest from git main
+        run: pip install --force-reinstall "pyguitest @ git+https://github.com/ctrondlp/pyguitest"
+
+      # pip freeze names the resolved git sha, which the version string
+      # cannot: upstream bumps __version__ at release commits, so git main
+      # usually *reports* the latest release's number while being newer.
+      - name: Show the combination under test
+        run: pip freeze | grep -i pyguitest
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
   lint:
     name: lint and types
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -65,6 +173,7 @@ jobs:
 
   live:
     name: live capture on a real X server
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -94,6 +203,7 @@ jobs:
 
   windows:
     name: the suite on Windows
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     # The win32 capture backend lands here before there is a Windows machine
     # in anyone's loop, so this job is what stops a Linux-only assumption
@@ -178,6 +288,7 @@ jobs:
 
   build:
     name: build sdist and wheel
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -230,7 +341,11 @@ jobs:
   publish:
     name: publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [tests, lint, live, build]
+    # pyguitest-floor is release-gating on purpose: a version can never be
+    # re-uploaded, so a release whose declared floor demonstrably fails must
+    # not ship. pyguitest-main is deliberately absent -- its red can be
+    # upstream churn that no release here should have to wait out.
+    needs: [tests, lint, live, build, pyguitest-floor]
     runs-on: ubuntu-latest
     # Must match the environment named in the PyPI publisher config. A
     # required reviewer on it makes each publish a deliberate approval

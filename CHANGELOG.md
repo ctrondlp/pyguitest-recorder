@@ -5,6 +5,29 @@ was released.
 
 ## [Unreleased]
 
+### Added
+
+- **CI now tests the pyguitest compatibility range, not just its newest
+  edge.** Every job installed whatever pyguitest PyPI resolved that day, so
+  the floor in `pyproject.toml` — the version the generator's output is
+  verified against — was a promise nothing executed. Two new jobs run the
+  suite against the declared floor exactly (read back out of
+  `pyproject.toml` by requirement name, so raising the floor cannot leave
+  the job testing the old one) and against pyguitest's git main, so a break
+  lands here before it ships in a release — nightly as well as on every
+  push and PR, because the break is made upstream and no push here is
+  guaranteed to catch it in time (the repo's own jobs skip the nightly;
+  nothing of theirs changed overnight). The floor job refuses
+  capability-gated skips — a floor that silently skipped version-gated
+  assertions would claim a pass while testing less — logs the resolved
+  install (`pip freeze` names the git sha the version string cannot), and
+  gates `publish`: a release whose declared floor demonstrably fails must
+  not ship, while the git-main job deliberately does not gate it — its red
+  can be upstream churn no release should wait out. Versions below the
+  floor are deliberately absent: the floor exists to refuse them, and
+  `validate()` against an older Session passes vacuously — the failure mode
+  the floor closes.
+
 ### Changed
 
 - **A coordinate click the resolver could not name now says why, on the line
