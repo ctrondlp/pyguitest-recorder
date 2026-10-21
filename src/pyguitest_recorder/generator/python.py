@@ -88,7 +88,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.18"
+PROFILE = "pyguitest-0.19"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -120,6 +120,13 @@ install simply gets one of those calls wrong, which is what the floor is for.
 derived from this constant (`_require_version_line`), so the version a
 generated script demands and the profile its header claims are one value,
 not two.
+
+0.19 is where `Session.drag()` and `check_region()` were hardened -- a drag
+whose glide dies now releases the button rather than leaving it stuck, and a
+fractional capture region is covered rather than silently truncated. Nothing
+this generator emits names an API 0.18 lacked, so a script generated here
+still replays under 0.18; the bump is the "what was checked against" claim,
+kept level with `pyproject.toml`'s floor as every bump before it has been.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached

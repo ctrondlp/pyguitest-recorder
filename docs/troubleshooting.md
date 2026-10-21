@@ -388,7 +388,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.18.0 or newer is required
+older than the recording expects. **pyguitest 0.19.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),

@@ -563,9 +563,14 @@ def check(display: str, record_motion: bool = False, do_replay: bool = True) -> 
     finally:
         watchdog.cancel()
         recorder.stop()
+        # stop(), not bare terminate(): it waits for each app to actually
+        # exit (escalating to kill), so the capture windows are gone before
+        # replay() relaunches applications with the identical titles. A
+        # capture-phase window still mapped when the replay scene is built
+        # would briefly double a title and let a lookup bind the dying one.
         for process in (app, second_app):
             if process is not None:
-                process.terminate()
+                stop(process)
 
     report(recording)
 
@@ -672,8 +677,14 @@ def replay(source: str, display: str) -> list[str]:
     by destroying what it was aimed at.
     """
     app = start_app(display)
-    second_app = start_second_window(display)
+    # Started inside the try, after `second_app = None`, so that a failure
+    # in start_second_window() cannot leak the app already running: the
+    # finally below then stops it. `stop` (not bare terminate) escalates to
+    # kill after 5s, for the reason its own docstring gives -- an app slow
+    # on SIGTERM would otherwise be left on the private server.
+    second_app = None
     try:
+        second_app = start_second_window(display)
         fd, name = tempfile.mkstemp(suffix=".py")
         os.close(fd)
         script = Path(name)
@@ -703,7 +714,7 @@ def replay(source: str, display: str) -> list[str]:
     finally:
         for process in (app, second_app):
             if process is not None:
-                process.terminate()
+                stop(process)
 
 
 def round_trip(recording: Recording, source: str) -> list[str]:

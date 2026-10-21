@@ -233,14 +233,22 @@ dependencies = [
     # meaning every step above gives it: the release this output was verified
     # against, not the oldest that might work.
     #
-    # 0.18.0 raises it for the reason the floor exists at all: it is the
+    # 0.18.0 raised it for the reason the floor exists at all: it is the
     # release that ships `Session.require_version`, which the generator emits
     # when `require_version` is on. The option is off by default, but a floor
     # that only held when a setting was left alone would let pip install a
     # pair whose generated scripts the library cannot answer the moment
     # someone turns it on -- the same reasoning as 0.10.1's
     # `move_mouse_naturally`, also emitted only under a non-default setting.
-    "pyguitest>=0.18.0",
+    #
+    # 0.19.0 keeps the floor level with `PROFILE`, which this release validates
+    # its output against (the drag-release and region-covering hardening). The
+    # two move together by design -- the `require_version(...)` the generator
+    # emits derives from `PROFILE`, so the floor a script demands and the one
+    # this package declares are a single value. The `pyguitest-versions` CI job
+    # tests this floor (read back out of here) alongside pyguitest's main, so a
+    # drift between them is caught before it ships.
+    "pyguitest>=0.19.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     'tomli>=2.0; python_version < "3.11"',
 ]
