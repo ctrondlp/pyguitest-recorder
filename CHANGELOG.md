@@ -5,6 +5,8 @@ was released.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-20
+
 ### Added
 
 - **CI now tests the pyguitest compatibility range, not just its newest

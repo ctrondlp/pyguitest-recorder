@@ -97,3 +97,14 @@ tracks it as a version floor in `pyproject.toml`. A pyguitest change that
 touches window/element resolution, title matching, or anything the resolver
 (`src/pyguitest_recorder/windows/resolver.py`) depends on may need a matching
 fix or floor bump here too — check before considering that side's work done.
+
+**`PROFILE` and the `pyproject.toml` floor move together.** The generator
+stamps a `PROFILE` constant (`generator/python.py`) naming the pyguitest it
+was checked against, and the `require_version(...)` the generator emits
+derives from it — so `PROFILE` and the floor are one value by design, bumped
+as a pair. Raising them is a four-file change, and all four are enforced:
+`test_generator.py` ties `PROFILE` to the installed pyguitest, and
+`test_docs.py` checks the `Profile: pyguitest-X.Y` sample-header lines and the
+floor string in `README.md`/`docs/` against the code. The `pyguitest-floor`
+CI job then installs that floor from PyPI, so recorder CI stays red until the
+matching pyguitest release is published — release pyguitest first.
