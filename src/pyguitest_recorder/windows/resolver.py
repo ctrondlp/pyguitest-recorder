@@ -1012,22 +1012,32 @@ class DesktopResolver:
             # same rule the typed-text path applies -- and it has to come
             # before any ownership check, which can accept on geometry alone.
             return None
-        title = getattr(window, "title", "") or ""
-        if window.pid is None and title:
+        if window.pid is None:
             # A window backend with no pid capability (kdotool's KWin UUIDs,
             # COSMIC's toplevel-info) can never answer ownership by process,
-            # and native-Wayland extents are window-relative, so geometry is
-            # noise in both directions -- `_belongs` left this fallback dead
-            # on exactly the compositors it exists for, or accepting on a
-            # coordinate coincidence. The element's own ancestry names the
-            # toplevel it descends from (the fact the typed-text path already
-            # trusts), so where it speaks it decides, both ways.
+            # and native-Wayland extents are window-relative, so `_belongs`
+            # falls to geometry and either rejects nothing (its benefit-of-
+            # the-doubt when it cannot compare) or accepts on a coordinate
+            # coincidence. The element's own ancestry names the toplevel it
+            # descends from (the fact the typed-text path already trusts), and
+            # that title is the only ownership signal left -- so it decides
+            # outright here rather than deferring to a geometry test that
+            # cannot.
+            #
+            # Usable only while the title holds still: `window.title` is the
+            # snapshot the lookup took, and a window that renames itself
+            # mid-recording (an editor gaining a document name) makes that
+            # snapshot a title a sibling window could now hold. An unstable or
+            # absent title leaves ownership unestablished, so the click keeps
+            # its honest coordinates rather than risk a wrong name.
+            title = getattr(window, "title", "") or ""
+            if not title or not getattr(window, "title_stable", True):
+                return None
             toplevel = next(
                 (name for role, name in reversed(ref.path) if role in WINDOW_ROLES),
                 "",
             )
-            if toplevel:
-                return ref if toplevel == title else None
+            return ref if toplevel and toplevel == title else None
         return ref if self._belongs(ref, window) else None
 
     def _foreign_reason(self, element: ElementRef, window: WindowRef | None) -> str:
@@ -1265,10 +1275,16 @@ class DesktopResolver:
         ]
         if (
             not owned
+            and self.wayland
             and windows
             and all(window.pid is None for window in windows)
             and element.pid not in self.ignore_pids
         ):
+            # `self.wayland` guards the title match: pid-less window lists are
+            # a Wayland-compositor trait, and on any other backend a focused
+            # element from a foreign display whose ancestry happens to carry
+            # the same title must stay rejected -- title equality does not say
+            # which display owns it.
             # A window backend with no pid capability at all -- kdotool's KWin
             # UUIDs, COSMIC's toplevel-info -- can never answer ownership by
             # process. The element's own ancestry can: the accessible tree

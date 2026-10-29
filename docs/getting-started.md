@@ -141,7 +141,7 @@ Three limits to know going in, all documented in the backend itself:
   a login manager that does not leaves `libxkbcommon` on its built-in default
   (US) even with the library installed, so a German QWERTZ session recorded
   that way comes out decoded as US. Export `XKB_DEFAULT_LAYOUT` (and
-  `_VARIANT`) to match the session before recording in that case. A layout
+  `XKB_DEFAULT_VARIANT`) to match the session before recording in that case. A layout
   switched *during* a recording is not tracked; where `libxkbcommon` cannot
   be loaded at all, a fixed US table is the fallback.
 - Pointer coordinates are exact for an **absolute device** (a drawing tablet,

@@ -209,7 +209,10 @@ class WaylandCaptureBackend:
         self._thread: threading.Thread | None = None
         self._devices: list[Any] = []
         self._abs_ranges: dict[int, tuple[int, int, int, int]] = {}
-        self._padlike_fds: set[int] = set()  # touchpads: pad-local ABS, not screen
+        self._padlike_fds: set[int] = set()
+        """Fds whose ABS stream is not a screen position and must be ignored:
+        a touchpad's pad-local finger coordinates, a gamepad's sticks, a
+        sensor's axes. Their button events still decode normally."""
         self._pos: tuple[int, int] | None = None  # pointer position, if known
         self._clock_offset = 0.0
         """Added to every kernel timestamp to rebase it onto `time.monotonic`.
@@ -287,7 +290,11 @@ class WaylandCaptureBackend:
             # ABS axes with no pointer button: a gamepad stick, an
             # accelerometer. Guarded here as well as in `_wants_device`
             # because an explicit `paths` list bypasses the picker, and a
-            # stick's resting value must never become the pointer's seed.
+            # stick's resting value must never become the pointer's seed --
+            # nor its events motion: with no registered range `_scale_abs`
+            # passes raw device units through, so the fd joins the ignore set
+            # and `_decode` drops its ABS stream outright.
+            self._padlike_fds.add(dev.fileno())
             return
         if e.BTN_TOOL_FINGER in keys:
             self._padlike_fds.add(dev.fileno())

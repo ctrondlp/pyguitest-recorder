@@ -283,6 +283,19 @@ class TestTouchpadAbs:
         assert b._abs_ranges == {}
         assert b._pos is None
 
+    def test_a_gamepads_abs_events_never_become_motion(self):
+        # Explicit paths bypass `_wants_device`, and with no registered range
+        # `_scale_abs` passes raw device units through -- so the stick's fd
+        # has to join the ignore set or its wiggles emit garbage motion.
+        caps = self._pad_caps()
+        caps[e.EV_KEY] = [e.BTN_SOUTH]
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._learn_abs_range(e, _FakeDevice(caps, fd=9))
+        b._decode(e, _FakeEvent(e.EV_ABS, e.ABS_X, 17000), 9)
+        b._decode(e, _FakeEvent(e.EV_ABS, e.ABS_Y, 12000), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        assert _drain(b) == []
+
 
 class TestDeviceEligibility:
     """`_wants_device`: what the auto-picker counts as a keyboard or pointer."""

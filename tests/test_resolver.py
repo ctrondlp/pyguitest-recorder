@@ -1166,7 +1166,7 @@ def disclosure_resolver(session_class=DisclosureSession):
     return DesktopResolver(session=session, elements=True, windows=False, macos=False)
 
 
-def element_resolver(windows=None, macos=None, **kwargs):
+def element_resolver(windows=None, macos=None, wayland=False, **kwargs):
     """An element resolver whose session answers about elements too.
 
     `windows` and `macos` are the recording's platform, which the resolver
@@ -1175,10 +1175,14 @@ def element_resolver(windows=None, macos=None, **kwargs):
     ask the host, which is what the recorder does with no backend yet -- and
     which makes a test that depends on Linux-only notes pass on Linux and fail
     on Windows for no defect (`element_resolver(windows=False, macos=False)`
-    is the X11 session these fakes are pretending to be).
+    is the X11 session these fakes are pretending to be). `wayland` is
+    forwarded to the resolver (not the session) so the native-Wayland-only
+    paths -- the title-only focus ownership among them -- can be exercised.
     """
     session = ElementSession(window=FakeWindow(title="Target", pid=77), **kwargs)
-    return DesktopResolver(session=session, elements=True, windows=windows, macos=macos)
+    return DesktopResolver(
+        session=session, elements=True, windows=windows, macos=macos, wayland=wayland
+    )
 
 
 def test_resolving_a_window_only_never_asks_the_tree_for_an_element():
@@ -1275,6 +1279,23 @@ def test_focus_fallback_is_off_without_the_wayland_flag():
     assert plain.resolve(640, 400).element is None
 
 
+# The pid-less-window focus fallback is exercised through `_focus_element_in`
+# directly: `_describe`/`_identify` recompute `title_stable` from observed
+# title drift, which `.resolve()` cannot be made to fake in one lookup, so a
+# hand-built WindowRef is the only way to drive the pid/title matrix exactly.
+def _pidless_focus(window, focused=None, **kwargs):
+    session = WaylandFocusSession(focused=focused)
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+        **kwargs,
+    )
+    return r._focus_element_in(window)
+
+
 def test_wayland_focus_fallback_names_on_a_pidless_window_backend():
     # kdotool's KWin UUIDs and COSMIC's toplevel-info publish no window pid,
     # and native-Wayland extents are window-relative -- so neither pid nor
@@ -1282,28 +1303,19 @@ def test_wayland_focus_fallback_names_on_a_pidless_window_backend():
     # dead on exactly the compositors it exists for. The element's own
     # ancestry toplevel matching the window's title is the one fact left,
     # the same rule the typed-text path already trusts.
-    session = WaylandFocusSession()
-    session.window = FakeWindow(title="Target", pid=None)
-    target = wayland_resolver(session).resolve(640, 400)
-    assert target.element is not None
-    assert target.element.name == "Primary Action"
+    ref = _pidless_focus(WindowRef(title="Target", pid=None, title_stable=True))
+    assert ref is not None
+    assert ref.name == "Primary Action"
 
 
 def test_wayland_pidless_title_match_still_honours_ignore_pids():
     # The recorder's own terminal must stay excluded even where the window
     # cannot say whose it is -- the element's own pid, which AT-SPI still
     # knows, carries the exclusion.
-    session = WaylandFocusSession()
-    session.window = FakeWindow(title="Target", pid=None)
-    r = DesktopResolver(
-        session=session,
-        elements=True,
-        windows=False,
-        macos=False,
-        wayland=True,
-        ignore_pids={77},
+    ref = _pidless_focus(
+        WindowRef(title="Target", pid=None, title_stable=True), ignore_pids={77}
     )
-    assert r.resolve(640, 400).element is None
+    assert ref is None
 
 
 def test_wayland_pidless_title_mismatch_stays_a_coordinate():
@@ -1311,9 +1323,20 @@ def test_wayland_pidless_title_mismatch_stays_a_coordinate():
     # borrowed just because the window under the click cannot prove anything.
     frame = FakeElement("frame", "Another Window")
     focused = FakeElement("entry", "Name", pid=77, parent=frame)
-    session = WaylandFocusSession(focused=focused)
-    session.window = FakeWindow(title="Target", pid=None)
-    assert wayland_resolver(session).resolve(640, 400).element is None
+    ref = _pidless_focus(
+        WindowRef(title="Target", pid=None, title_stable=True), focused=focused
+    )
+    assert ref is None
+
+
+def test_wayland_pidless_title_match_needs_a_stable_title():
+    # `window.title` is the lookup's snapshot; a window seen renaming itself
+    # makes that snapshot the one title the ancestry can no longer be trusted
+    # against -- a sibling window could hold it by now -- so an unstable title
+    # falls back to geometry (which native-Wayland extents fail) and the click
+    # keeps its honest coordinates.
+    ref = _pidless_focus(WindowRef(title="Target", pid=None, title_stable=False))
+    assert ref is None
 
 
 class FakeEffectLog:
@@ -2224,11 +2247,27 @@ def test_focus_on_a_pidless_window_backend_is_owned_by_ancestry_title():
         FakeWindow(title="Other", pid=None),
         FakeWindow(title="Target", pid=None),
     ]
-    made = focus_resolver(element, windows=windows)
+    # Wayland: pid-less window lists are a compositor trait, and the title
+    # match that follows is gated to it (see the mismatching-backend test).
+    made = focus_resolver(element, windows=windows, wayland=True)
     target = made.focused()
     assert target is not None
     assert target.element.name == "Search"
     assert target.window.title == "Target"
+
+
+def test_pidless_title_ownership_is_wayland_only():
+    # On a non-Wayland backend a pid-less window list must not let a focused
+    # element be owned by title alone: focus is session-wide, and a foreign
+    # display's element whose ancestry happens to carry the same title would
+    # be wrongly attributed. Title equality says nothing about which display
+    # owns it -- only the Wayland compositors that publish no window pid get
+    # the title fallback.
+    frame = FakeElement("frame", "Target", pid=77)
+    element = FakeElement("entry", "Search", pid=77, parent=frame)
+    windows = [FakeWindow(title="Target", pid=None)]
+    made = focus_resolver(element, windows=windows)  # wayland defaults off
+    assert made.focused() is None
 
 
 def test_pidless_windows_still_respect_the_ignore_list():
@@ -2238,7 +2277,7 @@ def test_pidless_windows_still_respect_the_ignore_list():
     frame = FakeElement("frame", "Target", pid=77)
     element = FakeElement("entry", "Search", pid=77, parent=frame)
     windows = [FakeWindow(title="Target", pid=None)]
-    made = focus_resolver(element, windows=windows)
+    made = focus_resolver(element, windows=windows, wayland=True)
     made.ignore_pids = {77}
     assert made.focused() is None
 
