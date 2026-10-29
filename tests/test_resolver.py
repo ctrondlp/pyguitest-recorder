@@ -3056,3 +3056,99 @@ def test_a_check_on_a_remembered_win32_menu_item_reads_its_state():
     assert observation.target.element.name == "Tick"
     assert observation.checked is True
     assert observation.checkable is True
+
+
+class FocusCountingSession(StackedSession):
+    """Counts the one question a keystroke must never pay for on Wayland."""
+
+    def __init__(self, *stack):
+        super().__init__(*stack)
+        self.focus_reads = 0
+        self.element_reads = 0
+
+    @property
+    def capabilities(self):
+        return {FakeCapability("WINDOW_LIST"), FakeCapability("ELEMENT_GEOMETRY")}
+
+    def focused(self):
+        self.focus_reads += 1
+        return
+
+    def element_at(self, x, y):
+        self.element_reads += 1
+        return
+
+
+def keyboard_resolver(session, **kwargs):
+    return DesktopResolver(
+        session=session, elements=False, windows=False, macos=False, **kwargs
+    )
+
+
+def test_a_wayland_keystroke_names_the_active_window_not_the_one_under_the_pointer():
+    # With no real pointer coordinate the hit test lands on the desktop shell
+    # (0, 0), which is where a tab-walk recorded on KWin was attributed.
+    session = desktop_with_an_app_on_it()
+    made = keyboard_resolver(session, wayland=True)
+    assert made.resolve_keyboard(0, 0).window.title == "App"
+    assert session.window_lookups == 0
+    assert made.resolve(0, 0).window.title == "Desktop"
+
+
+def test_a_wayland_keystroke_never_asks_for_focus_or_an_element():
+    # `session.focused()` measured ~1.2s on KWin; one per Tab put the recorder
+    # 225s behind live input.
+    desktop = FakeWindow(title="Desktop", app_id="org.example.Desktop", pid=1)
+    app = FakeWindow(title="App", app_id="org.example.App", pid=2)
+    session = FocusCountingSession(
+        (desktop, (0, 0, 1000, 800)), (app, (200, 100, 400, 300))
+    )
+    made = DesktopResolver(
+        session=session, elements=True, windows=False, macos=False, wayland=True
+    )
+    made.resolve_keyboard(0, 0)
+    assert (session.focus_reads, session.element_reads) == (0, 0)
+
+
+def test_off_wayland_a_keystroke_resolves_by_pointer_as_before():
+    session = desktop_with_an_app_on_it()
+    made = keyboard_resolver(session, wayland=False)
+    assert made.resolve_keyboard(0, 0).window.title == "Desktop"
+    assert made.resolve_keyboard(300, 200).window.title == "App"
+
+
+def test_a_wayland_keystroke_keeps_its_own_coordinates():
+    target = keyboard_resolver(
+        desktop_with_an_app_on_it(), wayland=True
+    ).resolve_keyboard(7, 9, 1)
+    assert (target.x, target.y, target.screen) == (7, 9, 1)
+
+
+def test_a_wayland_keystroke_with_no_active_window_names_none():
+    # The shell is no better an answer than silence: a window on the target
+    # makes the script confirm focus on it before typing.
+    session = FakeSession(fail={"active_window"})
+    assert (
+        keyboard_resolver(session, wayland=True).resolve_keyboard(0, 0).window is None
+    )
+
+
+def test_a_wayland_keystroke_in_the_recorders_own_window_names_none():
+    own = FakeSession(window=FakeWindow(pid=os.getpid()))
+    assert keyboard_resolver(own, wayland=True).resolve_keyboard(0, 0).window is None
+    other = FakeSession(window=FakeWindow(pid=4321))
+    made = keyboard_resolver(other, wayland=True, ignore_pids={4321})
+    assert made.resolve_keyboard(0, 0).window is None
+
+
+def test_a_wayland_keystroke_without_window_context_names_none():
+    made = DesktopResolver(
+        session=FakeSession(),
+        elements=False,
+        resolve_windows=False,
+        windows=False,
+        macos=False,
+        wayland=True,
+    )
+    assert made.resolve_keyboard(0, 0).window is None
+    assert keyboard_resolver(None, wayland=True).resolve_keyboard(0, 0).window is None

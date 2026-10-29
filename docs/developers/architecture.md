@@ -274,6 +274,36 @@ everything else here gets:
 The last clicked text field remains the fallback wherever focus cannot be
 had — which, since the fix above, is fewer desktops than this used to say.
 
+### Which window a keystroke went to
+
+The same reasoning applies to the *window* a key event is attributed to. A key
+event still carries a coordinate, but nothing about a keystroke depends on it:
+the window that received it is the one with keyboard focus. Asking the pointer
+question for it works on X11, where the pointer is real, and fails on native
+Wayland, where the coordinate is a tracked guess: the full resolve lands on
+the shell under it (plasmashell on KWin) and then pays for a focus read of
+about 1.2s per event. Measured on KWin over the torture test's 300 keystrokes,
+that put the recorder 225s behind live input, so the focus-lag gate failed
+closed and withheld all seven text runs, while every keystroke was attributed
+to plasmashell rather than the application being typed into.
+
+So `Normalizer` asks the resolver `resolve_keyboard` for key and hotkey events
+(and for the text-run fallback). On Wayland it answers with the active window
+alone, about 0.01s, and reads no element and no focus; anywhere else it is the
+pointer question as before. It is optional on a resolver, like `resolve_hover`,
+and a resolver without it is asked the pointer question. The same run twice
+after: the recorder finished 6.3s and 8.4s behind, 300 of the 302 keystrokes
+were attributed to the torture test's window, 3 of the 7 text runs were still
+withheld (the lag that remains is the clicks, which still resolve in full),
+and the replay exited 0.
+
+What the pointer question costs is not the same on every compositor, which is
+why this was confirmed on a second one. On GNOME Shell 51.1 the same resolve
+names *no* window rather than the shell, and takes 124ms rather than 1.2s --
+so the backlog that made this visible on KWin would never have formed there,
+while the attribution was wrong just as silently. The GNOME run is in
+[status.md](status.md).
+
 ## Generated code is checked before it is offered
 
 `validate()` compiles the file, confirms every `gui.<method>` call exists on

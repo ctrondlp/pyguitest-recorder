@@ -857,6 +857,38 @@ class DesktopResolver:
         """
         return self._resolve(x, y, screen, spend=True, when=when)
 
+    def resolve_keyboard(
+        self, x: int, y: int, screen: int = 0, when: float | None = None
+    ) -> Target:
+        """The window a keystroke went to, which is not the one under the pointer.
+
+        Keys go to whatever holds focus. Everywhere with a real pointer
+        coordinate the window under it is a fair stand-in and is what `resolve`
+        answers, so that is unchanged. On native Wayland there is no such
+        coordinate -- the pointer is a relative-motion guess, or (0, 0) -- and
+        the full `resolve` pays for the wrong thing twice: the hit-test lands
+        on the desktop shell, and the element half then asks the accessibility
+        tree what has focus, which measured ~1.2s on KWin for every Tab and
+        arrow key. A tab-walk recorded 300 of those and fell 225s behind live
+        input, which in turn made every later text run fail closed as
+        unreadable.
+
+        So on Wayland the answer is the active window alone, one cheap
+        compositor query, and no element: the generator reads only the window
+        of a keystroke or hotkey, to decide whether to confirm focus first.
+        With no active window known, or one the recording ignores, the target
+        names no window and the script confirms no focus -- better than
+        naming the desktop shell.
+        """
+        if not self.wayland:
+            return self._resolve(x, y, screen, spend=True, when=when)
+        if self.session is None or not self.resolve_windows:
+            return Target(x=x, y=y, screen=screen)
+        active = self._active_window()
+        if active is None or active.pid in self.ignore_pids:
+            return Target(x=x, y=y, screen=screen)
+        return Target(x=x, y=y, screen=screen, window=self._describe(active))
+
     def resolve_hover(
         self, x: int, y: int, screen: int = 0, when: float | None = None
     ) -> Target:

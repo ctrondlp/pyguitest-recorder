@@ -29,7 +29,8 @@ claiming everything works.
 | macOS record -> generate -> replay -> re-record | run live on the same Mac -- two recordings, two generated scripts, compared event by event; see below |
 | macOS window/element context (which backends, and the wording of every note) | run live on the same Mac -- `probe_context` and a full round trip, both halves resolving, no notes; see below |
 | wayland (evdev) capture, decode, coordinate scaling | tested (virtual uinput round-trip + fake-event decode); run live on all five fleet compositors -- KWin, GNOME/Mutter, COSMIC, Hyprland, niri; see below |
-| wayland record -> generate -> replay, auto fallback, `--doctor` | run live on a native-Wayland KDE Plasma 6 session -- see below |
+| wayland record -> generate -> replay, auto fallback, `--doctor` | run live on native-Wayland KDE Plasma 6 and GNOME Shell 51 sessions -- see below |
+| Keyboard attribution on native Wayland (`resolve_keyboard`) | run live on KWin and GNOME Shell 51 -- 122/122 keystrokes named the application, replay exit 0; see below |
 | win32 hook health (a hook Windows removed silently) | run live on Windows 11 -- a real hook removed by hand, reported 2.7s later; see below |
 
 ## Wayland: the evdev backend run live on KDE Plasma 6 (2026-10-27)
@@ -232,6 +233,49 @@ run on that box, which also exercised the generator's ruff-as-a-module
 fallback in production conditions, since ruff was importable there but not on
 `PATH`). The CI floor interpreter, Python 3.10, was replicated locally with
 the exact CI install (`.[x11,dev]`, no evdev, headless): 1208 passed.
+
+## Wayland: keystroke attribution, on a second compositor (2026-10-29)
+
+`resolve_keyboard` -- keys asking the active window rather than being resolved
+like clicks -- was found and measured on KWin. This is the confirming run on
+the other compositor it has to answer to: GNOME Shell 51.1, native Wayland,
+the workstation's own session, against a GTK3 probe started as a native
+Wayland client (`GDK_BACKEND=wayland`, no `DISPLAY` -- on XWayland the extents
+are screen coordinates and the bug cannot appear at all).
+
+**The same fix, a different failure behind it.** Asked at the coordinate the
+evdev backend actually has on native Wayland -- a tracked guess, or `(0, 0)` --
+the pointer-shaped `resolve()` took 124-151ms and named **no window at all**,
+where on KWin it named the desktop shell. `resolve_keyboard()` answered the
+focused probe window in 0.9-1.5ms, about a hundred times cheaper. Over the
+probe itself, at the screen centre, `resolve()` does find the window (52-72ms)
+and is still ~55x the cost. So the harm GNOME was taking was the attribution,
+not the stall: 124ms a key is an order of magnitude under KWin's ~1.2s, and a
+tab-walk here would never have fallen the 225s behind that made the bug
+visible there. **Validating this change on KWin alone would have measured the
+loud half of it.**
+
+End to end, through the real backend: 120 Tab presses and two typed runs
+recorded on `wayland-evdev` with the resolver's `wayland` flag on. **122 of
+122** keyboard events were attributed to the application window -- none to
+the shell, none unnamed -- the focus-lag gate withheld **0 of 2** typed runs
+(on KWin, 7 of 7 before the fix and 3 of 7 after), and the recorder reported a
+maximum lag of **0.0s**. Drive and drain took 18.9s; the generated script
+validated clean and replayed **exit 0**.
+
+One GNOME fact this run depended on: the probe window has **no pid and no
+`app_id`** here (`pid=None`, `app_id=''`), so every one of those 122
+attributions went through the pid-less path PR #53's re-review added, named by
+title with `ignore_pids` enforced. That path is reachable on GNOME and was not
+on KWin, which is the second reason one compositor was not enough.
+
+Observed alongside, and not from this change: on GNOME the recorder's context
+request for `windows + atspi` fails its window half with
+`BackendUnavailable: backend 'windows' cannot drive this session` and warns
+that "clicks may lose their element names", because Mutter's window control is
+pyguitest's `gnomeshell` backend rather than the one named `windows`. Window
+attribution plainly worked anyway throughout this run, so the note overstates
+what was lost; worth a look on its own, not a blocker here.
 
 ## The torture fixture: recorded on three platforms, replayed, four bugs (2026-10-14)
 

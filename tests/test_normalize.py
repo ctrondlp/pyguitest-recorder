@@ -567,6 +567,63 @@ def test_focus_is_asked_once_per_run_not_once_per_character(key, window):
     assert Counting.calls == 1
 
 
+class KeyboardAwareResolver(FakeResolver):
+    """A resolver that knows keys and the pointer can disagree."""
+
+    def __init__(self, keyboard_window, **kwargs):
+        super().__init__(**kwargs)
+        self.keyboard_window = keyboard_window
+        self.keyboard_calls = 0
+        self.pointer_calls = 0
+
+    def resolve(self, x, y, screen=0, when=None):
+        self.pointer_calls += 1
+        return super().resolve(x, y, screen, when)
+
+    def resolve_keyboard(self, x, y, screen=0, when=None):
+        self.keyboard_calls += 1
+        return Target(x=x, y=y, screen=screen, window=self.keyboard_window)
+
+
+def test_keystrokes_and_hotkeys_are_resolved_as_keyboard_events(key, window):
+    # Keys go to the focused window, which is not where the pointer rests; a
+    # resolver that can tell them apart is asked the keyboard question.
+    pointer = window
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=pointer)
+    events = drain(
+        Normalizer(resolver=resolver),
+        [
+            key(1.0, "Tab"),
+            key(1.2, "Control_L", kind="key_press"),
+            key(1.3, "s", "s"),
+        ],
+    )
+    keyed = [e for e in events if isinstance(e, (KeyStroke, HotKey))]
+    assert len(keyed) == 2
+    assert all(e.target.window.title == "Typing" for e in keyed)
+    assert resolver.pointer_calls == 0
+
+
+def test_typed_text_with_no_better_evidence_is_resolved_as_a_keyboard_event(
+    key, window
+):
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "h", "h")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.window.title == "Typing"
+    assert resolver.pointer_calls == 0
+
+
+def test_a_resolver_without_a_keyboard_question_gets_the_pointer_one(key, window):
+    # The floor, and every test double: keys keep resolving by pointer.
+    resolver = FakeResolver(window=window)
+    assert not hasattr(resolver, "resolve_keyboard")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "Tab")])
+    assert events[0].target.window is window
+
+
 # -- the stop key ------------------------------------------------------------
 
 

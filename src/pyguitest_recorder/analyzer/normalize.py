@@ -627,7 +627,7 @@ class Normalizer:
                 HotKey(
                     timestamp=self._at(raw),
                     keys=keys,
-                    target=self._target(raw),
+                    target=self._key_target(raw),
                 )
             )
             return out
@@ -638,7 +638,7 @@ class Normalizer:
             KeyStroke(
                 timestamp=self._at(raw),
                 key=raw.keysym,
-                target=self._target(raw),
+                target=self._key_target(raw),
             )
         )
         return out
@@ -768,7 +768,7 @@ class Normalizer:
             and clicked.element.role in _TEXT_ROLES
         ):
             return clicked
-        return self._target(raw)
+        return self._key_target(raw)
 
     def _flush_text(self) -> list[Event]:
         """Emit the pending text run, if there is one."""
@@ -816,6 +816,16 @@ class Normalizer:
     def _target(self, raw: RawEvent) -> Target:
         """Resolve what was under the pointer when this event happened."""
         return self.resolver.resolve(raw.x, raw.y, raw.screen, when=raw.timestamp)
+
+    def _key_target(self, raw: RawEvent) -> Target:
+        """Resolve the window a keyboard event went to.
+
+        A resolver with no `resolve_keyboard` -- the floor, or a test double --
+        has no notion that keys and the pointer can disagree, so it gets the
+        pointer's answer, as before. See `DesktopResolver.resolve_keyboard`.
+        """
+        resolve = getattr(self.resolver, "resolve_keyboard", self.resolver.resolve)
+        return resolve(raw.x, raw.y, raw.screen, when=raw.timestamp)
 
     def _window_target(self, raw: RawEvent) -> Target:
         """Resolve only the window under the pointer, for a recorded move.
