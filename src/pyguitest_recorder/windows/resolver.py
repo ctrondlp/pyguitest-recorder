@@ -879,6 +879,17 @@ class DesktopResolver:
         With no active window known, or one the recording ignores, the target
         names no window and the script confirms no focus -- better than
         naming the desktop shell.
+
+        The `ignore_pids` check below is best-effort here, and cannot be
+        otherwise: a compositor that publishes no pid for a toplevel -- GNOME,
+        and any window backend without a pid capability -- leaves nothing to
+        match the recorder's own processes against. `_owner_of` has the same
+        problem for a pid-less window list and solves it by asking the focused
+        *element*'s pid, which AT-SPI still knows; reading an element is
+        exactly the cost this method exists to avoid, so it does not. The
+        consequence is narrow and worth the trade: a key typed while the
+        recorder's own terminal holds focus is attributed to that window
+        rather than dropped, where a click in the same place would be dropped.
         """
         if not self.wayland:
             return self._resolve(x, y, screen, spend=True, when=when)

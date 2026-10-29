@@ -605,15 +605,57 @@ def test_keystrokes_and_hotkeys_are_resolved_as_keyboard_events(key, window):
     assert resolver.pointer_calls == 0
 
 
-def test_typed_text_with_no_better_evidence_is_resolved_as_a_keyboard_event(
-    key, window
-):
+def test_typed_text_keeps_the_pointer_question_so_its_element_survives(key, window):
+    # The keystroke paths ask the keyboard question; this one must not. Only
+    # the pointer answer can carry an *element*, and the element is what says
+    # whether a run is a password. It is asked once per run, so it never cost
+    # what the per-keystroke resolves did.
     focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
     resolver = KeyboardAwareResolver(focused, window=window)
     events = drain(Normalizer(resolver=resolver), [key(1.0, "h", "h")])
     typed = [e for e in events if isinstance(e, TextInput)][0]
-    assert typed.target.window.title == "Typing"
-    assert resolver.pointer_calls == 0
+    assert typed.target.window is window
+    assert (resolver.pointer_calls, resolver.keyboard_calls) == (1, 0)
+
+
+def test_a_password_the_keyboard_question_cannot_see_is_still_withheld(key, window):
+    # The regression review caught. With the text fallback asking the keyboard
+    # question the target came back window-only, `_is_secret` saw no element,
+    # and a password typed into a field `focused()` could not name went into
+    # the generated script in clear.
+    secret = ElementRef(role="password text", name="")
+    resolver = KeyboardAwareResolver(
+        type(window)(title="Typing", app_id="org.example.Edit", pid=5),
+        window=window,
+        elements=[((0, 0, 1000, 1000), secret)],
+    )
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "p", "p")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.sensitive is True
+
+
+def test_a_key_consumed_late_is_not_attributed_to_focus_now(key, window):
+    # A single Escape is held back waiting for a second one, so it is resolved
+    # after it has already closed whatever it closed. Naming focus-now would
+    # make the script focus the dialog's parent and replay an Escape there,
+    # where it does nothing.
+    focused = type(window)(title="Parent", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(
+        Normalizer(resolver=resolver, lag=lambda raw: 1.5), [key(1.0, "Escape")]
+    )
+    keyed = [e for e in events if isinstance(e, KeyStroke)][0]
+    assert keyed.target.window is None
+    assert resolver.keyboard_calls == 0
+
+
+def test_a_key_consumed_promptly_still_names_the_active_window(key, window):
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(
+        Normalizer(resolver=resolver, lag=lambda raw: 0.0), [key(1.0, "Escape")]
+    )
+    assert events[0].target.window.title == "Typing"
 
 
 def test_a_resolver_without_a_keyboard_question_gets_the_pointer_one(key, window):

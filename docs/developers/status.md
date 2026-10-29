@@ -269,6 +269,16 @@ attributions went through the pid-less path PR #53's re-review added, named by
 title with `ignore_pids` enforced. That path is reachable on GNOME and was not
 on KWin, which is the second reason one compositor was not enough.
 
+Re-run unchanged after review, because review changed the code under it. The
+typed-text fallback went back to the pointer question — the keyboard one
+carries no element, and the element is what tells a password field from an
+ordinary one — and a key consumed past `focus_max_lag` now goes unnamed rather
+than taking focus-now. The second run holds: 120 of 120 keystrokes and both
+typed runs named the application, maximum lag 0.0s, validate clean, replay
+exit 0. The difference visible in it is the one that mattered: each typed run
+now arrives with its element (`page tab list` here) instead of a bare window,
+which is what `_is_secret` needs to see.
+
 Observed alongside, and not from this change: on GNOME the recorder's context
 request for `windows + atspi` fails its window half with
 `BackendUnavailable: backend 'windows' cannot drive this session` and warns

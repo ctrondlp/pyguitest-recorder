@@ -65,7 +65,17 @@ was released.
   visible on KWin. After the fix, 122 of 122 keyboard events were attributed
   to the application, no text run was withheld, the reported lag was 0.0s and
   the replay exited 0 -- all of it through the pid-less window path, since a
-  GNOME toplevel publishes neither a pid nor an app_id.
+  GNOME toplevel publishes neither a pid nor an app_id. The typed-text
+  fallback deliberately keeps asking the *pointer* question: a run is resolved
+  once, not once per key, and only that answer carries the element that tells
+  a password field from an ordinary one -- asking the keyboard question there
+  would have written a password into the script in clear wherever `focused()`
+  could not name the field either. And because the answer is focus read at
+  consumption time, a key consumed more than `focus_max_lag` late now leaves
+  its window unnamed rather than claiming focus-now: a single Escape is held
+  back waiting for a second one, so it would otherwise name the parent of the
+  dialog it had just closed and have the script focus that parent before
+  replaying it.
 - **Generated scripts are now formatted whenever `ruff` is importable, not only
   when a `ruff` executable is on `PATH`.** The emitter normalises its output
   with `ruff format`; it previously looked for the console script alone, so a

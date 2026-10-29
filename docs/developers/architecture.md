@@ -287,11 +287,30 @@ that put the recorder 225s behind live input, so the focus-lag gate failed
 closed and withheld all seven text runs, while every keystroke was attributed
 to plasmashell rather than the application being typed into.
 
-So `Normalizer` asks the resolver `resolve_keyboard` for key and hotkey events
-(and for the text-run fallback). On Wayland it answers with the active window
-alone, about 0.01s, and reads no element and no focus; anywhere else it is the
-pointer question as before. It is optional on a resolver, like `resolve_hover`,
-and a resolver without it is asked the pointer question. The same run twice
+So `Normalizer` asks the resolver `resolve_keyboard` for key and hotkey events.
+On Wayland it answers with the active window alone, about 0.01s, and reads no
+element and no focus; anywhere else it is the pointer question as before. It is
+optional on a resolver, like `resolve_hover`, and a resolver without it is
+asked the pointer question.
+
+The text-run fallback keeps the pointer question, deliberately. What made the
+keystroke paths expensive was asking per key; a run asks once. And it is the
+only one of the two answers that carries an *element* — which is what decides
+whether a run is a password and has to be withheld. Asking the keyboard
+question there returned a window and no element, `_is_secret` could not then
+tell a password field from an ordinary one, and a password typed into a field
+`focused()` could not name went into the script in clear. Caught in review of
+this change, before it shipped; the regression test is
+`test_a_password_the_keyboard_question_cannot_see_is_still_withheld`.
+
+One more limit, because the answer is focus *now*, read when the event is
+consumed: a key consumed late can be attributed to whatever focus moved on to,
+and the key itself is one of the things that moves it. The stop key makes that
+routine — `stop_key_presses` is 2, so every single Escape is held back waiting
+for a second one — and an Escape that closed a dialog would otherwise name the
+dialog's parent, leaving the generated script to focus the parent and replay an
+Escape that does nothing there. Past `focus_max_lag` the window is therefore
+left unnamed, the same threshold the typed-text gate uses for the same reason. The same run twice
 after: the recorder finished 6.3s and 8.4s behind, 300 of the 302 keystrokes
 were attributed to the torture test's window, 3 of the 7 text runs were still
 withheld (the lag that remains is the clicks, which still resolve in full),
