@@ -513,6 +513,14 @@ def describe_environment(
     # just as misleading about where the coordinates came from. `xrecord` on a
     # Mac keeps its display, exactly as it does on Windows.
     native = windows or _macos_desktop(backend_name)
+    # A wayland-evdev recording is native in the same sense: it reads the
+    # kernel's devices below the compositor, so no X display is the source of
+    # its coordinates -- `DISPLAY` pointing at the session's XWayland (or a
+    # stray Xvfb) must neither go into its header nor make the probe below
+    # brand the whole recording "xwayland". The recording sees every client,
+    # native and XWayland alike, which is exactly what session_type "wayland"
+    # from detection says.
+    wayland_native = backend_name.startswith("wayland")
     # From the environment this was *handed*, not the ambient one. `env`
     # already carries the display actually being recorded -- `scoped_environment`
     # puts `--display` into it -- and reading `os.environ` instead recorded the
@@ -520,7 +528,7 @@ def describe_environment(
     # which is the one fact that header exists to carry. It also decides which
     # server the XWayland probe below asks.
     source = env if env is not None else os.environ
-    environment.display = "" if native else source.get("DISPLAY", "")
+    environment.display = "" if native or wayland_native else source.get("DISPLAY", "")
     # Ask the server being recorded, and only guess where it cannot be asked.
     #
     # Detection alone cannot answer this, because the environment it is handed
@@ -539,8 +547,14 @@ def describe_environment(
     # session -- both have the two variables set, and only the first is an
     # XWayland recording. The environment heuristic stays as the fallback for
     # a host with no python-xlib, where nothing can be asked.
-    probed = _is_xwayland_display(environment.display) if not native else None
-    if probed is not None:
+    skip_probe = native or wayland_native
+    probed = _is_xwayland_display(environment.display) if not skip_probe else None
+    if wayland_native:
+        # Not an XWayland recording by definition -- evdev captures below the
+        # compositor, X clients and native clients alike -- even though a
+        # Wayland desktop usually has both variables set.
+        environment.xwayland = False
+    elif probed is not None:
         environment.xwayland = probed
     else:
         environment.xwayland = not native and (
@@ -727,8 +741,14 @@ class Recorder:
         # the title it had before anything was recorded into it -- see
         # `DesktopResolver.prime`.
         self._resolver.prime()
+        # The scoped environment strips WAYLAND_DISPLAY so a recording of X
+        # clients is not described as a Wayland session -- but a wayland-evdev
+        # recording is OF the Wayland session, so scoping it hid the one
+        # variable that identifies what was recorded and every header came out
+        # "Recorded on: unknown (none)" (seen live on KWin and COSMIC).
+        env = dict(os.environ) if self._on_wayland() else scoped_environment(display)
         self.recording.environment = describe_environment(
-            self._session, self._backend.name, scoped_environment(display)
+            self._session, self._backend.name, env
         )
         self.recording.environment.notes.extend(opening)
         if isinstance(self._resolver, DesktopResolver):
@@ -1306,7 +1326,14 @@ class Recorder:
         wanted = list(self._context_backends())
         if not wanted:
             return None
-        scoped = scoped_environment(display)
+        # The native-Wayland context pair ("windows" + "atspi") connects to
+        # the compositor and the session's accessibility bus, both of which
+        # live in the ambient environment -- scoping it for an X display
+        # stripped WAYLAND_DISPLAY and the connect failed on every compositor
+        # ("backend 'windows'/'atspi' cannot drive this session", seen live on
+        # KWin and COSMIC), degrading every recording to bare coordinates.
+        # Every other backend keeps the X-scoped view for the reasons above.
+        scoped = dict(os.environ) if self._on_wayland() else scoped_environment(display)
         session, failure = self._connect(wanted, scoped)
         if session is None:
             notes.append(

@@ -19,7 +19,9 @@ Prints the fused actions and writes the raw streams to /tmp for inspection.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -41,7 +43,16 @@ def collect_atspi(effects: list, duration: int) -> None:
         except Exception:
             name = role = None
         effects.append(
-            {"type": ev.type, "wall": round(time.time(), 4), "name": name, "role": role}
+            # time.monotonic, not time.time: the backend rebases every input
+            # stamp onto the monotonic clock, and `fuse_targets` correlates
+            # effects to inputs within 0.6s -- epoch stamps here would never
+            # match a rebased input again.
+            {
+                "type": ev.type,
+                "wall": round(time.monotonic(), 4),
+                "name": name,
+                "role": role,
+            }
         )
 
     listeners = []
@@ -109,11 +120,15 @@ def main() -> int:
             print(f"  click(button={a['button']}){where}{conf}")
         elif a["action"] == "scroll":
             print(f"  scroll(dx={a['dx']}, dy={a['dy']})")
-    with open("/tmp/wayland_capture_dump.json", "w") as fh:
+    # A private, uniquely named file (mkstemp creates it 0600): the dump holds
+    # every raw `text` field the run captured -- whole-machine keystrokes --
+    # and a fixed world-readable /tmp path handed that to any local user.
+    fd, dump_path = tempfile.mkstemp(prefix="wayland_capture_dump_", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
         json.dump(
             {"inputs": inputs, "effects": effects, "actions": actions}, fh, indent=2
         )
-    print("\nraw streams -> /tmp/wayland_capture_dump.json")
+    print(f"\nraw streams -> {dump_path}")
     return 0
 
 

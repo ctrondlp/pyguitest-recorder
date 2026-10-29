@@ -34,6 +34,7 @@ try:
 except Exception as exc:  # noqa: BLE001
     pytest.skip(f"evdev is not usable here: {exc}", allow_module_level=True)
 
+from pyguitest_recorder.backends import wayland as wayland_module  # noqa: E402
 from pyguitest_recorder.backends.base import CaptureBackend  # noqa: E402
 from pyguitest_recorder.backends.wayland import WaylandCaptureBackend  # noqa: E402
 
@@ -270,6 +271,44 @@ class TestTouchpadAbs:
         b = WaylandCaptureBackend([])
         b._learn_abs_range(e, _FakeDevice(OSError(19, "No such device")))
         assert b._abs_ranges == {}
+
+    def test_a_gamepads_stick_never_seeds_the_pointer(self):
+        # A gamepad exposes ABS axes with no pointer button; its stick's
+        # resting value is not a cursor position, and explicitly supplied
+        # paths bypass the picker, so the guard has to live here too.
+        caps = self._pad_caps()
+        caps[e.EV_KEY] = [e.BTN_SOUTH]
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._learn_abs_range(e, _FakeDevice(caps, fd=9))
+        assert b._abs_ranges == {}
+        assert b._pos is None
+
+
+class TestDeviceEligibility:
+    """`_wants_device`: what the auto-picker counts as a keyboard or pointer."""
+
+    def test_a_keyboard_is_recognised_by_key_a(self):
+        assert wayland_module._wants_device(e, {e.EV_KEY: [e.KEY_A, e.KEY_B]})
+
+    def test_a_relative_mouse_qualifies_by_its_axes(self):
+        caps = {e.EV_KEY: [e.BTN_LEFT], e.EV_REL: [e.REL_X, e.REL_Y]}
+        assert wayland_module._wants_device(e, caps)
+
+    def test_a_wheel_only_device_still_qualifies(self):
+        assert wayland_module._wants_device(e, {e.EV_REL: [e.REL_WHEEL]})
+
+    def test_an_absolute_tablet_qualifies_by_its_buttons(self):
+        caps = {e.EV_KEY: [e.BTN_LEFT], e.EV_ABS: [e.ABS_X, e.ABS_Y]}
+        assert wayland_module._wants_device(e, caps)
+
+    def test_a_gamepad_is_not_a_pointer(self):
+        # ABS sticks + gamepad buttons: picking it captured joystick noise as
+        # motion and let the stick's resting value seed the cursor position.
+        caps = {e.EV_KEY: [e.BTN_SOUTH, e.BTN_EAST], e.EV_ABS: [e.ABS_X, e.ABS_Y]}
+        assert not wayland_module._wants_device(e, caps)
+
+    def test_an_accelerometer_is_not_a_pointer(self):
+        assert not wayland_module._wants_device(e, {e.EV_ABS: [e.ABS_X, e.ABS_Y]})
 
 
 class TestCoordinates:

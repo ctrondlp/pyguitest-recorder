@@ -1,7 +1,8 @@
 """Deterministic tests for input<->AT-SPI target fusion.
 
-Synthetic `RawEvent`-shaped input records and AT-SPI effect dicts with
-controlled epoch timestamps, so the correlation and modifier-tracking logic
+Synthetic `RawEvent`-shaped input records and AT-SPI effect dicts stamped on
+one shared synthetic clock (both streams are `time.monotonic` in production),
+so the correlation and modifier-tracking logic
 is exercised exactly, with no display, no gi and no timing flakiness.
 """
 
@@ -56,6 +57,24 @@ class TestClick:
         acts = fuse_targets(inp, eff)
         assert [a["target"]["name"] for a in acts] == ["First", "Second"]
 
+    def test_a_modifier_released_mid_press_does_not_stick(self):
+        # The press scan used to skip ahead to the matching release, swallowing
+        # the Control key_release in between -- `held` kept Control forever and
+        # every later keystroke became a shortcut.
+        inp = [
+            key(0.0, "Control_L"),
+            ev("button_press", 0.1, button=1),
+            key(0.2, "Control_L", press=False),
+            ev("button_release", 0.3, button=1),
+            key(0.5, "a", text="a"),
+            key(0.55, "a", press=False),
+        ]
+        acts = fuse_targets(inp, [])
+        assert acts[0]["action"] == "click"
+        assert acts[-1]["action"] == "type"
+        assert acts[-1]["text"] == "a"
+        assert all(a["action"] != "shortcut" for a in acts)
+
 
 class TestText:
     def test_text_run_coalesces_and_resolves_target(self):
@@ -69,6 +88,16 @@ class TestText:
             "confidence": "high",
             "wall": 1000.1,
         }
+
+    def test_an_unnamed_effect_source_is_low_confidence(self):
+        # An effect whose source published no name resolves to no target;
+        # confidence follows the resolved target, not the effect's existence --
+        # "high" beside a null target claimed a certainty the fusion lacks.
+        inp = [key(0.1, "a", "a")]
+        eff = [effect("object:text-changed:insert", 0.2)]
+        (act,) = fuse_targets(inp, eff)
+        assert act["target"] is None
+        assert act["confidence"] == "low"
 
     def test_shift_modified_char_stays_text_not_shortcut(self):
         # Regression (caught live on KDE): "@" is Shift_L+2 and the backend

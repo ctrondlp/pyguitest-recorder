@@ -94,17 +94,26 @@ deliberately, prefer the narrowest form that fits (a per-boot ACL over
 permanent group membership), and drop it when you are done recording. Never run
 the recorder as root to get around inaccessible devices.
 
-Install the extra and give the user read access to the input devices:
+Install the extras and give the user read access to the input devices:
 
 ```sh
-pip install 'pyguitest-recorder[wayland]'
+pip install 'pyguitest-recorder[wayland,atspi]'
 
 # Read access to /dev/input, one of:
-sudo setfacl -m "u:$USER:rw" /dev/input/event*   # this boot only; narrowest
+sudo setfacl -m "u:$USER:r" /dev/input/event*   # this boot only; narrowest
 sudo usermod -aG input "$USER"        # persistent; log out and back in
 # revoke when done: `sudo setfacl -x "u:$USER" /dev/input/event*` for the ACL,
 # or `sudo gpasswd -d "$USER" input` (then re-login) for the group.
 ```
+
+Capture only ever *reads* the devices, so the ACL grants `r` alone — write
+access on `/dev/input/event*` would let any process running as this user
+inject input, a capability recording never needs. And `[atspi]` is not
+optional garnish here: **password redaction depends on element resolution.**
+The recorder recognises a password field through the accessibility tree; with
+no `[atspi]` extra (or a session where resolution is off) it cannot, and text
+typed into one goes into the generated script in clear unless you pass
+`--sensitive`, which redacts all typed text unconditionally.
 
 One behavioural difference between the two: the ACL is stamped on the device
 nodes that exist when the command runs, while group membership covers nodes
@@ -126,19 +135,27 @@ explanation *before* recording starts, not silently dropped.
 
 Three limits to know going in, all documented in the backend itself:
 
-- **Linux only.** Keys are decoded under the session's own keyboard layout
-  through `libxkbcommon` (its `XKB_DEFAULT_LAYOUT`/`_VARIANT`/… resolution), so
-  a German QWERTZ or any other layout records the characters actually typed;
-  where `libxkbcommon` cannot be loaded it falls back to US.
+- **Linux only.** Keys are decoded through `libxkbcommon` under the layout the
+  `XKB_DEFAULT_LAYOUT`/`_VARIANT`/… variables name — **not** the compositor's
+  active keymap. A desktop session normally exports them; a bare SSH shell or
+  a login manager that does not leaves `libxkbcommon` on its built-in default
+  (US) even with the library installed, so a German QWERTZ session recorded
+  that way comes out decoded as US. Export `XKB_DEFAULT_LAYOUT` (and
+  `_VARIANT`) to match the session before recording in that case. A layout
+  switched *during* a recording is not tracked; where `libxkbcommon` cannot
+  be loaded at all, a fixed US table is the fallback.
 - Pointer coordinates are exact for an **absolute device** (a drawing tablet,
   a VM's integration pointer), scaled from the device's own range to the
   screen the DRM connector reports. A **relative mouse** only reports deltas,
-  so its position is tracked from the screen's centre and clamped — good
-  enough to attribute clicks to windows, not survey-grade; a session recorded
-  with a tablet or inside a VM has the exact kind. For a bare-metal
+  so its position is tracked from the screen's centre and clamped — and that
+  starting point is a guess: the offset between the tracked position and the
+  real cursor never corrects on its own, so on a session with no absolute
+  device a click can be attributed to the wrong window entirely. A session
+  recorded with a tablet or inside a VM has the exact kind. For a bare-metal
   relative-only mouse, setting `screencast_cursor = true` reads the true
   position from the ScreenCast portal (a consented screen-share — it raises a
-  one-time "Share your screen?" dialog) and stamps every event with it instead.
+  one-time "Share your screen?" dialog) and stamps every event with it
+  instead, which is the supported answer there.
 - It captures the **whole machine's input**, so the
   [privacy](#privacy-read-this-before-the-first-recording) note below applies
   with full force — every keystroke in every window reaches the device node.

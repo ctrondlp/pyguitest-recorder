@@ -28,9 +28,10 @@ returns actions, so it is testable with no display and no gi. Collecting the
 live AT-SPI effect stream (which needs gi) lives in
 scripts/wayland-capture-check.py.
 
-Both streams carry an epoch wall-clock stamp -- the backend's `timestamp`
-(evdev reports epoch seconds) and the listener's `wall` -- so they align
-directly. Modifiers are tracked from the key stream, not read off each event:
+Both streams carry one clock -- `time.monotonic`: the backend rebases evdev's
+CLOCK_REALTIME stamps onto it at capture, and the listener's `wall` field is
+stamped with it directly (the field name predates the clock change) -- so they
+align directly. Modifiers are tracked from the key stream, not read off each event:
 the backend follows XRecord's vocabulary, where a held Control is its own
 `key_press`/`key_release` pair, so this mirrors how the normalizer reads them.
 """
@@ -147,10 +148,12 @@ def _fuse_click(
         "confidence": "high" if target else "low",
         "wall": r["timestamp"],
     }
-    j = i + 1
-    while j < len(inputs) and inputs[j]["kind"] != "button_release":
-        j += 1
-    return action, (j + 1 if j < len(inputs) else i + 1)
+    # Advance past the press only. Skipping ahead to the matching release
+    # discarded everything in between: a modifier released while the button
+    # was down kept its keysym in `held` forever (turning all later typing
+    # into shortcuts), and a second button pressed mid-drag vanished. The
+    # outer loop ignores the release on its own.
+    return action, i + 1
 
 
 def fuse_targets(
@@ -193,12 +196,17 @@ def fuse_targets(
             effect = _nearest_effect(
                 effects, start, ("text-changed", "state-changed:focused")
             )
+            # Confidence follows the resolved target, not the raw effect: an
+            # effect whose source published no name or role resolves to None,
+            # and reporting "high" beside a null target claimed a certainty
+            # the fusion does not have.
+            target = _target_of(effect)
             actions.append(
                 {
                     "action": "type",
                     "text": text,
-                    "target": _target_of(effect),
-                    "confidence": "high" if effect else "low",
+                    "target": target,
+                    "confidence": "high" if target else "low",
                     "wall": start,
                 }
             )

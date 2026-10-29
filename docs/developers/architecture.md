@@ -62,10 +62,12 @@ clients keep the ordinary `element_at` path. (`analyzer/atspi_fusion.py` is
 the offline spike that measured this; the resolver is the production path.)
 It records every compositor identically because it goes through none of them
 -- run live on all five in the fleet: Mutter, KWin, COSMIC, Hyprland and niri.
-Keys decode under the session's real layout through `libxkbcommon`, with a
-fixed US table only where that library will not load; an absolute pointer (a
-tablet, every VM) is scaled exactly, and a relative-only mouse is tracked from
-the screen centre unless the opt-in `screencast_cursor` setting reads the true
+Keys decode through `libxkbcommon` under the layout `XKB_DEFAULT_*` names (not
+the compositor's active keymap; no variables exported means the library's US
+default), with a fixed US table only where that library will not load; an
+absolute pointer (a tablet, every VM) is scaled exactly, and a relative-only
+mouse is tracked from the screen centre -- a guessed seed whose offset never
+self-corrects -- unless the opt-in `screencast_cursor` setting reads the true
 position from the ScreenCast portal's cursor metadata. It stays marked
 experimental for its remaining edges: coordinate scaling assumes a single
 connected output, and a plain push button on a native-Wayland client --
@@ -100,18 +102,24 @@ equivalent question on Windows, and its Accessibility backend answers it on
 macOS — where it is the only backend that answers both halves,
 `WINDOW_AT_POINT` and `ELEMENT_GEOMETRY`, out of one session, which is why a Mac
 recording resolves its windows and elements through a single backend rather than
-a capture/resolution pair. An AT-SPI event-based acquisition layer is the
-plausible route to a Wayland recorder, and the event model here is deliberately
-free of X11 vocabulary — `RawEvent.keysym` is spelled the way X11 itself spells
-it, which `win32.py` and `macos.py` both reproduce by hand rather than borrowing
-pyguitest's own lower-cased internal vocabulary, precisely so this layer stays
-platform-neutral to whatever reads it next.
+a capture/resolution pair. (AT-SPI events were once the candidate acquisition
+layer for a Wayland recorder; the Phase-0 spike measured that they carry
+effects, never the input itself, and the `wayland` backend reads `/dev/input`
+below the compositor instead — see the exception above.) The event model here
+is deliberately free of X11 vocabulary — `RawEvent.keysym` is spelled the way
+X11 itself spells it, which `win32.py`, `macos.py` and `wayland.py` all
+reproduce by hand rather than borrowing pyguitest's own lower-cased internal
+vocabulary, precisely so this layer stays platform-neutral to whatever reads
+it next.
 
 ### Recording and replaying are different questions
 
-**Recording** needs X11 or XWayland, native Windows, or macOS, for the reason
-above. On Linux under a Wayland session that means XWayland clients and nothing
-else, which the recording and the generated script's header both say.
+**Recording** needs X11 or XWayland, native Windows, macOS — or, with the
+experimental `wayland` backend, read access to the kernel's input devices
+below a Wayland compositor. Under a Wayland session the *default* backend
+reaches XWayland clients and nothing else, which the recording and the
+generated script's header both say; the `wayland` backend records the whole
+session, native clients included.
 
 **Replaying** is pyguitest's problem, not this tool's, and it goes further —
 pyguitest injects on Wayland through portals, libei and per-compositor IPC.

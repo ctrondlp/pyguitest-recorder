@@ -22,18 +22,22 @@ What it sees and does not:
   value), clamped to the screen -- and every click, scroll and motion is
   stamped through `_stamp()`, which prefers the true position from an attached
   `CursorSource` (the opt-in ScreenCast cursor stream, `screencast_cursor`)
-  over the tracked one. Good enough to attribute a click to a window either
-  way; exact with an absolute device or the cursor stream.
+  over the tracked one. Exact with an absolute device or the cursor stream;
+  the bare delta track's seed is a guess whose offset from the real cursor
+  never self-corrects, so on a relative-only session it can attribute a click
+  to the wrong window -- the gap `screencast_cursor` exists to close.
 - A spike measured on GNOME Wayland that AT-SPI emits no input events at all
   (focus/state changes only), which is why targeting is resolved separately
   and this backend is strictly the input stream.
 
-Keys are decoded under the session's own layout through `libxkbcommon`
-(`_xkb.py`); only where that library will not load does translation fall back
-to the fixed US table in `_evdev_keysyms` -- which is then the same limitation
-pyguitest's uinput replay carries. The stop chord is not recognised
-here: `stop_pressed_at` stays None and the consumer's own recogniser ends the
-recording, which base.py explicitly allows.
+Keys are decoded through `libxkbcommon` (`_xkb.py`) under the layout the
+`XKB_DEFAULT_*` variables name -- not the compositor's active keymap, and a
+runtime layout switch is not tracked; an environment that exports none of them
+decodes as the library's built-in default (US). Only where the library will
+not load does translation fall back to the fixed US table in `_evdev_keysyms`
+-- which is then the same limitation pyguitest's uinput replay carries. The
+stop chord is not recognised here: `stop_pressed_at` stays None and the
+consumer's own recogniser ends the recording, which base.py explicitly allows.
 """
 
 from __future__ import annotations
@@ -82,7 +86,13 @@ def _evdev() -> ModuleType:
         raise CaptureUnavailable(
             "python-evdev is not installed or not usable on this platform"
         ) from exc
-    return evdev
+    # Annotated rather than returned directly: CI's lint job runs mypy in an
+    # environment without evdev installed, where the import resolves to Any
+    # and a bare `return evdev` fails strict's no-any-return. An ignore or a
+    # cast would be flagged as unused/redundant wherever evdev IS installed,
+    # so the annotation is the one spelling that type-checks in both.
+    module: ModuleType = evdev
+    return module
 
 
 def drm_screen_size() -> tuple[int, int] | None:
@@ -131,18 +141,31 @@ def pick_devices() -> list[str]:
             with contextlib.suppress(OSError):
                 dev.close()
             continue
-        keys = set(caps.get(e.EV_KEY, []))
-        is_keyboard = e.KEY_A in keys
-        is_pointer = (
-            bool({e.BTN_LEFT, e.BTN_TOUCH} & keys)
-            or e.EV_REL in caps
-            or e.EV_ABS in caps
-        )
-        if is_keyboard or is_pointer:
+        if _wants_device(e, caps):
             chosen.append(path)
         with contextlib.suppress(OSError):
             dev.close()
     return chosen
+
+
+def _wants_device(e: Any, caps: dict[Any, Any]) -> bool:
+    """Whether a device's capabilities make it a keyboard or a pointer.
+
+    A keyboard is recognised by `KEY_A`. A pointer must carry pointer
+    *buttons* (BTN_LEFT/BTN_TOUCH) or relative pointer axes (REL_X/REL_Y, or
+    a wheel). EV_ABS alone is deliberately NOT a pointer: gamepads expose ABS
+    sticks and accelerometer nodes expose ABS axes, and treating those as
+    pointers captured joystick noise as motion and -- worse -- let
+    `_learn_abs_range` seed the pointer position from a stick's resting
+    value.
+    """
+    keys = set(caps.get(e.EV_KEY, []))
+    if e.KEY_A in keys:
+        return True
+    if {e.BTN_LEFT, e.BTN_TOUCH} & keys:
+        return True
+    rel = set(caps.get(e.EV_REL, []))
+    return bool({e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL} & rel)
 
 
 def available() -> bool:
@@ -259,7 +282,14 @@ class WaylandCaptureBackend:
             return  # the device vanished between open and this ioctl
         if e.EV_ABS not in caps:
             return
-        if e.BTN_TOOL_FINGER in set(caps.get(e.EV_KEY, [])):
+        keys = set(caps.get(e.EV_KEY, []))
+        if not ({e.BTN_LEFT, e.BTN_TOUCH} & keys):
+            # ABS axes with no pointer button: a gamepad stick, an
+            # accelerometer. Guarded here as well as in `_wants_device`
+            # because an explicit `paths` list bypasses the picker, and a
+            # stick's resting value must never become the pointer's seed.
+            return
+        if e.BTN_TOOL_FINGER in keys:
             self._padlike_fds.add(dev.fileno())
             return
         absinfo = dict(caps[e.EV_ABS])

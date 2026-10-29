@@ -1275,6 +1275,47 @@ def test_focus_fallback_is_off_without_the_wayland_flag():
     assert plain.resolve(640, 400).element is None
 
 
+def test_wayland_focus_fallback_names_on_a_pidless_window_backend():
+    # kdotool's KWin UUIDs and COSMIC's toplevel-info publish no window pid,
+    # and native-Wayland extents are window-relative -- so neither pid nor
+    # geometry can confirm ownership and `_belongs` alone left this fallback
+    # dead on exactly the compositors it exists for. The element's own
+    # ancestry toplevel matching the window's title is the one fact left,
+    # the same rule the typed-text path already trusts.
+    session = WaylandFocusSession()
+    session.window = FakeWindow(title="Target", pid=None)
+    target = wayland_resolver(session).resolve(640, 400)
+    assert target.element is not None
+    assert target.element.name == "Primary Action"
+
+
+def test_wayland_pidless_title_match_still_honours_ignore_pids():
+    # The recorder's own terminal must stay excluded even where the window
+    # cannot say whose it is -- the element's own pid, which AT-SPI still
+    # knows, carries the exclusion.
+    session = WaylandFocusSession()
+    session.window = FakeWindow(title="Target", pid=None)
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+        ignore_pids={77},
+    )
+    assert r.resolve(640, 400).element is None
+
+
+def test_wayland_pidless_title_mismatch_stays_a_coordinate():
+    # A focused widget whose own toplevel is some other window must not be
+    # borrowed just because the window under the click cannot prove anything.
+    frame = FakeElement("frame", "Another Window")
+    focused = FakeElement("entry", "Name", pid=77, parent=frame)
+    session = WaylandFocusSession(focused=focused)
+    session.window = FakeWindow(title="Target", pid=None)
+    assert wayland_resolver(session).resolve(640, 400).element is None
+
+
 class FakeEffectLog:
     """Stands in for AtspiEffectLog: answers `nearest` from a fixed list."""
 

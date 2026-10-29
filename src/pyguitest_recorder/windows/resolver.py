@@ -1005,6 +1005,29 @@ class DesktopResolver:
             ref = self._describe_element(element)
         except Exception:  # noqa: BLE001 - an unreadable tree is no answer
             return None
+        if ref.pid in self.ignore_pids:
+            # The recorder's own terminal holds focus between the user's
+            # actions; borrowing its widgets would name the tool in the
+            # recording. The element's own pid carries the exclusion -- the
+            # same rule the typed-text path applies -- and it has to come
+            # before any ownership check, which can accept on geometry alone.
+            return None
+        title = getattr(window, "title", "") or ""
+        if window.pid is None and title:
+            # A window backend with no pid capability (kdotool's KWin UUIDs,
+            # COSMIC's toplevel-info) can never answer ownership by process,
+            # and native-Wayland extents are window-relative, so geometry is
+            # noise in both directions -- `_belongs` left this fallback dead
+            # on exactly the compositors it exists for, or accepting on a
+            # coordinate coincidence. The element's own ancestry names the
+            # toplevel it descends from (the fact the typed-text path already
+            # trusts), so where it speaks it decides, both ways.
+            toplevel = next(
+                (name for role, name in reversed(ref.path) if role in WINDOW_ROLES),
+                "",
+            )
+            if toplevel:
+                return ref if toplevel == title else None
         return ref if self._belongs(ref, window) else None
 
     def _foreign_reason(self, element: ElementRef, window: WindowRef | None) -> str:

@@ -22,8 +22,10 @@ was released.
   a Wayland machine alike — and the substitution is never silent, the generated
   header says `Capture: wayland-evdev`. Naming `display` alongside the wayland
   backend is refused before recording rather than ignored. Keys are decoded
-  under the session's real keyboard layout via `libxkbcommon` (bound through
-  ctypes) where present, and through a fixed US table otherwise. Clicks the
+  via `libxkbcommon` (bound through ctypes) under the layout the
+  `XKB_DEFAULT_*` variables name — an environment that exports none decodes as
+  the library's default (US), and a mid-recording layout switch is not
+  tracked — and through a fixed US table where the library is absent. Clicks the
   coordinate path cannot name on native Wayland — where `element_at` is refused
   because a client is not told its screen position — are named instead from
   keyboard focus and a live AT-SPI effect log, which only ever *add* a name

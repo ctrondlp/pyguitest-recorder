@@ -34,9 +34,9 @@ claiming everything works.
 
 ## Wayland: the evdev backend run live on KDE Plasma 6 (2026-10-27)
 
-The fourth capture backend's first full validation, on a native-Wayland KWin
-session (Fedora 44 KDE, a VirtualBox guest, reached over SSH with the session
-environment exported). Everything below used the project's own replay stack as
+The fourth capture backend's first full validation, on a native-Wayland
+KDE Plasma 6 / KWin session, driven remotely with the session environment
+exported. Everything below used the project's own replay stack as
 the input source -- pyguitest's uinput devices are real `/dev/input` nodes, so
 an injected session is captured exactly as a human one would be.
 
@@ -60,7 +60,7 @@ came out as:
   unidentified and the verbatim-text warning is in the notes);
 - `gui.expect_window('TortureTest', timeout=10)` for the 1.98s the recording
   observed, then a **window-relative** click: the absolute coordinates came
-  from the VirtualBox tablet's device units scaled through its absinfo range
+  from the VM's absolute tablet device's units scaled through its absinfo range
   to the screen the DRM connector reports (1280x800, agreeing with
   kscreen-doctor), and the resolver attributed them to the fixture's window.
 - The stop chord ended the stream (`Escape (1/2) -- press again within 2s`).
