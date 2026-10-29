@@ -815,7 +815,7 @@ class Normalizer:
 
     def _target(self, raw: RawEvent) -> Target:
         """Resolve what was under the pointer when this event happened."""
-        return self.resolver.resolve(raw.x, raw.y, raw.screen)
+        return self.resolver.resolve(raw.x, raw.y, raw.screen, when=raw.timestamp)
 
     def _window_target(self, raw: RawEvent) -> Target:
         """Resolve only the window under the pointer, for a recorded move.

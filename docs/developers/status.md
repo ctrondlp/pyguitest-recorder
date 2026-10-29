@@ -28,7 +28,210 @@ claiming everything works.
 | macOS capture (event tap, keycodes, availability) | run live on a granted macOS 26.7 Mac over SSH -- translation, modifier flags and teardown measured; see below |
 | macOS record -> generate -> replay -> re-record | run live on the same Mac -- two recordings, two generated scripts, compared event by event; see below |
 | macOS window/element context (which backends, and the wording of every note) | run live on the same Mac -- `probe_context` and a full round trip, both halves resolving, no notes; see below |
+| wayland (evdev) capture, decode, coordinate scaling | tested (virtual uinput round-trip + fake-event decode); run live on all five fleet compositors -- KWin, GNOME/Mutter, COSMIC, Hyprland, niri; see below |
+| wayland record -> generate -> replay, auto fallback, `--doctor` | run live on a native-Wayland KDE Plasma 6 session -- see below |
 | win32 hook health (a hook Windows removed silently) | run live on Windows 11 -- a real hook removed by hand, reported 2.7s later; see below |
+
+## Wayland: the evdev backend run live on KDE Plasma 6 (2026-10-27)
+
+The fourth capture backend's first full validation, on a native-Wayland
+KDE Plasma 6 / KWin session, driven remotely with the session environment
+exported. Everything below used the project's own replay stack as
+the input source -- pyguitest's uinput devices are real `/dev/input` nodes, so
+an injected session is captured exactly as a human one would be.
+
+**`--doctor`, both verdicts.** With `backend = "wayland"`:
+`capture: wayland-evdev (available)`, window context yes, element context yes,
+`verdict: ready to record, and clicks will be named`. With an invalid
+setting (`display = ":1"` alongside the wayland backend) the doctor -- and any
+recording attempt -- refuses *before* capture with the full sentence naming
+the setting and the fix, which is the contract: a parameter the backend cannot
+honour is stated up front, never silently dropped.
+
+**Record -> generate -> replay, through `auto`.** Config said `backend =
+"auto"` with no `DISPLAY` in the environment; the fallback selected the evdev
+backend and the generated header says so (`Capture: wayland-evdev`,
+`Recorded on: wayland (kwin, KDE)`). The recorded session -- three Tabs, typed
+text, one pointer click on the fixture's `Primary Action`, Escape twice --
+came out as:
+
+- the Tab taps with their observed inter-key waits;
+- `gui.type_text('hello')` (focus was on a button, so the field is honestly
+  unidentified and the verbatim-text warning is in the notes);
+- `gui.expect_window('TortureTest', timeout=10)` for the 1.98s the recording
+  observed, then a **window-relative** click: the absolute coordinates came
+  from the VM's absolute tablet device's units scaled through its absinfo range
+  to the screen the DRM connector reports (1280x800, agreeing with
+  kscreen-doctor), and the resolver attributed them to the fixture's window.
+- The stop chord ended the stream (`Escape (1/2) -- press again within 2s`).
+
+The generated script **replayed with exit 0** on the same session.
+
+Element *naming* for the click degraded to window-relative coordinates by the
+known pyguitest platform caveat -- AT-SPI extents on native-Wayland clients
+are window-relative, so a screen-coordinate hit test cannot be trusted there
+-- which is the resolver doing what it documents, not a capture gap; on
+XWayland clients the naming path is unchanged. Keyboard-focus attribution on
+pid-less window backends (kdotool's KWin UUIDs publish no pid) resolves by the
+focused element's own ancestry title since this same change, with the
+recorder's own-terminal exclusion preserved by the element's pid.
+
+Keys are decoded under the session's real layout through `libxkbcommon`
+(`backends/_xkb.py`, bound by ctypes against `libxkbcommon.so.0` -- a core
+desktop library -- so there is no build dependency and no PyPI package that
+would need `-devel` headers; it falls back to the fixed US table only where
+the library will not load). `xkb_state` tracks every modifier itself, so
+Shift, AltGr/level3 and Caps are handled, and it yields both the X keysym name
+and the UTF-8 character. Verified against a forced German layout: the QWERTZ
+Y/Z swap and `;`->`odiaeresis` (`ö`) decode correctly (tests/test_xkb.py).
+The layout is read from libxkbcommon's `XKB_DEFAULT_*` resolution; reading the
+compositor's active keymap over `wl_keyboard` is a later refinement.
+
+Remaining limits, stated where users will meet them (getting-started):
+relative-mouse positions tracked from the screen centre (absolute devices --
+tablets, every VM -- are exact), and whole-machine capture, so the privacy
+note applies with full force.
+
+**The relative-mouse absolute-position scaffold (ScreenCast).** The one source
+of a bare-metal relative mouse's true absolute position on Wayland is the
+ScreenCast portal's cursor metadata over PipeWire. `backends/_screencast.py`
+is the process-isolated front for it: `CursorSource` spawns a helper
+subprocess and reads `x y` lines, tolerating garbage, silence or a crash
+without ever raising into the recorder (tested). `_screencast_portal.py`
+implements the portal negotiation -- CreateSession / SelectSources
+(cursor_mode = metadata) / Start / OpenPipeWireRemote -- and `_pipewire.py` is
+the PipeWire cursor *reader*: it binds `libpipewire-0.3.so.0` through ctypes,
+hand-builds the SPA pods the stream needs, connects an input stream to the
+portal node, requests `SPA_META_Cursor` on the buffers, and emits each
+`spa_meta_cursor` position. **Validated live on GNOME 51 Mutter**: real cursor
+positions stream end-to-end through the production path (`CursorSource` ->
+helper -> `open_cursor_stream` -> reader), 500+ positions tracking the mouse.
+Two things that cost real debugging and are worth keeping written down: the SPA
+`spa_type` enums start at a `START=0` sentinel, so `SPA_TYPE_Object` is **15**
+(14 is Struct) -- getting this wrong makes `pw_stream_update_params` reject
+every pod with `!spa_pod_is_object`; and the requested cursor-meta *size* range
+must reach Mutter's fixed `CURSOR_META_SIZE(384, 384)` (~590 KB) or the meta is
+silently dropped from the buffer (a 256x256 max was below it). The reader lives
+in the helper process precisely so a ctypes mistake -- a wrong offset is a
+segfault, not an exception -- can never reach a recording. It is wired into the
+recording path behind the **`screencast_cursor`** opt-in (default off): when
+set, `_choose_wayland` builds a `CursorSource`, the `WaylandCaptureBackend`
+starts and stops it, and while it has a position `_stamp()` puts that true
+position on every click, scroll and motion instead of the centre-seeded
+delta-tracked one. Off, the backend is byte-for-byte unchanged. It is opt-in
+rather than automatic because it raises a consent dialog (so it cannot run
+unattended) and is only needed for a bare-metal relative-only mouse -- every VM
+pointer and tablet is absolute and already exact. Validated end-to-end on GNOME
+51: a captured click came back stamped with the live ScreenCast cursor position
+through the real `CursorSource` -> backend path, and a denied/absent source
+degrades to the delta tracking rather than failing.
+
+**Naming a click on native Wayland, and the validation wall.** `element_at`
+is refused on native Wayland (a client is not told its screen position), so a
+click is named from what the toolkit publishes, not a coordinate hit-test. Two
+paths, both gated to the wayland backend and both strictly additive -- they
+only ever turn a bare coordinate into a name, never change another platform:
+- *Focus* (`DesktopResolver._focus_element_in`): a focus-taking control (an
+  entry, a checkbox) holds keyboard focus after a click, and `focused()` names
+  it. This is the path the Password field above was named through.
+- *Effect log* (`windows/atspi_effects.py`): a tab, combo, list or tree item
+  publishes a selection event when chosen. Measured on the Qt bridge, that
+  event's source is the *container* (a page-tab list, the tree), so the log
+  unwraps the selected *child* -- `_widget_of` -- which is the widget acted on.
+A plain push button publishes no observable event and the resolver's `_belongs`
+check rejects the container focus it does see, so it stays an honest
+coordinate -- which is the right answer, not a wrong name.
+
+The validation wall is the test method, not the code: **injected pointer
+clicks do not land on KWin Wayland.** Measured here -- `gui.click()` (uinput)
+left the fixture's status unchanged while the AT-SPI *action* click updated it
+("Clicked: Primary Action") -- which is the same uinput-pointer gap the torture
+fleet documents, and why its drivers click through actions. uinput *keyboard*
+does land (the 504-keystroke run, the named Password field prove it), so the
+keyboard and focus paths are validated; the effect-log click path is built and
+unit-tested but cannot be exercised by injection here (an AT-SPI action bypasses
+the input layer, and libei/eiinput injection bypasses `/dev/input`, so neither
+is both landable and capturable). It needs a real human click, or a Wayland box
+whose uinput pointer lands -- the fleet session.
+
+**Repeatability and two limitations the repetition found.** Five back-to-back
+record -> generate -> replay cycles on the same session all came out identical
+and all replayed exit 0. The first pass exposed two gaps the single run above
+had not, both now fixed with hardware round-trip tests and re-verified 10/10
+pixel-exact (the recorded click reconstructs to the injected pixel, delta
+(0,0)):
+
+- *A click with no motion before it stamped (0, 0).* The recorder knew the
+  pointer's position only from motion it had observed, so a click onto a spot
+  the pointer was already at -- the second and later cycles, which aimed at the
+  same control -- carried the origin. Fixed by seeding the position from the
+  absolute device's *current* value at `start`, so the first click lands where
+  the pointer actually is even with no motion first.
+- *A device appearing mid-recording was missed.* Auto-picked capture now
+  rescans `/dev/input` every couple of seconds, so a mouse plugged in or a
+  tool's uinput device created after capture began is picked up rather than
+  silently dropped -- which is also how the long run below captured the
+  driver's device, created after the recorder started.
+
+**A full torture driver run recorded end to end.** The 105-control KDE torture
+driver (`drivers/kde.py`) was recorded through `backend = "auto"` from start to
+`all controls verified` (exit 0, 393 s). The recorder captured **542 events
+(511 observed, 31 inferred)** with no loss across the whole run and generated a
+100 KB script that compiles. The driver drives most controls through AT-SPI
+*actions* (no input events exist for those), so the script is the driver's
+**keyboard** stream -- 504 `tap_key`, 2 `type_text` -- which is the right
+answer: an input recorder records input, and an action is not input. One of
+those `type_text`s was the fixture's **Password** field, which the recorder
+recognised and both element-named and redacted:
+`gui.text_field('Password').set_text(SECRET_1)` with
+`SECRET_1 = os.environ["SECRET_1"]`. With that variable supplied the 504-key
+script **replayed exit 0**; without it, replay stops at the missing variable,
+which is fail-closed redaction working, not a defect.
+
+## Wayland: the same capture on five compositors (2026-10-28)
+
+"It records every compositor identically because it goes through none of them"
+is the design claim, and it was run rather than argued: the hardware
+round-trip -- a virtual uinput device injected below the display server,
+captured back through the real `WaylandCaptureBackend`, and decoded -- ran
+live on every Wayland compositor in the test fleet. **KWin** (the full suite
+plus a second record -> generate -> replay over SSH), **GNOME/Mutter** (the
+workstation runs above, plus a kernel-only round-trip on a bare Debian 13),
+**COSMIC** (full suite, 1238 passed, round-trip repeated), **Hyprland** and
+**niri** (the complete `test_wayland.py` hardware-and-decode module, 29/29 on
+each -- for niri, the first live validation of anything in this project on
+that compositor). Typed text comes back decoded, clicks come back as
+press/release pairs, on every one of them.
+
+Two facts the fleet taught, now encoded in the suite:
+
+- **The `input` group is not one grant but two tiers.** Reading
+  `/dev/input/event*` -- all that *capture* needs -- is the `input` group or
+  an ACL. *Writing* `/dev/uinput` -- what the round-trip's input synthesis
+  and pyguitest's own replay need -- is a separate permission: Pop!_OS and
+  KaOS ship a logind uaccess ACL that grants it to the seated user, while
+  Arch leaves the node `root:root 0600`, where it takes a udev rule
+  (`KERNEL=="uinput", GROUP="input", MODE="0660"`) or a per-boot `setfacl`.
+  A box can therefore capture but not synthesize, and the suite's skip guard
+  distinguishes exactly that.
+- **A fresh uinput device's event node appears asynchronously** (udev
+  creates it after the device exists), so probing capability by creating a
+  device races -- it once skipped a fully-permissioned box. The guard now
+  checks node *access* directly (`os.access`, which honours those ACLs), and
+  the harness waits out the node's appearance instead of reading a path that
+  is not there yet.
+
+Those round-trip tests inject *real* input -- the typed keys and the click
+land in whatever has focus on the box running them -- so they are opt-in:
+they run only with `PGT_LIVE_INPUT_TESTS=1` set, which the fleet runs export
+and a developer's desktop, or CI, never should.
+
+The suite as a whole ran green on every OS in the fleet in the same pass:
+GhostBSD (1209), Windows 10 (1145), and macOS (1145 -- the first full-suite
+run on that box, which also exercised the generator's ruff-as-a-module
+fallback in production conditions, since ruff was importable there but not on
+`PATH`). The CI floor interpreter, Python 3.10, was replicated locally with
+the exact CI install (`.[x11,dev]`, no evdev, headless): 1208 passed.
 
 ## The torture fixture: recorded on three platforms, replayed, four bugs (2026-10-14)
 

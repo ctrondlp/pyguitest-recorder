@@ -860,6 +860,21 @@ class TestWindowsEnvironmentSnapshot:
         assert xvfb.xwayland is False
         assert not any("XWayland" in note for note in xvfb.notes)
 
+    def test_a_wayland_evdev_recording_is_native_not_xwayland(self):
+        # evdev reads below the compositor, so every client -- native and
+        # XWayland alike -- is in the recording and no X display is the source
+        # of its coordinates. DISPLAY pointing at the session's XWayland must
+        # neither go into the header nor let the probe brand the whole
+        # recording "xwayland", even though that probe answers True for the
+        # display itself.
+        variables = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-1"}
+        env = self._describe(
+            "wayland-evdev", variables, probed=True, detected="SessionType.WAYLAND"
+        )
+        assert env.display == ""
+        assert env.xwayland is False
+        assert "xwayland" not in env.session_type.lower()
+
     def test_a_probed_xwayland_server_is_said_so_even_when_detection_says_x11(self):
         # The live case: `scoped_environment` strips WAYLAND_DISPLAY before
         # detection sees it, so the classifier can only answer X11 -- and the

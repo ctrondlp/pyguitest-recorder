@@ -4,8 +4,6 @@ The resolver is a fake, so the modules that only need a window with something
 in it run without an X server and without an accessibility bus behind them.
 """
 
-import shutil
-
 import pytest
 
 from pyguitest_recorder.backends.base import RawEvent
@@ -24,7 +22,7 @@ class FakeResolver:
         self.focus = focus
         self.focus_calls = 0
 
-    def resolve(self, x, y, screen=0):
+    def resolve(self, x, y, screen=0, when=None):
         element = None
         for rect, ref in self.elements:
             ex, ey, ew, eh = rect
@@ -128,24 +126,36 @@ def _click_supports_via() -> bool:
 def pytest_collection_modifyitems(config, items):
     """Skip the formatter-dependent tests where `ruff` is not on PATH.
 
-    `generator.python._format` shells out to `ruff format` and is documented
-    to degrade silently when it cannot -- the generated script is still
-    correct, just laid out as the emitter left it. Tests asserting on an
-    exact rendering (`gui.button("Save")`, double-quoted) are therefore
-    asserting that a formatter ran, and on a machine without one they fail
-    for a reason that is not a defect: thirty-three of them did, first on a
-    fresh Windows box and then identically on Linux with ruff hidden from
-    PATH, which is what showed it was never a platform problem.
+    `generator.python._format` runs `ruff format` and is documented to degrade
+    silently when it cannot -- the generated script is still correct, just
+    laid out as the emitter left it. Tests asserting on an exact rendering
+    (`gui.button("Save")`, double-quoted) are therefore asserting that a
+    formatter ran, and on a machine without one they fail for a reason that is
+    not a defect: thirty-three of them did, first on a fresh Windows box and
+    then identically on Linux with ruff hidden from PATH, which is what showed
+    it was never a platform problem.
+
+    The gate asks `_format` itself (via `_ruff_argv`) whether it will format,
+    not merely whether a `ruff` binary is on PATH -- those differ on a box
+    like stock COSMIC, where ruff is importable (`python -m ruff`) but ships
+    no PATH entry point, and `_format` formats through the module there. One
+    detector keeps the skip decision and the production path from drifting.
 
     Skipped rather than loosened. Quote style is not what these tests are
     about, but the alternative -- normalizing the expected string -- would
     quietly stop checking the layout the generated scripts are actually read
     and edited in, which is the thing `_format` exists to guarantee.
     """
-    if shutil.which("ruff") is None:
+    from pyguitest_recorder.generator.python import _ruff_argv
+
+    if _ruff_argv() is None:
+        # The CI windows job greps this reason verbatim ("ruff is
+        # unavailable") to prove the marked tests actually ran there --
+        # reword it and .github/workflows/ci.yml must change with it.
         skip = pytest.mark.skip(
-            reason="`ruff` is not on PATH, so generated output is unformatted; "
-            "install it (pip install ruff) to run the rendering assertions"
+            reason="ruff is unavailable (not on PATH and not importable), so "
+            "generated output is unformatted; install it (pip install ruff) "
+            "to run the rendering assertions"
         )
         for item in items:
             if "needs_ruff" in item.keywords:

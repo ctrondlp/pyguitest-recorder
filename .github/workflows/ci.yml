@@ -277,11 +277,16 @@ jobs:
         # test skips for *any* reason -- the first version of this check
         # failed the job over one unrelated platform skip while all
         # thirty-three had in fact run. `-rs` prints every skip reason, so
-        # the log says which and why without anyone re-running it.
+        # the log says which and why without anyone re-running it. The
+        # pattern below must track the reason string in tests/conftest.py's
+        # `pytest_collection_modifyitems` -- it changed once already, when
+        # the gate learned to find ruff as an importable module and not only
+        # as a PATH binary, and a stale pattern here makes this guard
+        # silently dead rather than red.
         run: |
           set -eo pipefail
           python -m pytest -q -m needs_ruff -rs 2>&1 | tee marked.txt
-          if grep -q "is not on PATH" marked.txt; then
+          if grep -q "ruff is unavailable" marked.txt; then
             echo "::error::ruff-dependent tests skipped despite the dev extra"
             exit 1
           fi

@@ -30,7 +30,7 @@ from .backends.base import CaptureBackend, CaptureUnavailable
 from .config import Settings
 from .model import Assertion, Environment, Event, Recording, excluded
 from .stopkey import StopKey
-from .windows import ContextResolver, DesktopResolver, NullResolver
+from .windows import AtspiEffectLog, ContextResolver, DesktopResolver, NullResolver
 
 __all__ = [
     "ContextReport",
@@ -225,6 +225,15 @@ def selected_backend_name(settings: Settings) -> str:
         settings.backend == "auto" and sys.platform == "darwin"
     ):
         return "macos"
+    # `wayland` by name selects the evdev backend outright. Under `auto` this
+    # function still answers `xrecord` -- the *name* selection is static --
+    # and `choose_backend` is where auto falls back to wayland when no X
+    # server is reachable, because that answer needs a live probe this
+    # function must not make: everything reading a name off the settings
+    # (desktop classification, the doctor's wording) would otherwise open
+    # display connections as a side effect.
+    if settings.backend == "wayland":
+        return "wayland"
     if settings.backend in ("auto", "xrecord"):
         return "xrecord"
     return ""
@@ -303,7 +312,51 @@ def choose_backend(settings: Settings) -> CaptureBackend:
         return _choose_win32(settings)
     if name == "macos":
         return _choose_macos(settings)
-    return _choose_xrecord(settings)
+    if name == "wayland":
+        return _choose_wayland(settings)
+    try:
+        return _choose_xrecord(settings)
+    except CaptureUnavailable:
+        # `auto` on a Linux desktop prefers xrecord, unchanged -- but where no
+        # X server is reachable because the session is Wayland (the case that
+        # used to end here with xrecord's refusal), the evdev backend can
+        # record instead, so one configuration serves every machine. Three
+        # gates, because the substitute reads machine-wide input devices:
+        # only for `auto`, never for an explicit `xrecord`; an explicit
+        # `display` keeps xrecord's own refusal, because it asked for an X
+        # server by name; and only where the session itself says it is
+        # Wayland -- an X11 session whose XRecord is merely broken, or a
+        # session-less shell, must get xrecord's own error rather than be
+        # silently switched to global capture. The wayland backend announces
+        # itself in the recording header (`Capture: wayland-evdev`), so the
+        # substitution is never silent.
+        if settings.backend != "auto" or settings.display is not None:
+            raise
+        if not _session_says_wayland():
+            raise
+        from .backends.wayland import available as wayland_available
+
+        if not wayland_available():
+            raise
+        return _choose_wayland(settings)
+
+
+def _session_says_wayland() -> bool:
+    """Whether this process's own session advertises itself as Wayland.
+
+    The auto fallback to the evdev backend is gated on this: reading
+    `/dev/input` is machine-wide capture, so it must never be reached from an
+    X11 session whose XRecord merely failed. `XDG_SESSION_TYPE` is
+    authoritative where set (an explicit ``x11`` always refuses); a set
+    `WAYLAND_DISPLAY` covers compositors started without the session type
+    exported. A bare shell with neither -- a plain ssh login -- selects
+    nothing: recording over ssh names `backend = "wayland"` explicitly, which
+    this gate does not apply to.
+    """
+    session = os.environ.get("XDG_SESSION_TYPE", "")
+    if session == "x11":
+        return False
+    return session == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _choose_win32(settings: Settings) -> CaptureBackend:
@@ -347,6 +400,53 @@ def _choose_macos(settings: Settings) -> CaptureBackend:
         screen=settings.screen,
         stop_key=StopKey.from_settings(settings),
     )
+
+
+def _choose_wayland(settings: Settings) -> CaptureBackend:
+    """The evdev backend, or explain why this machine cannot offer it.
+
+    Like `_choose_macos`, the commonest unavailability is a permission rather
+    than a missing dependency: `/dev/input/event*` is readable only to the
+    `input` group (or via a udev ACL), the same tier pyguitest's own uinput
+    replay needs, so `available()` returning False usually means "add this user
+    to the `input` group" rather than "install something". The stop chord is
+    not handed over: this backend does not recognise it mid-capture, so the
+    consumer's own recogniser ends the recording (see backends/wayland.py).
+
+    A setting this backend cannot honour is refused here, before a recording
+    starts, rather than ignored: `display` names an X server, and an evdev
+    reader has no display to choose -- a recording made while silently
+    dropping it would not be the recording that was configured. `screen` is
+    the opaque per-event tag it is on every backend, so it is carried, not
+    refused.
+    """
+    from .backends.wayland import WaylandCaptureBackend, available
+
+    if settings.display is not None:
+        raise CaptureUnavailable(
+            f"display = {settings.display!r} is an X11 setting the wayland "
+            "backend cannot honour: it reads /dev/input below the compositor "
+            "and has no display to choose. Remove `display` from the "
+            'configuration, or record with backend = "xrecord" against that '
+            "X server instead."
+        )
+    if not available():
+        raise CaptureUnavailable(
+            "no readable evdev input device -- the wayland backend reads "
+            "/dev/input/event*, which needs membership in the 'input' group "
+            "or a udev ACL (the same access pyguitest's uinput replay needs)"
+        )
+    cursor = None
+    if settings.screencast_cursor:
+        # Opt-in: the true cursor position via the ScreenCast portal, for a
+        # bare-metal relative-only mouse. Built only after every validation
+        # above has passed, and construction is deliberately inert -- the
+        # helper subprocess (and its consent dialog) starts with the backend,
+        # never from selection or `--doctor`.
+        from .backends._screencast import CursorSource
+
+        cursor = CursorSource()
+    return WaylandCaptureBackend(screen=settings.screen, cursor_source=cursor)
 
 
 def _choose_xrecord(settings: Settings) -> CaptureBackend:
@@ -413,6 +513,14 @@ def describe_environment(
     # just as misleading about where the coordinates came from. `xrecord` on a
     # Mac keeps its display, exactly as it does on Windows.
     native = windows or _macos_desktop(backend_name)
+    # A wayland-evdev recording is native in the same sense: it reads the
+    # kernel's devices below the compositor, so no X display is the source of
+    # its coordinates -- `DISPLAY` pointing at the session's XWayland (or a
+    # stray Xvfb) must neither go into its header nor make the probe below
+    # brand the whole recording "xwayland". The recording sees every client,
+    # native and XWayland alike, which is exactly what session_type "wayland"
+    # from detection says.
+    wayland_native = backend_name.startswith("wayland")
     # From the environment this was *handed*, not the ambient one. `env`
     # already carries the display actually being recorded -- `scoped_environment`
     # puts `--display` into it -- and reading `os.environ` instead recorded the
@@ -420,7 +528,7 @@ def describe_environment(
     # which is the one fact that header exists to carry. It also decides which
     # server the XWayland probe below asks.
     source = env if env is not None else os.environ
-    environment.display = "" if native else source.get("DISPLAY", "")
+    environment.display = "" if native or wayland_native else source.get("DISPLAY", "")
     # Ask the server being recorded, and only guess where it cannot be asked.
     #
     # Detection alone cannot answer this, because the environment it is handed
@@ -439,8 +547,14 @@ def describe_environment(
     # session -- both have the two variables set, and only the first is an
     # XWayland recording. The environment heuristic stays as the fallback for
     # a host with no python-xlib, where nothing can be asked.
-    probed = _is_xwayland_display(environment.display) if not native else None
-    if probed is not None:
+    skip_probe = native or wayland_native
+    probed = _is_xwayland_display(environment.display) if not skip_probe else None
+    if wayland_native:
+        # Not an XWayland recording by definition -- evdev captures below the
+        # compositor, X clients and native clients alike -- even though a
+        # Wayland desktop usually has both variables set.
+        environment.xwayland = False
+    elif probed is not None:
         environment.xwayland = probed
     else:
         environment.xwayland = not native and (
@@ -529,6 +643,7 @@ class Recorder:
     _backend: CaptureBackend | None = field(default=None, init=False)
     _session: Any = field(default=None, init=False)
     _resolver: ContextResolver = field(default_factory=NullResolver, init=False)
+    _effect_log: AtspiEffectLog | None = field(default=None, init=False)
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
     _consuming: bool = field(default=False, init=False)
@@ -610,12 +725,30 @@ class Recorder:
         opening: list[str] = []
         self._session = self._open_session(display, opening)
         self._resolver = self._open_resolver()
+        # On native Wayland, a click the coordinate path cannot place is named
+        # from the AT-SPI event it fired -- but that event names the *selected
+        # child*, not its container source (the Qt bridge fires selection on a
+        # page-tab list, a list, a tree), which `AtspiEffectLog._widget_of`
+        # unwraps. The log collects from before the first click and feeds the
+        # resolver it was just given; off everywhere else, and a failed start
+        # (no gi) simply leaves clicks on coordinates, not an error.
+        if self._on_wayland() and isinstance(self._resolver, DesktopResolver):
+            log = AtspiEffectLog()
+            if log.start():
+                self._effect_log = log
+                self._resolver.effects = log
         # Before capture starts, so that every window already open is known by
         # the title it had before anything was recorded into it -- see
         # `DesktopResolver.prime`.
         self._resolver.prime()
+        # The scoped environment strips WAYLAND_DISPLAY so a recording of X
+        # clients is not described as a Wayland session -- but a wayland-evdev
+        # recording is OF the Wayland session, so scoping it hid the one
+        # variable that identifies what was recorded and every header came out
+        # "Recorded on: unknown (none)" (seen live on KWin and COSMIC).
+        env = dict(os.environ) if self._on_wayland() else scoped_environment(display)
         self.recording.environment = describe_environment(
-            self._session, self._backend.name, scoped_environment(display)
+            self._session, self._backend.name, env
         )
         self.recording.environment.notes.extend(opening)
         if isinstance(self._resolver, DesktopResolver):
@@ -1014,6 +1147,12 @@ class Recorder:
         Idempotent, since both can happen for one recording.
         """
         self._resolver.close()
+        if self._effect_log is not None:
+            # After the resolver, since a consumer still catching up may ask it
+            # to name one last click; best effort, like the session below.
+            with contextlib.suppress(Exception):
+                self._effect_log.stop()
+            self._effect_log = None
         if self._session is not None:
             # Teardown is best effort: a backend that already lost its
             # connection must not stop the recording being saved.
@@ -1050,6 +1189,19 @@ class Recorder:
             self.settings
         )
         return _macos_desktop(name)
+
+    def _on_wayland(self) -> bool:
+        """Whether what is being recorded is a native Wayland desktop.
+
+        The same rule as `_on_windows`: the capture backend decides, and the
+        settings answer only where there is no backend yet. The evdev backend
+        records the compositor's own screen space, which is what makes the
+        context pair below the right one for it.
+        """
+        name = getattr(self._backend, "name", "") or selected_backend_name(
+            self.settings
+        )
+        return name in ("wayland", "wayland-evdev")
 
     def _context_backends(self) -> tuple[str, ...]:
         """The pyguitest backends that answer "which window, which element".
@@ -1089,6 +1241,14 @@ class Recorder:
             return ("macos",) if asked else ()
         if self._on_windows():
             window, element = "win32", "uia"
+        elif self._on_wayland():
+            # A native-Wayland recording cannot be asked about through `x11`
+            # (it cannot drive the session at all). pyguitest's `windows`
+            # factory is the compositor's own window tier -- kdotool on KWin,
+            # the Shell extension on Mutter, the IPC backends on wlroots --
+            # and it answers in the same screen space the evdev backend's
+            # coordinates are scaled to.
+            window, element = "windows", "atspi"
         else:
             window, element = "x11", "atspi"
         wanted = []
@@ -1166,7 +1326,14 @@ class Recorder:
         wanted = list(self._context_backends())
         if not wanted:
             return None
-        scoped = scoped_environment(display)
+        # The native-Wayland context pair ("windows" + "atspi") connects to
+        # the compositor and the session's accessibility bus, both of which
+        # live in the ambient environment -- scoping it for an X display
+        # stripped WAYLAND_DISPLAY and the connect failed on every compositor
+        # ("backend 'windows'/'atspi' cannot drive this session", seen live on
+        # KWin and COSMIC), degrading every recording to bare coordinates.
+        # Every other backend keeps the X-scoped view for the reasons above.
+        scoped = dict(os.environ) if self._on_wayland() else scoped_environment(display)
         session, failure = self._connect(wanted, scoped)
         if session is None:
             notes.append(
@@ -1265,6 +1432,7 @@ class Recorder:
             resolve_windows=self.settings.window_context,
             windows=self._on_windows(),
             macos=self._on_macos(),
+            wayland=self._on_wayland(),
         )
 
     def _normalizer_options(self) -> NormalizerOptions:
@@ -1374,5 +1542,13 @@ def _version() -> str:
 
 
 def _now() -> float:
-    """The recording clock, matching the capture backend's."""
+    """The recording clock: `time.monotonic`, every backend's stamp domain.
+
+    x11 and win32 stamp with it directly, macos documents that
+    `CGEventGetTimestamp` is the same mach clock, and wayland rebases the
+    kernel's CLOCK_REALTIME evdev stamps onto it at capture -- so an event's
+    age (`_now() - event.timestamp`) is a real backlog measurement on all of
+    them, which the lag notes and the analyzer's password focus-lag gate
+    depend on.
+    """
     return time.monotonic()

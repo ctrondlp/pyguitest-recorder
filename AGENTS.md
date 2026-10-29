@@ -63,7 +63,11 @@ This tool exists to record and replay real input against a real desktop —
 recording a session or replaying a generated script moves the actual mouse
 and clicks real windows. Don't do either against the user's own live
 desktop without telling them first and letting them confirm, the same as
-any other real-GUI action.
+any other real-GUI action. The suite's hardware round-trip tests
+(`tests/test_wayland.py::TestHardwareRoundTrip`) are the same kind of action
+— they inject real keystrokes and a real click that land in whatever has
+focus — so they run only with `PGT_LIVE_INPUT_TESTS=1` set, which is for a
+test box, not a desktop someone is using.
 
 If a live Windows box is available for testing the win32 capture path, see
 `pyguitest`'s AGENTS.md for the logistics (a `SetWinEventHook` gotcha in
@@ -73,7 +77,9 @@ through the same backend).
 **A platform-specific change needs a live check on that platform before it
 ships, not just this repo's mocked test suite.** If a change touches a
 capture backend (`backends/windows.py` or the win32 hook path, X11/XRecord,
-or `backends/macos.py`'s `CGEventTap`), the resolver's platform-specific
+`backends/wayland.py`'s evdev reader — which has five live compositors to
+answer to, see `docs/developers/status.md` — or `backends/macos.py`'s
+`CGEventTap`), the resolver's platform-specific
 branches (`windows/resolver.py`), or anything else that isn't shared,
 platform-agnostic logic, run it against a real desktop on each platform it
 touches before bumping the version. CI's fakes verify logic; they can't

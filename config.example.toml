@@ -13,11 +13,18 @@
 [capture]
 # display = ":0"          # unset means $DISPLAY
 screen = 0
-backend = "auto"          # "auto", "xrecord", "win32" or "macos". "auto" picks the
-                          # platform's own backend: win32 on Windows, macos on macOS,
-                          # xrecord everywhere else -- including a Mac running XQuartz,
-                          # where naming "xrecord" is how you ask for the X server
-                          # instead of the desktop.
+backend = "auto"          # "auto", "xrecord", "win32", "macos" or "wayland".
+                          # "auto" picks the platform's own backend: win32 on
+                          # Windows, macos on macOS, xrecord everywhere else --
+                          # including a Mac running XQuartz, where naming
+                          # "xrecord" is how you ask for the X server instead of
+                          # the desktop. On a session with no reachable X server
+                          # at all, "auto" falls back to "wayland" (evdev below
+                          # the compositor), so one file serves every machine;
+                          # that backend needs read access to /dev/input (the
+                          # "input" group, or a udev ACL) and the [wayland]
+                          # extra installed, and never engages when `display`
+                          # is set -- that asks for an X server by name.
 # Both of these are chords: "Escape", "ctrl+Escape", "ctrl+shift+F1". They
 # match exactly, so binding ctrl+F1 leaves ctrl+shift+F1 to the application.
 stop_key = "Escape"       # key that ends a recording
@@ -36,6 +43,14 @@ check_key = "ctrl+1"      # records a check on what is under the pointer;
 announce_checks = true    # print each check to the terminal as it happens
 window_context = true     # open a pyguitest session to identify windows
 element_context = true    # resolve clicks to AT-SPI elements
+screencast_cursor = false # Wayland only: read the true cursor position from
+                          # the ScreenCast portal, for a bare-metal relative-
+                          # only mouse whose position is otherwise tracked from
+                          # the screen centre. Raises a one-time "Share your
+                          # screen?" consent dialog, so it is off by default and
+                          # cannot run unattended; pointless for an absolute
+                          # device (every VM pointer and tablet is already
+                          # exact) and ignored on every backend but "wayland".
 
 [analyzer]
 motion_threshold = 8        # pixels; below this a press/release is a click
