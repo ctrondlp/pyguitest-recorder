@@ -9,6 +9,7 @@ import ast
 import inspect
 import math
 import re
+import sys
 
 import pytest
 
@@ -232,6 +233,7 @@ def test_select_wins_over_a_click_action_where_selecting_is_the_act(window, role
     assert ".click()" not in source
 
 
+@pytest.mark.needs_ruff
 def test_a_selectable_menu_item_still_clicks(window):
     # AT-SPI marks menu items SELECTABLE; selecting one only highlights it.
     item = ElementRef(
@@ -563,6 +565,7 @@ def test_hotkey_uses_send_keys_grammar():
     assert 'gui.send_keys("^(+(l))")' in render(HotKey(keys=("ctrl", "shift", "l")))
 
 
+@pytest.mark.needs_ruff
 def test_shift_with_a_named_key_keeps_its_shift_in_the_script():
     # Shift+Left selects, Left moves: the recorder used to drop the Shift.
     source = render(HotKey(keys=("shift", "Left")))
@@ -902,6 +905,50 @@ def test_format_output_false_skips_ruff_and_keeps_the_unformatted_rendering(
     assert validate(source) == []
 
 
+class TestRuffDetection:
+    """`_ruff_argv` decides how -- or whether -- `_format` reaches ruff.
+
+    The gate that skips the rendering-assertion tests (conftest) asks this
+    same function, so a box where the two disagreed would either fail those
+    tests or skip them while `_format` quietly formatted anyway.
+    """
+
+    def test_the_path_binary_wins_when_present(self, monkeypatch):
+        monkeypatch.setattr(generator_module.shutil, "which", lambda _: "/usr/bin/ruff")
+        assert generator_module._ruff_argv() == ["/usr/bin/ruff"]
+
+    def test_an_importable_ruff_is_used_when_no_binary_is_on_path(self, monkeypatch):
+        # Stock COSMIC: `python -m ruff` works, but no `ruff` entry point is on
+        # PATH. Formatting must still run -- through the module, with this
+        # interpreter -- not degrade to single-quoted source.
+        monkeypatch.setattr(generator_module.shutil, "which", lambda _: None)
+        monkeypatch.setattr(
+            generator_module.importlib.util,
+            "find_spec",
+            lambda name: object() if name == "ruff" else None,
+        )
+        assert generator_module._ruff_argv() == [sys.executable, "-m", "ruff"]
+
+    def test_none_when_ruff_is_neither_on_path_nor_importable(self, monkeypatch):
+        monkeypatch.setattr(generator_module.shutil, "which", lambda _: None)
+        monkeypatch.setattr(
+            generator_module.importlib.util, "find_spec", lambda name: None
+        )
+        assert generator_module._ruff_argv() is None
+
+    def test_a_find_spec_that_raises_is_treated_as_absent(self, monkeypatch):
+        # find_spec can raise for a half-installed package; that must read as
+        # "no ruff" and let generation fall back to unformatted source, not
+        # crash the whole render.
+        monkeypatch.setattr(generator_module.shutil, "which", lambda _: None)
+
+        def boom(_name):
+            raise ValueError("broken package state")
+
+        monkeypatch.setattr(generator_module.importlib.util, "find_spec", boom)
+        assert generator_module._ruff_argv() is None
+
+
 def test_function_name_is_used_for_both_the_definition_and_the_call():
     # `main` is never varied in any other test, so a generator that hard-coded
     # `main` at either the `def` or the `if __name__` call site -- rendering
@@ -1128,6 +1175,7 @@ def test_click_via_action_leaves_an_actionless_element_unclicked(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_click_via_unsupported_route_warns_even_without_a_header(
     monkeypatch, window, save_button
 ):
@@ -1647,6 +1695,7 @@ def test_an_unresolvable_collision_warns_instead_of_guessing(window):
     assert validate(source) == []
 
 
+@pytest.mark.needs_ruff
 def test_the_same_element_mentioned_twice_is_not_treated_as_a_collision(window):
     # One widget, clicked twice -- same role, name AND path -- is not a
     # collision, so nothing has to tell it apart from anything. It still
@@ -1981,6 +2030,7 @@ def test_locators_absolute_keeps_the_coordinate_for_an_expandable_row(window):
     assert "gui.double_click()" in source
 
 
+@pytest.mark.needs_ruff
 def test_a_click_in_a_tree_rows_disclosure_gutter_replays_as_the_toggle(window):
     # Measured live on GTK3: a row is opened *and* closed by a single click on
     # the triangle left of its cell -- a double click there toggles twice and
@@ -2118,6 +2168,7 @@ def test_a_nameless_gutter_pair_keeps_the_coordinate_double_click(window):
     assert "gui.double_click()" in source
 
 
+@pytest.mark.needs_ruff
 def test_a_double_click_on_a_named_element_stays_one_gesture(window):
     # Two Element.click() calls are not a double click: each is a separate
     # round trip over the accessibility bus, slower than any toolkit's
@@ -2847,6 +2898,7 @@ class TestKeyActionSettle:
             recording.add(event)
         return generate(recording)
 
+    @pytest.mark.needs_ruff
     def test_the_gap_after_a_chord_is_given_back(self):
         source = self._render(
             [

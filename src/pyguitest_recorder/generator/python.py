@@ -44,12 +44,14 @@ from __future__ import annotations
 
 import ast
 import builtins
+import importlib.util
 import inspect
 import keyword
 import math
 import re
 import shutil
 import subprocess
+import sys
 import textwrap
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, fields
@@ -2980,6 +2982,27 @@ def _sendkeys_atom(key: str) -> str:
     return "{" + key + "}"
 
 
+def _ruff_argv() -> list[str] | None:
+    """How to invoke `ruff format` here, or None when ruff is unavailable.
+
+    Prefer the `ruff` console script on PATH; fall back to running the module
+    with the current interpreter. An environment can have ruff importable
+    without its entry-point script on PATH -- a bare virtualenv, or a distro
+    that ships ruff as a module only -- and there formatting should still run
+    rather than silently emitting unformatted source. `find_spec` keeps us
+    from spawning a doomed subprocess on a machine that simply has no ruff.
+    """
+    ruff = shutil.which("ruff")
+    if ruff is not None:
+        return [ruff]
+    try:
+        if importlib.util.find_spec("ruff") is not None:
+            return [sys.executable, "-m", "ruff"]
+    except (ImportError, ValueError):
+        pass
+    return None
+
+
 def _format(source: str) -> str:
     """Normalize layout with `ruff format`, or return the input unchanged.
 
@@ -2988,12 +3011,12 @@ def _format(source: str) -> str:
     line wrapping right by hand -- and it is the same formatter the project
     lints with, so generated files match hand-written ones.
     """
-    ruff = shutil.which("ruff")
+    ruff = _ruff_argv()
     if ruff is None:
         return source
     try:
         done = subprocess.run(
-            [ruff, "format", "--stdin-filename", "generated.py", "-"],
+            [*ruff, "format", "--stdin-filename", "generated.py", "-"],
             input=source,
             capture_output=True,
             text=True,

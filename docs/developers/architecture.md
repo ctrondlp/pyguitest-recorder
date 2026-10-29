@@ -34,10 +34,44 @@ latency sitting in the hot path of every keystroke of the very session being
 recorded — and whether the compositor re-captures the re-injected synthetic
 events (an infinite loop) is undefined by the spec. That is judged not viable
 as a recorder design, on the compositors that implement the portal at all
-(COSMIC, for one, does not). The AT-SPI event-based acquisition idea at the
-end of this section is the remaining open candidate — and the accurate
-statement remains that "Wayland recording is impossible" was only ever true
-of passive capture.
+(COSMIC, for one, does not). The accurate statement remains that "Wayland
+recording is impossible" was only ever true of passive capture *through the
+display server*.
+
+**The experimental exception, below the compositor.** A Phase-0 spike
+(2026-10-27) settled the two questions this section left open. The AT-SPI
+event idea is *not* an input-acquisition path: measured on GNOME Wayland, a
+passive AT-SPI listener sees effects (focus, state, text-changed, dialogs
+appearing) but never the click or keypress that caused them — it can say which
+widget reacted, not what the user did. The input itself is reachable the one
+way the platform does not mediate: the kernel's `/dev/input` device nodes,
+*below* the compositor, which a process in the `input` group reads directly.
+That is not the tier-6 violation this section rules out — it is not a Wayland
+client observing another client through the display server, it is the same
+privileged device access pyguitest's own `uinput` *replay* already requires,
+one tier, read instead of write. So there is now a fourth, Linux-only capture
+backend (`backends/wayland.py`, the `wayland` name): `auto` still prefers
+`xrecord` wherever an X server is reachable and falls back to this one only
+where none is, so the pure-Wayland trap `choose_backend` describes now ends in
+a recording instead of a refusal. Targets are supplied separately: on native
+Wayland, where `element_at` cannot be trusted (AT-SPI extents there are
+window-relative), the resolver names a click from keyboard focus and from a
+live AT-SPI effect log (`windows/atspi_effects.py`) -- both strictly additive,
+turning a coordinate into a name and never the reverse -- while XWayland
+clients keep the ordinary `element_at` path. (`analyzer/atspi_fusion.py` is
+the offline spike that measured this; the resolver is the production path.)
+It records every compositor identically because it goes through none of them
+-- run live on all five in the fleet: Mutter, KWin, COSMIC, Hyprland and niri.
+Keys decode under the session's real layout through `libxkbcommon`, with a
+fixed US table only where that library will not load; an absolute pointer (a
+tablet, every VM) is scaled exactly, and a relative-only mouse is tracked from
+the screen centre unless the opt-in `screencast_cursor` setting reads the true
+position from the ScreenCast portal's cursor metadata. It stays marked
+experimental for its remaining edges: coordinate scaling assumes a single
+connected output, and a plain push button on a native-Wayland client --
+publishing no focus or selection event -- records as a coordinate. The
+principle is intact: no ordinary Wayland client gained the ability to watch
+another.
 
 X11's RECORD extension, Windows' low-level input hooks and macOS's
 `CGEventTap` are the exceptions — one per platform, which is why they are the

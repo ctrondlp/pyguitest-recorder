@@ -22,7 +22,8 @@ moment the window moves, the theme changes, or someone adds a toolbar item.
 ## Quick start
 
 ```sh
-pip install 'pyguitest-recorder[x11,atspi]'          # Linux, XWayland
+pip install 'pyguitest-recorder[x11,atspi]'          # Linux, X11 / XWayland
+pip install 'pyguitest-recorder[wayland,atspi]'      # Linux, native Wayland
 pip install pyguitest-recorder 'pyguitest[windows]'  # Windows
 pip install 'pyguitest-recorder[macos]'              # macOS
 
@@ -38,11 +39,16 @@ python3 login_test.py                    # replay it (python on Windows)
 > file, and read [Privacy](#privacy) before recording anything that touches a
 > login.
 
-Recording needs X11 or XWayland on a Linux desktop, native Windows, or macOS.
-On Linux that means no Wayland session will do: the recorder reaches XWayland
-clients and nothing else, and says so rather than producing a file with silent
-gaps.
-[Why that is permanent](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md#why-wayland-has-no-capture-backend).
+Recording works on X11 and XWayland, native Windows, macOS, and — with the
+`[wayland]` extra — a native Wayland session. No Wayland *client* can observe
+another's input through the compositor, so the Wayland backend reads the
+kernel's input devices *below* it instead (`/dev/input`, the `input` group,
+the same access replay already needs); `auto` uses it only where no X server
+is reachable, so one install serves an X11 and a Wayland machine alike.
+Keyboard, typed text, and clicks on focus- or selection-taking controls are
+element-named there; a plain button, which the Wayland toolkit publishes no
+observable event for, records as a coordinate.
+[How that works](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md#why-wayland-has-no-capture-backend).
 
 Three flags carry most of the value:
 
@@ -317,8 +323,10 @@ title drifts still be found; earlier versions lack `element_at`/`extents` and
 ## Privacy
 
 Keyboard capture — XRecord on X11 and XWayland, a low-level input hook on
-Windows, an event tap on macOS — sees **every application's keystrokes**, not
-only the one you are recording, including your password manager.
+Windows, an event tap on macOS, the kernel's input devices on native Wayland —
+sees **every application's keystrokes**, not only the one you are recording,
+including your password manager. (The Wayland backend, reading `/dev/input`,
+sees the whole machine's input most of all.)
 
 - Text typed into an AT-SPI password field is detected and never written into
   the generated script; it gets `os.environ["SECRET_1"]` instead. A check
@@ -384,8 +392,9 @@ Notepad), and what GTK4 hit-testing costs — are in
 - [docs/testable-guis.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md) — how to build a GUI that can
   be tested at all; written to be handed to application developers
 - [docs/developers/architecture.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/architecture.md) and
-  [docs/developers/status.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/status.md) — why Wayland has no
-  capture backend, the element-resolution rules, and what has actually been run
+  [docs/developers/status.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/developers/status.md) — how Wayland capture
+  works below the compositor, the element-resolution rules, and what has
+  actually been run
 
 ## License
 

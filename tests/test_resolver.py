@@ -1204,6 +1204,171 @@ def test_an_element_is_described_from_what_the_session_says():
     assert target.element.extents == (120, 120, 60, 24)
 
 
+class WaylandFocusSession(ElementSession):
+    """A native-Wayland client: element_at is unusable, but focus is not.
+
+    The toolkit reports widget extents in window coordinates, so `element_at`
+    hands back the frame for every screen point (the window-relative-extents
+    trap). The widget a click lands on does take focus, which carries no
+    coordinates and so is unaffected -- which is what the focus fallback is
+    for.
+    """
+
+    def __init__(self, focused=None, **kwargs):
+        frame = FakeElement("frame", "Target")
+        # element_at always answers the frame -- never a widget
+        super().__init__(
+            element=frame, window=FakeWindow(title="Target", pid=77), **kwargs
+        )
+        self._focused = focused or FakeElement(
+            "push button", "Primary Action", pid=77, parent=frame
+        )
+
+    def focused(self):
+        return self._focused
+
+    def windows(self):
+        return [self.window]
+
+
+def wayland_resolver(session=None):
+    """A native-Wayland DesktopResolver (focus fallback on)."""
+    session = session or WaylandFocusSession()
+    return DesktopResolver(
+        session=session, elements=True, windows=False, macos=False, wayland=True
+    )
+
+
+def test_wayland_click_names_the_focused_widget_when_coords_cannot():
+    # The gap this closed: element_at answers the frame (window-relative
+    # extents), so coordinates would name nothing -- but the clicked button
+    # holds focus, and that names it.
+    target = wayland_resolver().resolve(640, 400)
+    assert target.element is not None
+    assert target.element.name == "Primary Action"
+    assert target.element.role == "push button"
+    # the click keeps its own coordinates, only the name comes from focus
+    assert (target.x, target.y) == (640, 400)
+    assert target.window.title == "Target"
+
+
+def test_wayland_focus_fallback_refuses_a_foreign_focused_widget():
+    # Focus is login-session-wide; a focused widget in a process that owns no
+    # window on this display must not be borrowed, exactly as for typed text.
+    session = WaylandFocusSession(focused=FakeElement("entry", "Elsewhere", pid=4242))
+    target = wayland_resolver(session).resolve(640, 400)
+    assert target.element is None
+    assert target.reason  # the coordinate-fallback reason is still carried
+
+
+def test_wayland_focus_fallback_does_not_fire_for_a_hover():
+    # A rest is not a press; only a click leaves a widget focused to borrow.
+    target = wayland_resolver().resolve_hover(640, 400)
+    assert target.element is None
+
+
+def test_focus_fallback_is_off_without_the_wayland_flag():
+    # Every other backend is unchanged: element_at answering the frame stays a
+    # coordinate, never a focus-borrowed name.
+    session = WaylandFocusSession()
+    plain = DesktopResolver(session=session, elements=True, windows=False, macos=False)
+    assert plain.resolve(640, 400).element is None
+
+
+class FakeEffectLog:
+    """Stands in for AtspiEffectLog: answers `nearest` from a fixed list."""
+
+    def __init__(self, effects=()):
+        self.effects = list(effects)
+
+    def nearest(self, after, within, toplevel):
+        for eff in self.effects:
+            if after <= eff.at <= after + within and eff.toplevel == toplevel:
+                return eff
+        return None
+
+
+def _effect(name, role, at, toplevel="Target"):
+    from pyguitest_recorder.windows.atspi_effects import AtspiEffect
+
+    return AtspiEffect(at=at, name=name, role=role, pid=77, toplevel=toplevel)
+
+
+def _wayland_effect_resolver(log):
+    session = WaylandFocusSession(focused=FakeElement("frame", "Target", pid=77))
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+        effects=log,
+    )
+    # Effects are injected synchronously in these tests; the live-arrival wait
+    # would only slow them, so turn it off.
+    r._EFFECT_WAIT = 0.0
+    return r
+
+
+def test_wayland_click_names_a_tab_from_the_effect_log():
+    # The focus path misses a tab (clicking it selects without taking keyboard
+    # focus); the effect log catches the selection event, whose source is it.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Choosers", "page tab", 1000.5)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None
+    assert (target.element.name, target.element.role) == ("Choosers", "page tab")
+    assert (target.x, target.y) == (640, 400)
+
+
+def test_wayland_effect_log_is_scoped_to_the_clicked_window():
+    # An effect from another window must not name this click.
+    log = FakeEffectLog([_effect("Elsewhere", "list item", 1000.5, toplevel="Other")])
+    assert _wayland_effect_resolver(log).resolve(640, 400, when=1000.4).element is None
+
+
+def test_wayland_effect_log_only_binds_effects_after_the_press():
+    # An effect that predates the press is a different interaction's.
+    log = FakeEffectLog([_effect("Earlier", "list item", 999.0)])
+    assert _wayland_effect_resolver(log).resolve(640, 400, when=1000.4).element is None
+
+
+def _stale_focus_resolver(effects):
+    # A field focused BEFORE this press is still reported focused after a click
+    # elsewhere; it belongs to the window, so `_belongs` alone cannot reject it.
+    session = WaylandFocusSession(focused=FakeElement("entry", "Old Field", pid=77))
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+        effects=effects,
+    )
+    r._EFFECT_WAIT = 0.0
+    return r
+
+
+def test_wayland_a_causal_effect_beats_a_stale_focus():
+    # The D1 regression: the effect log is consulted before focus, so a click
+    # that fired an effect is named by what it actually did -- never by a field
+    # left focused from an earlier interaction.
+    r = _stale_focus_resolver(FakeEffectLog([_effect("Save", "push button", 1000.5)]))
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None
+    assert (target.element.name, target.element.role) == ("Save", "push button")
+
+
+def test_wayland_stale_focus_is_only_the_last_resort():
+    # With no effect fired, focus is the documented last resort -- a no-effect
+    # click can still inherit a stale focused name. Pinned so any future change
+    # to that residual is deliberate, not accidental.
+    r = _stale_focus_resolver(FakeEffectLog([]))
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.name == "Old Field"
+
+
 CLOSED_ITEM = (-2147483648, -2147483648, 233, 25)
 """Where AT-SPI puts a menu item whose popup is not open, as pluma reports it.
 The position is `G_MININT` and the size is *kept* -- mate-calc's closed items are
@@ -2004,6 +2169,37 @@ def test_focus_on_an_element_with_no_pid_is_refused():
     made = focus_resolver(FakeElement("entry", "Search", pid=None))
     assert made.focused() is None
     assert any("no process id" in warning for warning in made.warnings)
+
+
+def test_focus_on_a_pidless_window_backend_is_owned_by_ancestry_title():
+    # kdotool (KWin UUIDs) and COSMIC's toplevel-info publish no window pid at
+    # all, so ownership-by-process can never match there. The element's own
+    # ancestry names the toplevel it descends from -- the same fact
+    # `_best_owner` already trusts -- and that title settles ownership instead,
+    # so typing on a native-Wayland desktop is attributed rather than dropped.
+    frame = FakeElement("frame", "Target", pid=77)
+    element = FakeElement("entry", "Search", pid=77, parent=frame)
+    windows = [
+        FakeWindow(title="Other", pid=None),
+        FakeWindow(title="Target", pid=None),
+    ]
+    made = focus_resolver(element, windows=windows)
+    target = made.focused()
+    assert target is not None
+    assert target.element.name == "Search"
+    assert target.window.title == "Target"
+
+
+def test_pidless_windows_still_respect_the_ignore_list():
+    # The ancestry fallback must not undo the recorder's own-terminal
+    # exclusion: the element's pid is still known to AT-SPI even when the
+    # window backend knows no pids, and an ignored pid stays ignored.
+    frame = FakeElement("frame", "Target", pid=77)
+    element = FakeElement("entry", "Search", pid=77, parent=frame)
+    windows = [FakeWindow(title="Target", pid=None)]
+    made = focus_resolver(element, windows=windows)
+    made.ignore_pids = {77}
+    assert made.focused() is None
 
 
 def test_no_focus_at_all_is_not_a_failure():

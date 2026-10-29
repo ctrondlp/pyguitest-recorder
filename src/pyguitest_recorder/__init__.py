@@ -8,10 +8,12 @@ window moving, the theme changing and the layout being redesigned, where a
 recorded coordinate survives none of them.
 
 Capture is not one platform's property: `xrecord` reads X11's event stream, the
-low-level Windows hooks read theirs, and `macos` taps CGEvent at the HID tap.
-Which streams a platform publishes is the platform's business — no ordinary
-Wayland client can observe another client's input at all — and `backends.base`
-is where that is argued.
+low-level Windows hooks read theirs, `macos` taps CGEvent at the HID tap, and
+`wayland` reads the kernel's `/dev/input` devices *below* the compositor —
+because no ordinary Wayland client can observe another client's input through
+one, which is exactly why that backend does not go through one. Which streams a
+platform publishes is the platform's business, and `backends.base` is where
+that is argued.
 """
 
 from .config import Settings

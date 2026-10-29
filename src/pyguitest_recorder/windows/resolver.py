@@ -39,6 +39,7 @@ from ..platforms import (
     is_macos,
     is_windows,
 )
+from .atspi_effects import AtspiEffectLog
 
 __all__ = ["ContextResolver", "NullResolver", "DesktopResolver", "Observation"]
 
@@ -393,8 +394,15 @@ class Observation:
 class ContextResolver(Protocol):
     """Answers what a screen coordinate points at."""
 
-    def resolve(self, x: int, y: int, screen: int = 0) -> Target:
-        """Return the target at this point, with whatever context is available."""
+    def resolve(
+        self, x: int, y: int, screen: int = 0, when: float | None = None
+    ) -> Target:
+        """Return the target at this point, with whatever context is available.
+
+        `when` is the capture-clock timestamp of the event being resolved,
+        used only by a resolver that reads a time-stamped side channel (the
+        native-Wayland effect log) to name a click; ignored otherwise.
+        """
 
     def resolve_window(self, x: int, y: int, screen: int = 0) -> Target:
         """Return the target at this point with no element looked up.
@@ -423,7 +431,13 @@ class ContextResolver(Protocol):
 class NullResolver:
     """Resolves to bare coordinates. The floor every other resolver falls back to."""
 
-    def resolve(self, x: int, y: int, screen: int = 0) -> Target:
+    def resolve(
+        self,
+        x: int,
+        y: int,
+        screen: int = 0,
+        when: float | None = None,  # noqa: ARG002 - protocol arg; this floor has no use for it
+    ) -> Target:
         """Return the point with no context attached."""
         return Target(x=x, y=y, screen=screen)
 
@@ -514,6 +528,29 @@ class DesktopResolver:
     named, which `_can_resolve_elements` reports in macOS's own terms.
 
     Read through `_on_macos`, which falls back to the host when this is None.
+    """
+
+    wayland: bool = False
+    """Whether this recording is of a native Wayland desktop (the evdev backend).
+
+    Set by `Recorder` from its capture backend (`_on_wayland`), off everywhere
+    else. On native Wayland a toolkit reports its widgets' AT-SPI extents in
+    *window* coordinates, so a screen-coordinate hit test (`element_at`) cannot
+    be trusted to name the widget under a click -- pyguitest's own documented
+    geometry caveat. This turns on a focus-based fallback for clicks the
+    coordinate path could not name: a click on a focusable widget leaves it
+    holding keyboard focus, and `focused()` names widgets without coordinates
+    at all. It only ever *adds* a name where there would otherwise be a bare
+    coordinate, and only for this backend, so no other platform changes.
+    """
+
+    effects: AtspiEffectLog | None = None
+    """A live AT-SPI effect log, set by `Recorder` on native Wayland only.
+
+    What names a click the coordinate path and focus both could not: a tab,
+    combo, list item or menu item publishes an AT-SPI event when it is chosen,
+    and that event's source is the widget. See `_effect_element_in`. Absent
+    everywhere else, so the effect path never runs off native Wayland.
     """
 
     _identity: dict[Any, _Identity] = field(default_factory=dict, init=False)
@@ -802,7 +839,9 @@ class DesktopResolver:
         """
         return self._bridge_disabled
 
-    def resolve(self, x: int, y: int, screen: int = 0) -> Target:
+    def resolve(
+        self, x: int, y: int, screen: int = 0, when: float | None = None
+    ) -> Target:
         """Return the window and element under this point.
 
         The element is required to belong to the same process as the window,
@@ -812,10 +851,15 @@ class DesktopResolver:
         asked about the same numeric coordinate, the wrong answer looks exactly
         like the right one. Observed: a recording made on a private Xvfb
         resolving its clicks onto the editor the recorder was written in.
-        """
-        return self._resolve(x, y, screen, spend=True)
 
-    def resolve_hover(self, x: int, y: int, screen: int = 0) -> Target:
+        `when` is the press's capture timestamp, read only on native Wayland to
+        consult the effect log for the widget the press acted on.
+        """
+        return self._resolve(x, y, screen, spend=True, when=when)
+
+    def resolve_hover(
+        self, x: int, y: int, screen: int = 0, when: float | None = None
+    ) -> Target:
         """`resolve`, for a place the pointer rested rather than one it pressed.
 
         The same answer, except that it does not use up an open popup: choosing
@@ -824,50 +868,144 @@ class DesktopResolver:
         the widget underneath. See `_popup_at`. Optional for a resolver -- the
         normalizer falls back to `resolve` where there is none.
         """
-        return self._resolve(x, y, screen, spend=False)
+        return self._resolve(x, y, screen, spend=False, when=when)
 
-    def _resolve(self, x: int, y: int, screen: int, *, spend: bool) -> Target:
+    def _resolve(
+        self, x: int, y: int, screen: int, *, spend: bool, when: float | None = None
+    ) -> Target:
         """The window and element under a point; see `resolve`."""
         self._spending = spend
         self._from_popup = False
         window = self._window(x, y, screen)
+        element, reason = self._coordinate_element(x, y, window)
+        if element is not None:
+            return Target(x=x, y=y, screen=screen, window=window, element=element)
+        # The coordinate hit-test named nothing usable. On native Wayland that
+        # is the norm, not the exception: `element_at` is refused there (a
+        # client is not told its screen position), so a press -- never a hover
+        # -- is named from what the toolkit *did* publish. The effect log is
+        # consulted FIRST because it is causal: it only matches events fired
+        # after this press, so it names what the press actually did (a tab
+        # selected, an entry focused, an item activated). `focused()` is the
+        # last resort, because focus can be stale -- a field focused *before*
+        # this press is still "the focused element" after a click on something
+        # unfocusable, and naming that field would be wrong; an effect, when
+        # one fired, always outranks it. The residual (no effect fired AND the
+        # focus is stale) is a documented limitation. The click keeps its own
+        # coordinates; only the name is borrowed. Off on every other backend,
+        # unchanged there.
+        if self.wayland and spend:
+            named = self._effect_element_in(window, when) or self._focus_element_in(
+                window
+            )
+            if named is not None:
+                return Target(x=x, y=y, screen=screen, window=window, element=named)
+        return Target(x=x, y=y, screen=screen, window=window, reason=reason)
+
+    _EFFECT_WINDOW = 0.6
+    """How long after a press an AT-SPI effect may fire and still be its effect."""
+    _EFFECT_WAIT = 0.25
+    """How long `_effect_element_in` waits for that effect, since resolution is
+    live and the application may not have reacted to the press yet."""
+
+    def _effect_element_in(
+        self, window: WindowRef | None, when: float | None
+    ) -> ElementRef | None:
+        """Name a click from the effect log, if one fired in the press's window.
+
+        Bounded-waits because resolution is live: the press has just happened
+        and the toolkit may not have published its reaction yet. Tied to the
+        clicked window by the window's own title -- the one key a pid-less
+        window backend (kdotool, COSMIC) leaves to match on.
+
+        Two documented assumptions. The title is treated as identifying: two
+        windows that share one (two instances of an app) could cross-attribute
+        an effect, so where no stable window id is available this is
+        best-effort rather than exact. And the press `when` and the effect's
+        stamp must be one clock -- both are `time.monotonic`: the effect log
+        stamps with it directly, and the capture backend rebases the kernel's
+        CLOCK_REALTIME event times onto it at capture (the same clock the
+        analyzer's offsets and the lag accounting already assume). A stamp
+        that somehow arrived in the wrong domain would simply find no effect
+        in the window and degrade to a coordinate, never mis-match to a wrong
+        one.
+        """
+        if self.effects is None or window is None or when is None:
+            return None
+        title = getattr(window, "title", "") or ""
+        if not title:
+            return None
+        # `time.monotonic()` directly, not the module `_now` seam the tests
+        # freeze for popup timing: this is a real-wall-clock wait for an effect
+        # to arrive, and a frozen clock would spin it forever.
+        deadline = time.monotonic() + self._EFFECT_WAIT
+        while True:
+            effect = self.effects.nearest(
+                after=when, within=self._EFFECT_WINDOW, toplevel=title
+            )
+            if effect is not None:
+                return ElementRef(role=effect.role, name=effect.name, pid=effect.pid)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.03)
+
+    def _coordinate_element(
+        self, x: int, y: int, window: WindowRef | None
+    ) -> tuple[ElementRef | None, str | None]:
+        """The usable accessible element under a point, or (None, why not).
+
+        The reason is the per-click short form the generator uses to explain
+        the bare coordinate it then emits (see `Target.reason`); the checks
+        keep their own fuller footer warning as a side effect. A `None`
+        element with a `None` reason means the hit-test simply found nothing.
+        """
         element = self._element(x, y) if self._resolves_elements else None
-        # Each early return drops a *found* element the checks declined to name,
-        # and records why on the target so the generator can explain the bare
-        # coordinate it then has to emit (see Target.reason). The checks keep
-        # their own fuller footer warning as a side effect; this is the
-        # per-click short form, which the checks' ordering here decides.
-        if element is not None and not self._is_widget(element):
-            return Target(
-                x=x,
-                y=y,
-                screen=screen,
-                window=window,
-                reason="the accessibility hit-test bottomed out at the window "
-                "itself, which names no clickable widget",
+        if element is None:
+            return None, None
+        if not self._is_widget(element):
+            return None, (
+                "the accessibility hit-test bottomed out at the window itself, "
+                "which names no clickable widget"
             )
-        if (
-            element is not None
-            and not self._in_disclosure_gutter(element, x, y)
-            and not self._covers(element, x, y)
+        if not self._in_disclosure_gutter(element, x, y) and not self._covers(
+            element, x, y
         ):
-            return Target(
-                x=x,
-                y=y,
-                screen=screen,
-                window=window,
-                reason="the accessible element under this point did not actually "
-                "cover it",
+            return None, (
+                "the accessible element under this point did not actually cover it"
             )
-        if element is not None and not self._belongs(element, window):
-            return Target(
-                x=x,
-                y=y,
-                screen=screen,
-                window=window,
-                reason=self._foreign_reason(element, window),
-            )
-        return Target(x=x, y=y, screen=screen, window=window, element=element)
+        if not self._belongs(element, window):
+            return None, self._foreign_reason(element, window)
+        return element, None
+
+    def _focus_element_in(self, window: WindowRef | None) -> ElementRef | None:
+        """The focused widget, if it belongs to `window`, for a click fallback.
+
+        The LAST resort, consulted only after the effect log found nothing:
+        focus proves window ownership, not click causality. A field focused
+        before this press is still "the focused element" after a click on
+        something unfocusable, so a no-effect click can inherit that stale
+        name -- the documented residual of this fallback. A click that
+        genuinely moves focus also fires a focus effect, which the effect log
+        names first, so this path mostly serves desktops whose effect stream
+        is thin.
+
+        Reuses `focused()`'s own trust checks by going through the same
+        `focused` session call and `_belongs`, so an element in another
+        session's application -- the accessibility bus is login-session-wide --
+        is refused here exactly as it is for typed text. A toplevel role is no
+        answer (a desktop that does not publish per-widget focus names its own
+        window), and anything the live tree cannot read is no answer.
+        """
+        if window is None:
+            return None
+        try:
+            element = self.session.focused()
+            if element is None or element.role in WINDOW_ROLES:
+                return None
+            ref = self._describe_element(element)
+        except Exception:  # noqa: BLE001 - an unreadable tree is no answer
+            return None
+        return ref if self._belongs(ref, window) else None
 
     def _foreign_reason(self, element: ElementRef, window: WindowRef | None) -> str:
         """The short per-click form of a `_belongs` rejection, for `Target.reason`.
@@ -1102,6 +1240,25 @@ class DesktopResolver:
             for window in windows
             if window.pid == element.pid and window.pid not in self.ignore_pids
         ]
+        if (
+            not owned
+            and windows
+            and all(window.pid is None for window in windows)
+            and element.pid not in self.ignore_pids
+        ):
+            # A window backend with no pid capability at all -- kdotool's KWin
+            # UUIDs, COSMIC's toplevel-info -- can never answer ownership by
+            # process. The element's own ancestry can: the accessible tree
+            # names the toplevel it descends from, the same fact `_best_owner`
+            # trusts to pick between one process's windows, so ownership is
+            # matched on that title instead. The ignore_pids exclusion is kept
+            # by asking the element's pid directly, which AT-SPI still knows.
+            toplevel = next(
+                (name for role, name in reversed(element.path) if role in WINDOW_ROLES),
+                "",
+            )
+            if toplevel:
+                owned = [window for window in windows if window.title == toplevel]
         if owned:
             return self._describe(self._best_owner(owned, element))
         self._warn(

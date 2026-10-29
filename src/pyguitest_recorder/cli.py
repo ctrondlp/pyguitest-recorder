@@ -70,7 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument(
         "--display",
         help="X display to record (default: $DISPLAY); xrecord only, ignored "
-        "by the win32 and macos backends",
+        "by the win32 and macos backends and refused by the wayland backend, "
+        "which has no display to choose",
     )
     capture.add_argument(
         "--screen",

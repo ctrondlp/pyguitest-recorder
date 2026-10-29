@@ -16,7 +16,7 @@ dynamic = ["version"]
 # before deciding whether this runs on their machine. "X11" rather than "Linux
 # and BSD" alone because recording is X11/XWayland on Linux and never ordinary
 # Wayland -- see docs/developers/architecture.md.
-description = "Record desktop GUI activity on X11, XWayland, macOS and Microsoft Windows, and generate pyguitest test scripts"
+description = "Record desktop GUI activity on X11, XWayland, Wayland, macOS and Microsoft Windows, and generate pyguitest test scripts"
 readme = "README.md"
 requires-python = ">=3.10"
 # GPL-2.0-or-later, matching pyguitest. Not only for consistency: the
@@ -40,7 +40,7 @@ keywords = [
     "desktop-automation", "ui-testing",
     "code-generation", "test-generation", "pyguitest",
     "linux", "bsd", "freebsd", "windows", "win32", "macos",
-    "x11", "xrecord", "cgeventtap", "xwayland",
+    "x11", "xrecord", "cgeventtap", "xwayland", "wayland", "evdev",
     "accessibility", "atspi", "at-spi",
 ]
 
@@ -266,6 +266,11 @@ macos = ["pyguitest[macos]"]
 # No version here: the base dependency above sets the floor, and a second copy
 # of it is one more number to go stale.
 atspi = ["pyguitest[atspi]"]
+# evdev capture below the compositor -- the one capture path that works on
+# Wayland (every compositor), reading /dev/input directly. Needs the `input`
+# group or a udev ACL on the device nodes at runtime, the same access
+# pyguitest's uinput replay needs; the dependency only provides the reader.
+wayland = ["evdev>=1.6.0"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.urls]
@@ -367,6 +372,8 @@ module = [
     "pyguitest.*",
     "gi.*",
     "gi.repository.*",
+    "evdev",
+    "evdev.*",
     "tomli",
     "Quartz",
     "CoreFoundation",

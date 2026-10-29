@@ -33,11 +33,14 @@ pyguitest-recorder --doctor
 ```
 
 Recording needs X11 or XWayland on a Linux desktop, native Windows, or macOS.
-On Linux, no ordinary Wayland compositor will ever allow it — a property of the
-platform, not a missing feature; see
+No ordinary Wayland *client* can observe another client's input *through* the
+compositor — a property of the platform, not a missing feature; see
 [developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
-for why. Under a Wayland session the recorder reaches XWayland clients and
-nothing else, and says so rather than producing a file with silent gaps.
+for why. Under a Wayland session the default backend reaches XWayland clients
+and nothing else, and says so rather than producing a file with silent gaps.
+There is one experimental exception, which reads input *below* the compositor
+rather than through it — see
+[Recording on Wayland (experimental)](#recording-on-wayland-experimental).
 
 `--doctor` answers three questions: can input be captured at all, can clicks
 be resolved to named elements, and is the installed pyguitest new enough.
@@ -69,6 +72,81 @@ started after it was made, so quit the recorder and start it again rather
 than recording into the same terminal. `--doctor` reports the refusal
 verbatim when a tap cannot be created, and element resolution is off until
 the grant is in place. Nothing on Linux or Windows needs any of this.
+
+## Recording on Wayland (experimental)
+
+The default backends above record X11, XWayland, native Windows and macOS.
+There is also an **experimental** `wayland` backend that records a native
+Wayland session by reading the kernel's input devices (`/dev/input/event*`)
+*below* the compositor — the one capture path that works on every compositor,
+because it does not go through any of them. It does not weaken the platform's
+guarantee: it is not a Wayland client observing another client, it is a
+privileged process reading device nodes.
+
+**Understand what that access is before you grant it.** Reading
+`/dev/input/event*` needs the `input` group or a udev ACL — the same *tier*
+pyguitest's uinput replay needs, but a **stronger capability pointed the other
+way**: replay *writes* synthesised events to `/dev/uinput`, while this *reads*
+every real event from `/dev/input`. And reading input is **machine-wide** — it
+sees keystrokes and pointer activity from *every* application, not just the one
+you mean to record, your password manager and terminals included. So grant it
+deliberately, prefer the narrowest form that fits (a per-boot ACL over
+permanent group membership), and drop it when you are done recording. Never run
+the recorder as root to get around inaccessible devices.
+
+Install the extra and give the user read access to the input devices:
+
+```sh
+pip install 'pyguitest-recorder[wayland]'
+
+# Read access to /dev/input, one of:
+sudo setfacl -m "u:$USER:rw" /dev/input/event*   # this boot only; narrowest
+sudo usermod -aG input "$USER"        # persistent; log out and back in
+# revoke when done: `sudo setfacl -x "u:$USER" /dev/input/event*` for the ACL,
+# or `sudo gpasswd -d "$USER" input` (then re-login) for the group.
+```
+
+One behavioural difference between the two: the ACL is stamped on the device
+nodes that exist when the command runs, while group membership covers nodes
+udev creates later (they come up `root:input`). The backend rescans
+`/dev/input` during a recording precisely so a device plugged in mid-session
+is captured — under the ACL route that new node is not readable and is
+skipped, so if your session involves hotplugged input devices, the group is
+the grant that actually covers them.
+
+With those in place no configuration is needed: `backend = "auto"` prefers
+`xrecord` wherever an X server is reachable, exactly as before, and falls back
+to this backend only on a session that is **actually Wayland** — never on an
+X11 session whose XRecord merely failed, which keeps `auto` from quietly
+turning into a machine-wide input reader there. So one configuration serves an
+X11 machine and a pure-Wayland one alike. Naming `backend = "wayland"` selects
+it outright; setting `display` disables the fallback, because that asks for an
+X server by name. A setting the backend cannot honour is refused with an
+explanation *before* recording starts, not silently dropped.
+
+Three limits to know going in, all documented in the backend itself:
+
+- **Linux only.** Keys are decoded under the session's own keyboard layout
+  through `libxkbcommon` (its `XKB_DEFAULT_LAYOUT`/`_VARIANT`/… resolution), so
+  a German QWERTZ or any other layout records the characters actually typed;
+  where `libxkbcommon` cannot be loaded it falls back to US.
+- Pointer coordinates are exact for an **absolute device** (a drawing tablet,
+  a VM's integration pointer), scaled from the device's own range to the
+  screen the DRM connector reports. A **relative mouse** only reports deltas,
+  so its position is tracked from the screen's centre and clamped — good
+  enough to attribute clicks to windows, not survey-grade; a session recorded
+  with a tablet or inside a VM has the exact kind. For a bare-metal
+  relative-only mouse, setting `screencast_cursor = true` reads the true
+  position from the ScreenCast portal (a consented screen-share — it raises a
+  one-time "Share your screen?" dialog) and stamps every event with it instead.
+- It captures the **whole machine's input**, so the
+  [privacy](#privacy-read-this-before-the-first-recording) note below applies
+  with full force — every keystroke in every window reaches the device node.
+
+`--doctor` probes this backend like any other — on a live KWin session it
+reports `capture: wayland-evdev (available)` and whether clicks will be named
+— and reports the permission error with the fix when `/dev/input` is not
+readable.
 
 ## 2. Record something
 

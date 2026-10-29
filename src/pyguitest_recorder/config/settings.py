@@ -57,6 +57,25 @@ class Settings:
     unreliable accessibility bus), not a way to ask for coordinate output --
     `locators = "absolute"` is that."""
 
+    screencast_cursor: bool = False
+    """Read the true cursor position from the ScreenCast portal (Wayland only).
+
+    The evdev `wayland` backend sees a relative mouse only as deltas, so on a
+    bare-metal machine with no absolute pointing device it tracks the pointer
+    from the screen centre and clamps it -- good enough to name a window, but
+    not the real position. Turning this on starts a consented ScreenCast
+    screen-share whose cursor metadata gives the actual position, and every
+    click, scroll and motion is stamped with it instead.
+
+    Off by default, and only worth turning on for that bare-metal
+    relative-only case: it raises a one-time "Share your screen?" consent
+    dialog (so it cannot be used unattended), and it does nothing for an
+    absolute device -- every VM's integration pointer and every tablet already
+    reports an exact position, so the delta tracking never runs. It is ignored
+    on every backend but `wayland`. The reader runs in an isolated subprocess;
+    if consent is denied or it cannot start, the recording simply keeps the
+    delta-tracked position rather than failing."""
+
     # -- analyzer --------------------------------------------------------
     motion_threshold: int = 8
     """Pixels the pointer must travel to count as having moved, not jittered.

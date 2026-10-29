@@ -5,6 +5,51 @@ was released.
 
 ## [Unreleased]
 
+### Added
+
+- **Native Wayland recording, by reading `/dev/input` below the compositor.**
+  "Recording is impossible on Wayland" was the standing gap: no Wayland client
+  can observe another client's input *through* the compositor, and the
+  InputCapture portal the earlier plan rested on is closed. The new
+  `wayland-evdev` capture backend sidesteps the compositor entirely — it reads
+  the kernel's `/dev/input/event*` devices directly, the same `input`-group /
+  udev-ACL tier pyguitest's own uinput replay already needs — so it works
+  identically whatever the compositor, because it goes through none of them:
+  validated live on all five in the test fleet (GNOME/Mutter, KWin, COSMIC,
+  Hyprland and niri). `backend = "wayland"` selects it outright; `auto` still prefers
+  `xrecord` wherever an X server is reachable and falls back to evdev only on a
+  pure-Wayland session with no `display` set, so one install serves an X11 and
+  a Wayland machine alike — and the substitution is never silent, the generated
+  header says `Capture: wayland-evdev`. Naming `display` alongside the wayland
+  backend is refused before recording rather than ignored. Keys are decoded
+  under the session's real keyboard layout via `libxkbcommon` (bound through
+  ctypes) where present, and through a fixed US table otherwise. Clicks the
+  coordinate path cannot name on native Wayland — where `element_at` is refused
+  because a client is not told its screen position — are named instead from
+  keyboard focus and a live AT-SPI effect log, which only ever *add* a name
+  where there would otherwise be a bare coordinate. Install with the `[wayland]`
+  extra (`evdev>=1.6`); element naming additionally needs `[atspi]`. Documented
+  limits: US-layout fallback without `libxkbcommon`, single-connector
+  coordinate scaling on multi-monitor sessions, and plain push buttons staying
+  coordinates on native-Wayland clients that publish no observable effect. A
+  relative-only mouse's position is otherwise tracked from the screen centre;
+  the opt-in `screencast_cursor` reads the true position from the ScreenCast
+  portal's cursor metadata (a consented screen-share, so off by default and
+  only worth it on a bare-metal relative-mouse machine) and stamps every event
+  with it instead.
+
+### Fixed
+
+- **Generated scripts are now formatted whenever `ruff` is importable, not only
+  when a `ruff` executable is on `PATH`.** The emitter normalises its output
+  with `ruff format`; it previously looked for the console script alone, so a
+  bare virtualenv or a distribution that ships ruff as an importable module
+  without a `PATH` entry point (a stock COSMIC session, for one) produced a
+  correct but unformatted, single-quoted script. It now falls back to running
+  the module with the current interpreter, so the project's double-quoted
+  layout comes out in those environments too; it still degrades silently to
+  unformatted source only when ruff is genuinely absent.
+
 ## [0.11.0] — 2026-10-20
 
 ### Added

@@ -122,19 +122,25 @@ Two further causes worth knowing, both of which look identical from here:
 
 ## Nothing was captured at all
 
-**Are you on Wayland?** Recording needs X11 or XWayland on a Linux desktop,
-native Windows, or macOS — and under a Wayland session the recorder reaches
-XWayland clients and nothing else, so recording a native Wayland application
-produces nothing —
+**Are you on Wayland?** The default Linux backend is XRecord, which reaches
+XWayland clients and nothing else — recording a native Wayland application
+through it produces nothing, and
 [developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
-explains why this is permanent rather than a gap.
+explains why that is a property of the platform rather than a missing feature.
+What closes it is the experimental `wayland` backend, which reads the kernel's
+input devices *below* the compositor instead; `backend = "auto"` falls back to
+it on a session that is actually Wayland with no reachable X server. It needs
+the `[wayland]` extra and read access to `/dev/input` — see
+[getting-started.md](getting-started.md#recording-on-wayland-experimental) for
+the setup and the privacy consequences of granting that.
 
-Check which one the application under test actually is: in a GNOME Wayland
-session, some applications are native Wayland and some are XWayland, and they
-look identical on screen.
+If you are staying on the default backend, check which kind the application
+under test actually is: in a GNOME Wayland session, some applications are
+native Wayland and some are XWayland, and they look identical on screen.
 
-**Is `python-xlib` installed?** On Linux and the BSDs, capture needs the `x11`
-extra: `pip install 'pyguitest-recorder[x11]'`.
+**Is `python-xlib` installed?** On Linux and the BSDs, the default backend
+needs the `x11` extra: `pip install 'pyguitest-recorder[x11]'`. (The `wayland`
+backend needs the `wayland` extra instead.)
 
 **Is this a rootless XWayland?** A private headless GNOME session is not a
 substitute for Xvfb — the RECORD context comes up cleanly, but the compositor
@@ -180,10 +186,12 @@ run; slower than that, the first press is handed on as a keystroke and the
 count restarts. Recording now prints `Escape (1/2) — press again within
 2s to stop.` the moment the first press registers, precisely so there is no
 need to guess whether it was seen. If it is still happening with presses
-close together in time, check what has focus: on Linux capture is
-XRecord/X11-only, so a press landing on a genuinely native-Wayland surface (no
-XWayland presence at all) never reaches the recorder in the first place — see
-`docs/developers/architecture.md#why-wayland-has-no-capture-backend`.
+close together in time, check what has focus: under the default Linux backend
+(XRecord) a press landing on a genuinely native-Wayland surface (no XWayland
+presence at all) never reaches the recorder in the first place — see
+`docs/developers/architecture.md#why-wayland-has-no-capture-backend`. The
+`wayland` backend has no such blind spot: it reads below the compositor, so
+the stop chord is seen wherever focus happens to be.
 
 **A chord with a modifier used to be unstoppable by the obvious gesture —
 fixed in 0.9.1.** Pressing `ctrl+F12` twice as two separate chords puts a

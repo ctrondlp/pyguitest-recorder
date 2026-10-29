@@ -22,5 +22,5 @@ scripts from it. For what it is and how to install it, start at the
 
 | File | What's in it |
 |------|---------------|
-| [developers/architecture.md](developers/architecture.md) | Why Wayland has no capture backend, why recording and replaying are different questions, and the rules behind every refusal to name an element |
+| [developers/architecture.md](developers/architecture.md) | Why no Wayland client can capture through the compositor — and how the `wayland` backend records below it instead — why recording and replaying are different questions, and the rules behind every refusal to name an element |
 | [developers/status.md](developers/status.md) | What has actually been run and how, plus the known gaps |
