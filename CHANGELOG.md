@@ -5,6 +5,8 @@ was released.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-29
+
 ### Added
 
 - **Native Wayland recording, by reading `/dev/input` below the compositor.**
@@ -42,6 +44,38 @@ was released.
 
 ### Fixed
 
+- **On native Wayland, keystrokes are attributed to the active window instead
+  of being resolved like clicks.** Every key and hotkey event went through the
+  pointer-shaped resolve, but the pointer there is a tracked guess, so each
+  key resolved to the shell under it (plasmashell on KWin) and then paid for a
+  focus read of about 1.2s. On KWin a 300-keystroke run left the recorder
+  225s behind live input; the focus-lag gate then failed closed and withheld
+  every text run (7 of 7) from the script, and the keystrokes were attributed
+  to the shell, so the generated waits and focus calls named the wrong window.
+  Keyboard events now ask a separate `resolve_keyboard` question, which on
+  Wayland is the active window alone (no element, no focus read, about 0.01s);
+  elsewhere it is unchanged. The same recording, run twice, now finishes 6.3s
+  and 8.4s behind, attributes 300 of its 302 keystrokes to the application,
+  withholds 3 of the 7 text runs instead of all 7 (the remainder is the cost
+  of the clicks, which still resolve in full), and the generated script
+  replays with exit 0. Confirmed on a second compositor, GNOME Shell 51.1,
+  where the same bug was costing something different: the pointer-shaped
+  resolve named *no* window there rather than the shell, and at 124ms a key
+  instead of 1.2s it would never have produced the backlog that made this
+  visible on KWin. After the fix, 122 of 122 keyboard events were attributed
+  to the application, no text run was withheld, the reported lag was 0.0s and
+  the replay exited 0 -- all of it through the pid-less window path, since a
+  GNOME toplevel publishes neither a pid nor an app_id. The typed-text
+  fallback deliberately keeps asking the *pointer* question: a run is resolved
+  once, not once per key, and only that answer carries the element that tells
+  a password field from an ordinary one -- asking the keyboard question there
+  would have written a password into the script in clear wherever `focused()`
+  could not name the field either. And because the answer is focus read at
+  consumption time, a key consumed more than `focus_max_lag` late now leaves
+  its window unnamed rather than claiming focus-now: a single Escape is held
+  back waiting for a second one, so it would otherwise name the parent of the
+  dialog it had just closed and have the script focus that parent before
+  replaying it.
 - **Generated scripts are now formatted whenever `ruff` is importable, not only
   when a `ruff` executable is on `PATH`.** The emitter normalises its output
   with `ruff format`; it previously looked for the console script alone, so a

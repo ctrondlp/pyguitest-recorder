@@ -627,7 +627,7 @@ class Normalizer:
                 HotKey(
                     timestamp=self._at(raw),
                     keys=keys,
-                    target=self._target(raw),
+                    target=self._key_target(raw),
                 )
             )
             return out
@@ -638,7 +638,7 @@ class Normalizer:
             KeyStroke(
                 timestamp=self._at(raw),
                 key=raw.keysym,
-                target=self._target(raw),
+                target=self._key_target(raw),
             )
         )
         return out
@@ -768,6 +768,15 @@ class Normalizer:
             and clicked.element.role in _TEXT_ROLES
         ):
             return clicked
+        # The pointer question, deliberately, where the keystroke paths ask
+        # the keyboard one. What made those expensive was asking per key;
+        # this is asked once per run, and it is the only one of the two that
+        # can come back with an *element* -- which is what decides whether a
+        # run is a password and must be withheld. `resolve_keyboard` answers
+        # with a window and no element, and `_is_secret` reading no element
+        # cannot tell a password field from an ordinary one, so using it here
+        # would write passwords into the script in clear wherever `focused()`
+        # also failed to name the field. Found in review of this change.
         return self._target(raw)
 
     def _flush_text(self) -> list[Event]:
@@ -816,6 +825,39 @@ class Normalizer:
     def _target(self, raw: RawEvent) -> Target:
         """Resolve what was under the pointer when this event happened."""
         return self.resolver.resolve(raw.x, raw.y, raw.screen, when=raw.timestamp)
+
+    def _key_target(self, raw: RawEvent) -> Target:
+        """Resolve the window a keyboard event went to.
+
+        A resolver with no `resolve_keyboard` -- the floor, or a test double --
+        has no notion that keys and the pointer can disagree, so it gets the
+        pointer's answer, as before. See `DesktopResolver.resolve_keyboard`.
+
+        That answer is focus *now*, read when the event is consumed, so a key
+        consumed late can be attributed to whatever focus moved on to -- and
+        the key itself is one of the things that moves it. The stop key makes
+        that routine rather than rare: `stop_key_presses` is 2 by default, so
+        every single Escape is held back waiting for a second one and handed
+        over up to `stop_key_interval` later. An Escape that closed a dialog
+        would then name the dialog's parent, and the generated script would
+        focus the parent before replaying it, where the Escape does nothing.
+        So past `focus_max_lag` -- the threshold the typed-text gate already
+        uses for "this focus read is too late to trust" -- the window is left
+        unnamed, and the script confirms no focus rather than the wrong one.
+        No further test of the key is needed: a printable key never reaches
+        here, it accumulates into a text run, so everything that does is a
+        command key (Tab, Return, Escape, an accelerator) -- exactly the kind
+        that moves focus.
+        """
+        resolve: Callable[..., Target] | None = getattr(
+            self.resolver, "resolve_keyboard", None
+        )
+        if resolve is None:
+            return self._target(raw)
+        behind = self.lag(raw) if self.lag is not None else 0.0
+        if behind > self.options.focus_max_lag:
+            return Target(x=raw.x, y=raw.y, screen=raw.screen)
+        return resolve(raw.x, raw.y, raw.screen, when=raw.timestamp)
 
     def _window_target(self, raw: RawEvent) -> Target:
         """Resolve only the window under the pointer, for a recorded move.

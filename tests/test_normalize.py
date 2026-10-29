@@ -567,6 +567,105 @@ def test_focus_is_asked_once_per_run_not_once_per_character(key, window):
     assert Counting.calls == 1
 
 
+class KeyboardAwareResolver(FakeResolver):
+    """A resolver that knows keys and the pointer can disagree."""
+
+    def __init__(self, keyboard_window, **kwargs):
+        super().__init__(**kwargs)
+        self.keyboard_window = keyboard_window
+        self.keyboard_calls = 0
+        self.pointer_calls = 0
+
+    def resolve(self, x, y, screen=0, when=None):
+        self.pointer_calls += 1
+        return super().resolve(x, y, screen, when)
+
+    def resolve_keyboard(self, x, y, screen=0, when=None):
+        self.keyboard_calls += 1
+        return Target(x=x, y=y, screen=screen, window=self.keyboard_window)
+
+
+def test_keystrokes_and_hotkeys_are_resolved_as_keyboard_events(key, window):
+    # Keys go to the focused window, which is not where the pointer rests; a
+    # resolver that can tell them apart is asked the keyboard question.
+    pointer = window
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=pointer)
+    events = drain(
+        Normalizer(resolver=resolver),
+        [
+            key(1.0, "Tab"),
+            key(1.2, "Control_L", kind="key_press"),
+            key(1.3, "s", "s"),
+        ],
+    )
+    keyed = [e for e in events if isinstance(e, (KeyStroke, HotKey))]
+    assert len(keyed) == 2
+    assert all(e.target.window.title == "Typing" for e in keyed)
+    assert resolver.pointer_calls == 0
+
+
+def test_typed_text_keeps_the_pointer_question_so_its_element_survives(key, window):
+    # The keystroke paths ask the keyboard question; this one must not. Only
+    # the pointer answer can carry an *element*, and the element is what says
+    # whether a run is a password. It is asked once per run, so it never cost
+    # what the per-keystroke resolves did.
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "h", "h")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.target.window is window
+    assert (resolver.pointer_calls, resolver.keyboard_calls) == (1, 0)
+
+
+def test_a_password_the_keyboard_question_cannot_see_is_still_withheld(key, window):
+    # The regression review caught. With the text fallback asking the keyboard
+    # question the target came back window-only, `_is_secret` saw no element,
+    # and a password typed into a field `focused()` could not name went into
+    # the generated script in clear.
+    secret = ElementRef(role="password text", name="")
+    resolver = KeyboardAwareResolver(
+        type(window)(title="Typing", app_id="org.example.Edit", pid=5),
+        window=window,
+        elements=[((0, 0, 1000, 1000), secret)],
+    )
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "p", "p")])
+    typed = [e for e in events if isinstance(e, TextInput)][0]
+    assert typed.sensitive is True
+
+
+def test_a_key_consumed_late_is_not_attributed_to_focus_now(key, window):
+    # A single Escape is held back waiting for a second one, so it is resolved
+    # after it has already closed whatever it closed. Naming focus-now would
+    # make the script focus the dialog's parent and replay an Escape there,
+    # where it does nothing.
+    focused = type(window)(title="Parent", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(
+        Normalizer(resolver=resolver, lag=lambda raw: 1.5), [key(1.0, "Escape")]
+    )
+    keyed = [e for e in events if isinstance(e, KeyStroke)][0]
+    assert keyed.target.window is None
+    assert resolver.keyboard_calls == 0
+
+
+def test_a_key_consumed_promptly_still_names_the_active_window(key, window):
+    focused = type(window)(title="Typing", app_id="org.example.Edit", pid=5)
+    resolver = KeyboardAwareResolver(focused, window=window)
+    events = drain(
+        Normalizer(resolver=resolver, lag=lambda raw: 0.0), [key(1.0, "Escape")]
+    )
+    assert events[0].target.window.title == "Typing"
+
+
+def test_a_resolver_without_a_keyboard_question_gets_the_pointer_one(key, window):
+    # The floor, and every test double: keys keep resolving by pointer.
+    resolver = FakeResolver(window=window)
+    assert not hasattr(resolver, "resolve_keyboard")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "Tab")])
+    assert events[0].target.window is window
+
+
 # -- the stop key ------------------------------------------------------------
 
 
