@@ -401,7 +401,7 @@ def test_warning_suppressions_are_off_by_default():
 def test_suppress_keymap_warning_emits_a_filter_with_an_explanatory_comment():
     source = render(Pause(seconds=0.1), suppress_keymap_warning=True)
     assert "import warnings" in source
-    assert "from pyguitest.backends.input import KeymapWarning" in source
+    assert "from pyguitest import KeymapWarning" in source
     assert 'warnings.filterwarnings("ignore", category=KeymapWarning)' in source
     assert "--suppress-keymap-warning" in source
     assert validate(source) == []
@@ -973,6 +973,32 @@ def test_header_records_the_xwayland_caveat():
     )
     source = generate(recording)
     assert "XWayland" in source
+
+
+def test_header_tells_a_wayland_recording_what_replay_needs():
+    # Capture came from evdev below the compositor; replay cannot go back that
+    # way, and the default transport's pointer events are dropped before the
+    # compositor on some Wayland sessions. A script that says nothing about
+    # that looks valid and silently does not click.
+    from pyguitest_recorder.model import Environment
+
+    recording = Recording(
+        environment=Environment(capture_backend="wayland-evdev", session_type="wayland")
+    )
+    source = generate(recording)
+    assert "eiinput" in source
+    # And it stays advice, not a changed call: naming an opt-in backend in the
+    # connect() would stop every unattended replay for a consent dialog.
+    assert "pyguitest.connect()" in source
+
+
+def test_an_x11_recording_is_told_none_of_that():
+    from pyguitest_recorder.model import Environment
+
+    recording = Recording(
+        environment=Environment(capture_backend="xrecord", session_type="x11")
+    )
+    assert "eiinput" not in generate(recording)
 
 
 # -- regressions -------------------------------------------------------------

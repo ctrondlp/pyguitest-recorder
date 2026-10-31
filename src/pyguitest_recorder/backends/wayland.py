@@ -29,6 +29,13 @@ What it sees and does not:
 - A spike measured on GNOME Wayland that AT-SPI emits no input events at all
   (focus/state changes only), which is why targeting is resolved separately
   and this backend is strictly the input stream.
+- It admits to what it lost. The kernel drops events when its queue for this
+  reader overruns and says so with SYN_DROPPED; the stream is then discarded
+  to the end of the truncated packet, held keys are re-read from the device
+  so nothing stays logically pressed, and the recording carries a note. A
+  device that will not open is skipped with a note rather than failing the
+  whole recording. Timestamps are asked of the kernel in the pipeline's own
+  clock (`EVIOCSCLOCKID`) so no offset can go stale under them.
 
 Keys are decoded through `libxkbcommon` (`_xkb.py`) under the layout the
 `XKB_DEFAULT_*` variables name -- not the compositor's active keymap, and a
@@ -72,6 +79,41 @@ _BUTTONS = {
     0x113: 8,
     0x114: 9,
 }  # LEFT MIDDLE RIGHT SIDE EXTRA
+
+_EVIOCSCLOCKID = 0x400445A0
+"""`EVIOCSCLOCKID`: ask a device to stamp its events with another clock.
+
+`_IOW('E', 0xa0, int)` expanded by hand -- `(1 << 30) | (4 << 16) |
+(ord('E') << 8) | 0xa0` -- because Python has no `_IOW`. Correct for every
+architecture using asm-generic's `ioctl.h`, which is every one this backend
+runs on; an architecture that lays the bits out differently (alpha, mips,
+powerpc, sparc) refuses the ioctl rather than acting on a wrong request
+number, and `_clock_offset` is the fallback for exactly that.
+"""
+
+
+def _eviocgkey(size: int) -> int:
+    """`EVIOCGKEY(size)`: read a device's whole key-state bitmap.
+
+    `_IOC(_IOC_READ, 'E', 0x18, size)`, expanded for the same reason as
+    `_EVIOCSCLOCKID`. The length is part of the request number, so this is a
+    function where that is a constant.
+    """
+    return 0x80004518 | (size << 16)
+
+
+class _SyntheticKey:
+    """A key event this backend makes itself, closing a gap an overrun left.
+
+    `_decode_key` reads only `code` and `value` off an event, so a resync
+    needs no more of one than this -- and a named class keeps a fabricated
+    event legible as such at the call site, which a tuple or a mock would not.
+    """
+
+    __slots__ = ("code", "value")
+
+    def __init__(self, code: int, value: int) -> None:
+        self.code, self.value = code, value
 
 
 def _evdev() -> ModuleType:
@@ -215,20 +257,58 @@ class WaylandCaptureBackend:
         sensor's axes. Their button events still decode normally."""
         self._pos: tuple[int, int] | None = None  # pointer position, if known
         self._clock_offset = 0.0
-        """Added to every kernel timestamp to rebase it onto `time.monotonic`.
+        """Added to a kernel timestamp to rebase it onto `time.monotonic`.
 
-        The kernel stamps evdev events with CLOCK_REALTIME (python-evdev never
-        issues EVIOCSCLOCKID), but every other backend -- and the recorder's
-        own `_now()`, which the analyzer's offsets, `--regenerate --from/--to`
-        trimming and the capture-lag accounting (the password focus-lag gate
-        included) are all measured against -- speaks `time.monotonic`. `start`
-        captures the realtime-to-monotonic offset once, so the whole recording
-        shares one clock even across an NTP step mid-run; it stays 0.0 for the
+        Only for devices whose `EVIOCSCLOCKID` ioctl failed. Where it succeeds
+        -- every ordinary Linux device -- the kernel stamps that device's
+        events with CLOCK_MONOTONIC itself and no arithmetic is needed; see
+        `_monotonic_fds`. Otherwise the stamps are CLOCK_REALTIME, while every
+        other backend -- and the recorder's own `_now()`, which the analyzer's
+        offsets, `--regenerate --from/--to` trimming and the capture-lag
+        accounting (the password focus-lag gate included) are all measured
+        against -- speaks `time.monotonic`.
+
+        Asking the kernel is not merely tidier than this subtraction, which is
+        why it is tried first. `start` captures the offset once, and a single
+        offset does not survive NTP or an administrator stepping the realtime
+        clock mid-recording: it *carries the step into the timeline* as a gap
+        that never happened, where a gap is the one thing the analyzer reads
+        as the user pausing. Recomputing it per event would trade that for a
+        timeline that jitters by the drift between two clocks. Only being
+        stamped in the pipeline's own clock avoids both. Stays 0.0 for the
         unit tests, which feed `_decode` fabricated timestamps directly.
+        """
+        self._monotonic_fds: set[int] = set()
+        """Fds the kernel stamps with CLOCK_MONOTONIC, which `_clock_offset`
+        must not be added to.
+
+        An fd absent here takes the offset -- including the `None` the unit
+        tests decode with, which is what keeps a fabricated timestamp
+        answering to `_clock_offset` alone.
         """
         self._xkb: XkbTranslator | None = None
         self._held_shift = False  # fallback modifier state when xkb is absent
         self._pending: dict[str, int] = {}
+        self._dropped_fds: set[int | None] = set()
+        """Fds in the middle of a SYN_DROPPED overrun, whose events are being
+        discarded until the SYN_REPORT that closes the incomplete packet."""
+        self._held_keys: dict[int | None, set[int]] = {}
+        """Per device, the codes this backend believes are held down.
+
+        Per device because the authority it is reconciled against --
+        `EVIOCGKEY` -- answers for one device, so a key held on a *different*
+        keyboard must not look like one this device lost.
+        """
+        self.notes: list[str] = []
+        """What happened during capture that the recording should admit to.
+
+        Drained into the recording's environment block by the recorder's
+        `_collect_warnings`, the same channel the resolver's late warnings
+        take, so an overrun or a skipped device reaches both the session
+        file's header and the generated script's footer. Appended from the
+        reader thread and read once it has been joined; a list append is
+        atomic under the GIL, and nothing here reads it in between.
+        """
         self.stop_pressed_at: float | None = None
 
     # -- CaptureBackend protocol --------------------------------------------
@@ -240,14 +320,16 @@ class WaylandCaptureBackend:
         paths = self._paths if self._paths is not None else pick_devices()
         if not paths:
             raise CaptureUnavailable("no readable evdev input devices")
-        try:
-            self._devices = [evdev.InputDevice(p) for p in paths]
-        except OSError as exc:
-            raise CaptureUnavailable(f"cannot open {exc.filename}: {exc}") from exc
+        self._devices, failures = self._open(evdev, paths)
+        if not self._devices:
+            raise CaptureUnavailable(
+                "cannot open any input device: " + "; ".join(failures)
+            )
         if self._screen_size is None:
             self._screen_size = drm_screen_size()
         self._clock_offset = time.monotonic() - time.time()
         for dev in self._devices:
+            self._use_monotonic_clock(dev)
             self._learn_abs_range(e, dev)
         # Layout-aware key decoding through libxkbcommon where it is present;
         # None falls back to the fixed US table in `_decode_key`.
@@ -258,6 +340,78 @@ class WaylandCaptureBackend:
             self._cursor.start()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _open(
+        self, evdev: ModuleType, paths: Sequence[str]
+    ) -> tuple[list[Any], list[str]]:
+        """Open what can be opened; return the devices and what refused.
+
+        One device at a time rather than a comprehension over all of them.
+        A single path can be denied or already gone while its neighbours are
+        perfectly readable -- hotplug churn, a udev ACL granted for some
+        devices and not others, a uinput device whose creator exited between
+        `pick_devices` and here -- and failing the whole recording for one of
+        them is the comprehension's behaviour. Worse, it *leaked* every
+        descriptor already opened, because the half-built list went out of
+        scope with the exception and `self._devices` was never assigned, so
+        `stop` had nothing to close.
+
+        Capture with a keyboard and no mouse is worth more than no capture at
+        all, so a partial set starts; `start` still refuses when nothing
+        opened. What was skipped goes in the notes, because a device missing
+        from a recording is invisible in it.
+        """
+        devices: list[Any] = []
+        failures: list[str] = []
+        for path in paths:
+            try:
+                devices.append(evdev.InputDevice(path))
+            except OSError as exc:
+                failures.append(f"{path} ({exc.strerror or exc})")
+        if failures and devices:
+            self.notes.append(
+                f"capture could not open {len(failures)} of {len(paths)} input "
+                f"devices and recorded the rest: {'; '.join(failures)}"
+            )
+        return devices, failures
+
+    def _use_monotonic_clock(self, dev: Any) -> None:
+        """Ask the kernel to stamp this device's events with CLOCK_MONOTONIC.
+
+        The clock correction that cannot go stale. python-evdev never issues
+        this ioctl, so without it the stamps are CLOCK_REALTIME and have to be
+        rebased by an offset a clock step invalidates -- see `_clock_offset`,
+        which stays as the fallback for a kernel or driver that refuses.
+
+        Per device, and before the reader thread starts: events already queued
+        when it is set keep the clock they were stamped with, which is why
+        this runs in `start` ahead of the thread rather than on first read.
+        """
+        import fcntl  # noqa: PLC0415
+        import struct  # noqa: PLC0415
+
+        try:
+            fd = dev.fileno()
+            fcntl.ioctl(fd, _EVIOCSCLOCKID, struct.pack("i", time.CLOCK_MONOTONIC))
+        except (OSError, AttributeError, ValueError):
+            return  # old kernel, odd driver, or a device that just vanished
+        self._monotonic_fds.add(fd)
+
+    def _forget_fd(self, fd: int) -> None:
+        """Drop the per-device state keyed by a descriptor that has closed.
+
+        Every per-device map here is keyed by file descriptor, and the kernel
+        hands the same number back out as soon as it is free -- so a device
+        picked up by the rescan can inherit the number a departed one had.
+        Left behind, those entries would tell the new device's events the
+        wrong clock, scale its coordinates through a stranger's absinfo range,
+        or hold a key down that nothing is pressing.
+        """
+        self._monotonic_fds.discard(fd)
+        self._dropped_fds.discard(fd)
+        self._abs_ranges.pop(fd, None)
+        self._padlike_fds.discard(fd)
+        self._held_keys.pop(fd, None)
 
     def _learn_abs_range(self, e: Any, dev: Any) -> None:
         """Cache an absolute device's range, and seed the pointer from it.
@@ -386,6 +540,9 @@ class WaylandCaptureBackend:
                     watched.discard(key.data.path)
                     with contextlib.suppress(OSError):
                         key.data.close()
+                    # After the close, since the descriptor number is only
+                    # free to be reissued once it is closed -- see `_forget_fd`.
+                    self._forget_fd(key.fd)
             if self._paths is None and time.monotonic() >= next_rescan:
                 next_rescan = time.monotonic() + self._RESCAN_SECONDS
                 self._rescan(e, sel, watched)
@@ -409,6 +566,7 @@ class WaylandCaptureBackend:
             except OSError:
                 continue
             try:
+                self._use_monotonic_clock(dev)
                 self._learn_abs_range(e, dev)
                 sel.register(dev.fileno(), selectors.EVENT_READ, dev)
             except OSError:
@@ -419,11 +577,23 @@ class WaylandCaptureBackend:
             self._devices.append(dev)
 
     def _decode(self, e: Any, ev: Any, fd: int | None = None) -> None:
-        # Rebased onto time.monotonic -- the clock the rest of the pipeline
-        # keeps; see `_clock_offset`.
-        ts = ev.timestamp() + self._clock_offset
+        ts = ev.timestamp()
+        if fd not in self._monotonic_fds:
+            # A device the EVIOCSCLOCKID ioctl could not be set on: its
+            # stamps are CLOCK_REALTIME and need rebasing onto the clock the
+            # rest of the pipeline keeps. See `_clock_offset`.
+            ts += self._clock_offset
+        if ev.type == e.EV_SYN:
+            self._decode_syn(e, ev, ts, fd)
+            return
+        if fd in self._dropped_fds:
+            # Mid-overrun. This device's stream is not merely shorter, it is
+            # incoherent, until the SYN_REPORT that ends the packet the kernel
+            # truncated -- so everything up to that point goes on the floor,
+            # which is what the kernel's own contract asks of a reader.
+            return
         if ev.type == e.EV_KEY:
-            self._decode_key(e, ev, ts)
+            self._decode_key(e, ev, ts, fd)
         elif ev.type == e.EV_REL:
             self._decode_rel(e, ev, ts)
         elif ev.type == e.EV_ABS:
@@ -433,8 +603,118 @@ class WaylandCaptureBackend:
                 self._pending["x"] = self._scale_abs(ev.value, fd, axis=0)
             elif ev.code == e.ABS_Y:
                 self._pending["y"] = self._scale_abs(ev.value, fd, axis=1)
-        elif ev.type == e.EV_SYN and ev.code == e.SYN_REPORT:
-            self._flush(ts)
+
+    def _decode_syn(self, e: Any, ev: Any, ts: float, fd: int | None) -> None:
+        """Handle a synchronisation event: the end of a packet, or a loss.
+
+        Split out of `_decode` rather than sitting among its branches because
+        the two SYN codes are the only ones whose meaning is about the stream
+        itself instead of about input, and because a device mid-overrun has to
+        be let through to its closing SYN_REPORT while everything else from it
+        is discarded -- an order that reads as a special case inline and as a
+        rule here.
+        """
+        if ev.code == e.SYN_DROPPED:
+            self._begin_resync(fd)
+        elif ev.code == e.SYN_REPORT:
+            if fd in self._dropped_fds:
+                self._end_resync(e, fd, ts)
+            else:
+                self._flush(ts)
+
+    def _begin_resync(self, fd: int | None) -> None:
+        """Start discarding a device's stream, a SYN_DROPPED having arrived.
+
+        The kernel emits SYN_DROPPED when its event queue for this reader
+        overran and it threw events away -- the recorder falling behind under
+        load being exactly when that happens. What is left is not a shorter
+        stream but an incoherent one: a press whose release was dropped holds
+        a modifier down over everything after it, and half a motion packet
+        stamps a coordinate the pointer was never at. A recording like that
+        looks complete and is wrong, which is the one failure this backend
+        must not have, so the kernel's contract
+        (Documentation/input/event-codes.rst) is followed: discard through the
+        next SYN_REPORT, then re-read the device's state.
+
+        `_pending` is shared across devices, a known limit of this decoder, so
+        this clears any packet in flight rather than only this device's. That
+        is the conservative side of the choice it forces -- dropping a healthy
+        neighbour's half-packet costs one event, keeping a corrupt one puts a
+        false coordinate in the recording.
+        """
+        self._dropped_fds.add(fd)
+        self._pending.clear()
+
+    def _end_resync(self, e: Any, fd: int | None, ts: float) -> None:
+        """Resume a device, reconciling what its keys are really doing.
+
+        Called on the SYN_REPORT that closes the dropped window. The kernel is
+        the only authority left on what is held, since the events that would
+        have said so are the ones it discarded: a key this backend believed
+        down that `EVIOCGKEY` reports up gets the release it lost, and one
+        reported down that was missed gets its press. Both are stamped at the
+        resync, because the moments they really happened are what the overrun
+        took.
+
+        Reconstructed in both directions on purpose. Releasing what is no
+        longer held is the point -- a dropped Shift or Ctrl release otherwise
+        holds that modifier over the whole rest of the recording -- and
+        pressing what is held keeps every release in the stream paired with a
+        press, which is the shape the normalizer reconstructs holds from. The
+        recording says so either way: a note, not a silent repair.
+        """
+        self._dropped_fds.discard(fd)
+        self.notes.append(
+            "the kernel dropped input events while recording (SYN_DROPPED -- its "
+            "queue for the recorder overran, which happens when the machine is "
+            "under load): the truncated packet was discarded and held keys were "
+            "re-read from the device, so some input is missing between the "
+            "overrun and the recovery"
+        )
+        down = self._kernel_keys_down(e, fd)
+        if down is None:
+            return  # cannot be asked; the held set stands rather than guessing
+        held = self._held_keys.setdefault(fd, set())
+        for code in sorted(held - down):
+            self._decode_key(e, _SyntheticKey(code, 0), ts, fd)
+        for code in sorted(down - held):
+            self._decode_key(e, _SyntheticKey(code, 1), ts, fd)
+
+    def _kernel_keys_down(self, e: Any, fd: int | None) -> set[int] | None:
+        """Which of a device's key codes the kernel reports held, or None.
+
+        `EVIOCGKEY` fills a bitmap covering every code up to `KEY_MAX`, which
+        includes the pointer buttons -- a button stuck down by an overrun is
+        as damaging as a modifier. None where it cannot be asked: no
+        descriptor (the unit tests decode without one) or a driver that
+        refuses, in which case `_end_resync` leaves the held set alone rather
+        than inventing events from a bitmap it does not have.
+        """
+        if fd is None:
+            return None
+        import fcntl  # noqa: PLC0415
+
+        size = (e.KEY_MAX + 8) // 8
+        try:
+            buf = fcntl.ioctl(fd, _eviocgkey(size), bytes(size))
+        except OSError:
+            return None
+        return {
+            code for code in range(e.KEY_MAX + 1) if buf[code // 8] & (1 << (code % 8))
+        }
+
+    def _track_held(self, fd: int | None, code: int, value: int) -> None:
+        """Record that a code went down or came up, for overrun reconciliation.
+
+        Only for codes this backend actually emits an event for, so that
+        `_end_resync` never fabricates one for a code it would drop anyway (a
+        touchscreen's BTN_TOUCH, a stylus's tool codes).
+        """
+        held = self._held_keys.setdefault(fd, set())
+        if value == 1:
+            held.add(code)
+        else:
+            held.discard(code)
 
     def _scale_abs(self, value: int, fd: int | None, axis: int) -> int:
         """Scale a device-unit ABS value to screen pixels where both are known.
@@ -465,10 +745,11 @@ class WaylandCaptureBackend:
                 return pos
         return self._pos if self._pos is not None else (0, 0)
 
-    def _decode_key(self, e: Any, ev: Any, ts: float) -> None:
+    def _decode_key(self, e: Any, ev: Any, ts: float, fd: int | None = None) -> None:
         code, val = ev.code, ev.value
         if code in _BUTTONS:
             if val in (0, 1):
+                self._track_held(fd, code, val)
                 x, y = self._stamp()
                 self._emit(
                     RawEvent(
@@ -492,6 +773,7 @@ class WaylandCaptureBackend:
         if val == 2:  # autorepeat -- the normalizer reconstructs holds, drop it
             return
         pressed = val == 1
+        self._track_held(fd, code, val)
         if self._xkb is not None:
             # xkb tracks every modifier itself (Shift, AltGr/level3, Caps) and
             # decodes under the session's real layout; feed it every key.

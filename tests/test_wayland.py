@@ -13,6 +13,7 @@ only useful if the pyguitest that replays them can press them.
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import subprocess
@@ -209,6 +210,234 @@ class TestClockRebase:
         _feed(b, _FakeEvent(e.EV_KEY, e.KEY_H, 1, ts=1000.0))
         (ev,) = _drain(b)
         assert ev.timestamp == 1000.0
+
+    def test_a_device_stamped_monotonically_by_the_kernel_is_not_rebased(self):
+        # Where EVIOCSCLOCKID took, the kernel already stamps in the
+        # pipeline's clock and adding the offset would shift it right back
+        # out of that domain.
+        b = WaylandCaptureBackend([])
+        b._clock_offset = -5.0
+        b._monotonic_fds.add(7)
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_H, 1, ts=1000.0), 7)
+        (ev,) = _drain(b)
+        assert ev.timestamp == 1000.0
+
+    def test_a_device_the_ioctl_failed_on_still_takes_the_offset(self):
+        # The fallback has to stay per-device: one refusing driver must not
+        # take the rebase away from the devices that do answer, nor get it
+        # applied twice.
+        b = WaylandCaptureBackend([])
+        b._clock_offset = -5.0
+        b._monotonic_fds.add(7)
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_H, 1, ts=1000.0), 8)
+        (ev,) = _drain(b)
+        assert ev.timestamp == 995.0
+
+    def test_asking_a_non_device_for_monotonic_stamps_is_survived(self):
+        # An ENOTTY from something that is not an input device must leave the
+        # offset path in place rather than escaping into start().
+        r, w = os.pipe()
+        try:
+            b = WaylandCaptureBackend([])
+            b._use_monotonic_clock(_FakeDevice({}, fd=r))
+            assert b._monotonic_fds == set()
+        finally:
+            os.close(r)
+            os.close(w)
+
+
+class TestDroppedEvents:
+    """SYN_DROPPED: the kernel's own admission that it lost events."""
+
+    _GONE_FD = 4242
+    """A descriptor nothing owns, so the EVIOCGKEY in `_end_resync` fails with
+    EBADF and the reconciliation takes its cannot-be-asked path -- the shape
+    every test here wants except the two that monkeypatch it."""
+
+    def test_events_inside_the_dropped_window_are_discarded(self):
+        # The kernel threw events away; what is left of the packet is not a
+        # shorter truth but a corrupt one, so it goes on the floor through to
+        # the SYN_REPORT that closes it.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_H, 1), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_REL, e.REL_X, 50), self._GONE_FD)
+        assert _drain(b) == []
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        assert _drain(b) == []
+
+    def test_a_half_accumulated_packet_never_becomes_motion(self):
+        # The deltas banked before the overrun belong to a packet the kernel
+        # truncated; flushing them later stamps a coordinate the pointer was
+        # never at.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._decode(e, _FakeEvent(e.EV_REL, e.REL_X, 10), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        assert _drain(b) == []
+        assert b._pending == {}
+
+    def test_the_stream_resumes_after_the_closing_syn_report(self):
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        _drain(b)
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_H, 1), self._GONE_FD)
+        (ev,) = _drain(b)
+        assert ev.kind == "key_press"
+
+    def test_the_recording_is_told_that_events_were_dropped(self):
+        # A gap a recording does not admit to is the failure mode this
+        # backend must never have: the note is the whole point.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        assert any("SYN_DROPPED" in note for note in b.notes)
+
+    def test_a_key_whose_release_was_dropped_is_released(self):
+        # The harm that makes this worth doing: a lost Shift release holds the
+        # modifier down over every key for the rest of the recording.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_LEFTSHIFT, 1), 9)
+        _drain(b)
+        b._kernel_keys_down = lambda _e, _fd: set()  # the kernel: nothing held
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (ev,) = _drain(b)
+        assert ev.kind == "key_release"
+        assert ev.keysym == keysym_and_text(e.KEY_LEFTSHIFT, False)[0]
+        assert b._held_keys[9] == set()
+
+    def test_a_key_held_through_the_overrun_gets_the_press_that_was_lost(self):
+        # Reconstructed so the stream stays internally consistent: the
+        # normalizer builds holds out of press/release pairs, and a release
+        # with no press is not a shape it can read.
+        b = WaylandCaptureBackend([])
+        b._kernel_keys_down = lambda _e, _fd: {e.KEY_LEFTCTRL}
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (ev,) = _drain(b)
+        assert ev.kind == "key_press"
+        assert e.KEY_LEFTCTRL in b._held_keys[9]
+
+    def test_a_stuck_pointer_button_is_reconciled_too(self):
+        # EVIOCGKEY covers the BTN range, and a button left logically down is
+        # as damaging as a modifier -- every later motion reads as a drag.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_KEY, e.BTN_LEFT, 1), 9)
+        _drain(b)
+        b._kernel_keys_down = lambda _e, _fd: set()
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (ev,) = _drain(b)
+        assert (ev.kind, ev.button) == ("button_release", 1)
+
+    def test_a_key_held_on_another_device_is_not_released(self):
+        # EVIOCGKEY answers for one device. Held state is tracked per
+        # descriptor so a key down on a second keyboard cannot look like one
+        # this device lost.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_KEY, e.KEY_LEFTSHIFT, 1), 11)
+        _drain(b)
+        b._kernel_keys_down = lambda _e, _fd: set()
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        assert _drain(b) == []
+        assert b._held_keys[11] == {e.KEY_LEFTSHIFT}
+
+    def test_held_state_is_left_alone_when_the_kernel_cannot_be_asked(self):
+        # No descriptor to ask: inventing releases from a bitmap that was
+        # never read would be a guess, so the held set stands.
+        b = WaylandCaptureBackend([])
+        _feed(b, _FakeEvent(e.EV_KEY, e.KEY_LEFTSHIFT, 1))
+        _drain(b)
+        _feed(b, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0))
+        _feed(b, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0))
+        assert _drain(b) == []
+        assert b._held_keys[None] == {e.KEY_LEFTSHIFT}
+
+    def test_a_dropped_code_is_never_reconstructed(self):
+        # BTN_TOUCH and the stylus tool codes are dropped by `_decode_key`, so
+        # tracking them would have `_end_resync` fabricate a press for an
+        # event this backend does not emit at all.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_KEY, e.BTN_TOUCH, 1), 9)
+        assert _drain(b) == []
+        assert b._held_keys.get(9, set()) == set()
+
+
+class _FlakyEvdev:
+    """An `evdev` module stand-in whose InputDevice refuses certain paths."""
+
+    def __init__(self, refuse):
+        self._refuse = set(refuse)
+
+    def InputDevice(self, path):  # noqa: N802 - mirrors evdev's own spelling
+        if path in self._refuse:
+            raise OSError(13, "Permission denied")
+        return _FakeDevice({}, fd=100 + len(path))
+
+
+class TestPartialDeviceOpen:
+    def test_one_unreadable_device_does_not_cost_the_others(self):
+        # Hotplug churn, a partial udev ACL, or a uinput device whose creator
+        # exited between the pick and the open: capture with a keyboard and no
+        # mouse beats no capture at all.
+        b = WaylandCaptureBackend([])
+        devices, failures = b._open(
+            _FlakyEvdev(["/dev/input/event1"]),
+            ["/dev/input/event0", "/dev/input/event1"],
+        )
+        assert len(devices) == 1
+        assert len(failures) == 1
+
+    def test_a_skipped_device_is_named_in_the_notes(self):
+        # A device missing from a recording is invisible in it.
+        b = WaylandCaptureBackend([])
+        b._open(
+            _FlakyEvdev(["/dev/input/event1"]),
+            ["/dev/input/event0", "/dev/input/event1"],
+        )
+        (note,) = b.notes
+        assert "event1" in note
+        assert "1 of 2" in note
+
+    def test_nothing_openable_is_still_a_clean_refusal(self, monkeypatch):
+        fake = _FlakyEvdev(["/dev/input/event0"])
+        monkeypatch.setattr(wayland_module, "_evdev", lambda: fake)
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        with pytest.raises(wayland_module.CaptureUnavailable, match="cannot open any"):
+            b.start()
+
+    def test_a_total_refusal_writes_no_note(self, monkeypatch):
+        # The refusal carries the reason itself; a note on a recording that
+        # was never made has nowhere to go.
+        fake = _FlakyEvdev(["/dev/input/event0"])
+        monkeypatch.setattr(wayland_module, "_evdev", lambda: fake)
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        with contextlib.suppress(wayland_module.CaptureUnavailable):
+            b.start()
+        assert b.notes == []
+
+
+class TestDescriptorReuse:
+    def test_closing_a_device_forgets_everything_keyed_by_its_descriptor(self):
+        # The kernel reissues a descriptor number as soon as it is free, so a
+        # device the rescan picks up can inherit a departed one's number --
+        # and with it the wrong clock, a stranger's absinfo range, or a key
+        # held by a device that is gone.
+        b = WaylandCaptureBackend([])
+        b._monotonic_fds.add(9)
+        b._dropped_fds.add(9)
+        b._abs_ranges[9] = (0, 32767, 0, 32767)
+        b._padlike_fds.add(9)
+        b._held_keys[9] = {e.KEY_LEFTSHIFT}
+        b._forget_fd(9)
+        assert 9 not in b._monotonic_fds
+        assert 9 not in b._dropped_fds
+        assert 9 not in b._abs_ranges
+        assert 9 not in b._padlike_fds
+        assert 9 not in b._held_keys
 
 
 class _FakeAbsInfo:
@@ -459,9 +688,11 @@ def _can_round_trip():
 
 @pytest.mark.skipif(
     os.environ.get("PGT_LIVE_INPUT_TESTS") != "1",
-    reason="injects REAL input into the live desktop -- typed keys and a "
-    "button click land in whatever has focus; set PGT_LIVE_INPUT_TESTS=1 "
-    "on a box where that is safe",
+    reason="creates real uinput devices and injects real kernel input into "
+    "them; `_isolate` grabs each one so the events do not reach the session, "
+    "and the tests skip rather than type into the desktop if that grab is "
+    "refused -- but this still manipulates the box's input stack, so set "
+    "PGT_LIVE_INPUT_TESTS=1 only where that is safe",
 )
 @pytest.mark.skipif(
     not _can_round_trip(),
@@ -471,7 +702,7 @@ class TestHardwareRoundTrip:
     """Inject into a virtual device, capture it back through the real backend."""
 
     @staticmethod
-    def _open_device(caps):
+    def _open_device(caps, name="pg-wl-roundtrip"):
         # The event node udev creates for a fresh uinput device can lag the
         # device's creation, and UInput resolves `.device` once at construction
         # without retrying -- so on a cold start it can come back None on a box
@@ -481,7 +712,7 @@ class TestHardwareRoundTrip:
         # only ever waits out udev, never a real denial.
         deadline = time.monotonic() + 2.0
         while True:
-            ui = evdev.UInput(caps, name="pg-wl-roundtrip")
+            ui = evdev.UInput(caps, name=name)
             if ui.device is not None:
                 return ui
             ui.close()
@@ -492,17 +723,120 @@ class TestHardwareRoundTrip:
                 )
             time.sleep(0.05)
 
-    def _run(self, caps, inject):
+    # Virtual devices these tests create are named with this prefix, and only
+    # a device carrying it may ever be grabbed -- see `_isolate`.
+    _PREFIX = "pg-wl-"
+
+    @classmethod
+    def _isolate(cls, backend, path):
+        """Stop the injected input reaching the live session.
+
+        EVIOCGRAB gives the grabbing descriptor *exclusive* delivery: while it
+        is held, the compositor's own descriptor for this device receives
+        nothing. Grabbing the backend's descriptor therefore keeps the whole
+        round trip intact -- real uinput, real kernel, real capture -- while
+        the keystrokes and the button click stop landing in whatever happens
+        to have focus. Without it this class typed "hi" into the live
+        desktop's search bar and clicked wherever the pointer sat, which is
+        both destructive and a privacy problem on a box someone is using.
+
+        Only ever grabs a device this class created: grabbing the box's real
+        keyboard or mouse would take the session's input away from the person
+        at it. Events written before the grab go to everyone, so this must be
+        called before the first injection.
+        """
+        dev = next((d for d in list(backend._devices) if d.path == path), None)
+        if dev is None:
+            raise AssertionError(f"backend never opened {path}")
+        if not dev.name.startswith(cls._PREFIX):
+            # Refuse rather than silently skip: a real device turning up under
+            # a path this class injects into means the test is confused about
+            # which device it is driving, and grabbing it would freeze the
+            # user's own keyboard.
+            raise AssertionError(
+                f"refusing to grab {dev.path} ({dev.name!r}) -- not a test device"
+            )
+        try:
+            dev.grab()
+        except OSError as exc:
+            pytest.skip(
+                f"cannot grab {dev.path} to keep injected input out of the "
+                f"live session ({exc}); refusing to type into the desktop"
+            )
+        return dev
+
+    @staticmethod
+    def _teardown(backend, ui, grabbed=None):
+        """Stop capture and destroy the device without leaking input.
+
+        The order satisfies two separate constraints, and getting either
+        wrong is invisible until something downstream is measured.
+
+        The device must be destroyed while the grab still holds. The kernel
+        synthesizes a release for every key still held when a device goes
+        away and delivers it to every reader -- measured on COSMIC escaping
+        to the live session as a stray `KEY_H` and `BTN_LEFT` release, one
+        for each test that pressed without releasing. Destroying inside the
+        grab contains them, so a future test that forgets a release cannot
+        leak either.
+
+        And the reader must be stopped *before* that, with its descriptor
+        left open: a reader that notices the device die runs `_forget_fd`,
+        which clears the per-descriptor state -- the monotonic-clock set
+        among it -- that these tests assert on afterwards. So the thread is
+        stopped directly rather than through `stop()`, which would close the
+        descriptor and release the grab with it.
+        """
+        backend._stop.set()
+        if backend._thread is not None:
+            backend._thread.join(timeout=3)
+        with contextlib.suppress(Exception):
+            ui.close()
+        if grabbed is not None:
+            with contextlib.suppress(OSError):
+                grabbed.ungrab()
+        backend.stop()
+
+    def _run(self, caps, inject, keep=None):
         ui = self._open_device(caps)
         time.sleep(0.3)
         backend = WaylandCaptureBackend([ui.device.path])
         backend.start()
         time.sleep(0.2)
-        inject(ui)
-        time.sleep(0.4)
-        backend.stop()
-        ui.close()
+        grabbed = self._isolate(backend, ui.device.path)
+        try:
+            inject(ui)
+            time.sleep(0.4)
+        finally:
+            if keep is not None:
+                keep.append(backend)
+            self._teardown(backend, ui, grabbed)
         return list(backend.drain())
+
+    def test_the_kernel_accepts_the_monotonic_clock_on_a_real_device(self):
+        # The one assertion no fake can make: that EVIOCSCLOCKID is the right
+        # request number and a real driver answers it. Everything else about
+        # the clock is arithmetic a unit test can drive -- whether the kernel
+        # agrees is hardware's to say, and if it ever stops agreeing the
+        # offset fallback hides it, so it is asserted here rather than
+        # inferred from timestamps that look plausible either way.
+        def inject(ui):
+            ui.write(e.EV_KEY, e.KEY_H, 1)
+            ui.syn()
+            # Released, not left held: the kernel synthesizes a release for a
+            # held key when the device is destroyed, and a test should not
+            # manufacture the stuck-key state this backend exists to fix.
+            ui.write(e.EV_KEY, e.KEY_H, 0)
+            ui.syn()
+
+        kept = []
+        evs = self._run({e.EV_KEY: [e.KEY_H]}, inject, keep=kept)
+        (backend,) = kept
+        assert backend._monotonic_fds, "EVIOCSCLOCKID was refused by the kernel"
+        # And with it set, the stamps need no rebasing to already be in the
+        # pipeline's clock -- the offset is captured but must go unused.
+        assert evs
+        assert all(abs(ev.timestamp - time.monotonic()) < 60 for ev in evs)
 
     def test_typed_text_round_trips(self):
         def inject(ui):
@@ -555,16 +889,29 @@ class TestHardwareRoundTrip:
                 ),
             ],
         }
-        ui = evdev.UInput(caps, name="pg-wl-seated")
+        ui = self._open_device(caps, name="pg-wl-seated")
         time.sleep(0.3)
         backend = WaylandCaptureBackend([ui.device.path], screen_size=(1280, 800))
         backend.start()
         time.sleep(0.2)
-        ui.write(e.EV_KEY, e.BTN_LEFT, 1)  # click, no motion first
-        ui.syn()
-        time.sleep(0.4)
-        backend.stop()
-        ui.close()
+        # This one builds its own backend rather than going through `_run`,
+        # so it needs the grab explicitly -- and needs it most: an absolute
+        # pointing device seeded mid-range is the one the compositor warps
+        # the real cursor for, and the click below then lands wherever that
+        # left it. Ungrabbed on Debian GNOME that meant a click into the
+        # top-left hot corner, which opens the Activities overview -- the
+        # search bar that the next test's "hi" was then typed into.
+        grabbed = self._isolate(backend, ui.device.path)
+        try:
+            ui.write(e.EV_KEY, e.BTN_LEFT, 1)  # click, no motion first
+            ui.syn()
+            # Released for the same reason as in the clock test: a button left
+            # held becomes a synthetic release to every reader on destroy.
+            ui.write(e.EV_KEY, e.BTN_LEFT, 0)
+            ui.syn()
+            time.sleep(0.4)
+        finally:
+            self._teardown(backend, ui, grabbed)
         clicks = [ev for ev in backend.drain() if ev.kind == "button_press"]
         assert clicks, "no click captured"
         # 16384 of 32767 across 1280/800 -> the screen's rough middle
@@ -581,17 +928,38 @@ class TestHardwareRoundTrip:
         time.sleep(0.4)
         # KEY_A too: pick_devices filters for keyboards (KEY_A) or pointers,
         # and a one-key gadget is deliberately not worth watching.
-        ui = evdev.UInput({e.EV_KEY: [e.KEY_F9, e.KEY_A]}, name="pg-wl-hotplug")
+        ui = self._open_device({e.EV_KEY: [e.KEY_F9, e.KEY_A]}, name="pg-wl-hotplug")
+        grabbed = None
         try:
-            time.sleep(1.0)  # a rescan interval, with margin
+            # Wait for the rescan to have actually taken the device, rather
+            # than sleeping a rescan interval and assuming it did. A fresh
+            # uinput node is not openable the instant it appears -- udev has
+            # to apply the input-group permissions, and pick_devices skips
+            # what it cannot open yet -- and pick_devices opens and queries
+            # every device on the box. Measured on Debian, the registration
+            # lands over a second after creation even with _RESCAN_SECONDS at
+            # 0.3, so a fixed 1.0s wait injected into a device nobody was
+            # watching yet and lost the keystroke about half the time while
+            # the backend was behaving correctly. `_rescan` registers with
+            # the selector *before* appending, so seeing the path here means
+            # the reader is already watching it.
+            deadline = time.monotonic() + 15.0
+            while ui.device.path not in {d.path for d in list(backend._devices)}:
+                assert time.monotonic() < deadline, (
+                    "the rescan never registered the hotplugged device"
+                )
+                time.sleep(0.05)
+            # Keep F9 out of the live session -- see `_isolate`. Safe to grab
+            # only now: before registration the backend has no descriptor to
+            # grab with, which is also why the poll above has to come first.
+            grabbed = self._isolate(backend, ui.device.path)
             ui.write(e.EV_KEY, e.KEY_F9, 1)
             ui.syn()
             ui.write(e.EV_KEY, e.KEY_F9, 0)
             ui.syn()
             time.sleep(0.4)
         finally:
-            backend.stop()
-            ui.close()
+            self._teardown(backend, ui, grabbed)
         f9 = [
             ev for ev in backend.drain() if ev.kind == "key_press" and ev.keysym == "F9"
         ]

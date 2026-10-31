@@ -577,6 +577,18 @@ def describe_environment(
             "recorded through XWayland: native Wayland clients are invisible "
             "to XRecord and nothing they received appears in this recording"
         )
+    if wayland_native:
+        # What capture could do and replay cannot. Said in the session file as
+        # well as in the generated script's header, because a recording is also
+        # read by whoever regenerates it months later, on a machine whose
+        # pointer transport is a question nobody has asked yet.
+        environment.notes.append(
+            "captured from evdev below the compositor, which replay does not "
+            "use: a generated script sends input through pyguitest's own input "
+            "backend, and some Wayland sessions drop uinput's pointer events "
+            'before the compositor -- replay with backend=["eiinput", ...] to '
+            "send over libei instead"
+        )
     if session is not None:
         try:
             # A property, not a method. Calling it raised "'CapabilitySet'
@@ -1057,17 +1069,26 @@ class Recorder:
         return True
 
     def _collect_warnings(self) -> None:
-        """Carry what the resolver learned while recording into the notes.
+        """Carry what the resolver and the backend learned into the notes.
 
         Collected again at the end, not only at `start`. The resolver's most
         useful warnings are the ones it can only raise once it has been asked
         about a real point -- a toolkit whose hit-testing does not agree with
         its own extents, an element from a process no window on this display
         owns -- and those all happen after the environment block was built.
+
+        A capture backend's are the same kind of fact and later still: the
+        kernel dropping events under load, a device that could not be opened.
+        Duck-typed, like `drain` is, because `notes` is not in the
+        `CaptureBackend` protocol -- a backend with nothing to admit to says
+        nothing, and must not have to carry an empty list to stay valid.
         """
+        notes = self.recording.environment.notes
+        from_backend = getattr(self._backend, "notes", None)
+        if from_backend:
+            notes.extend(n for n in from_backend if n not in notes)
         if not isinstance(self._resolver, DesktopResolver):
             return
-        notes = self.recording.environment.notes
         notes.extend(w for w in self._resolver.warnings if w not in notes)
 
     def _stop_sequence(self, raw: Any) -> tuple[list[Any], bool]:

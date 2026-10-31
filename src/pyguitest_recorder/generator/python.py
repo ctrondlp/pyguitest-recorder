@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.19"
+PROFILE = "pyguitest-0.20"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -129,6 +129,19 @@ fractional capture region is covered rather than silently truncated. Nothing
 this generator emits names an API 0.18 lacked, so a script generated here
 still replays under 0.18; the bump is the "what was checked against" claim,
 kept level with `pyproject.toml`'s floor as every bump before it has been.
+
+0.20 is the 0.16.0 shape again rather than the 0.19 one: it reaches a call
+this generator emits, and reaches it by fixing what an older install gets
+*wrong* rather than what it lacks, so `validate()` could not have caught it.
+`gui.focus_window(...)` -- written for every window a recording switches to
+-- abandoned its own retry on the first failure: one transient refusal
+consumed the whole `attempts` budget, on the single call whose purpose is
+out-waiting a window manager that grants focus late. A generated script
+replaying under an older pyguitest therefore types into whatever held focus
+instead, which is the failure mode the call exists to prevent. 0.20 also
+exports `KeymapWarning` from the package root, which is the name
+`--quiet-keymap-warning` scripts filter on; emitting the public spelling is
+only safe because this floor guarantees it is there.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -2699,7 +2712,11 @@ def _warning_suppression(options: GeneratorOptions) -> list[str]:
             [
                 "# --suppress-keymap-warning: uinput's keyboard-layout caveat is",
                 "# silenced below; typed text still depends on the layout matching.",
-                "from pyguitest.backends.input import KeymapWarning",
+                # The package root, not `pyguitest.backends.input`: the class
+                # is exported from 0.20 (this package's floor), and the
+                # backends path is a private module pyguitest reserves the
+                # right to move -- a generated script should not depend on it.
+                "from pyguitest import KeymapWarning",
                 "",
                 'warnings.filterwarnings("ignore", category=KeymapWarning)',
             ]
@@ -2832,6 +2849,17 @@ def _header(
         lines.append("")
         lines.append("Recorded through XWayland: native Wayland clients were invisible")
         lines.append("to the capture backend and are absent from this script.")
+    if (env.capture_backend or "").startswith("wayland"):
+        # Capture and replay are not the same path on Wayland, and this is the
+        # only place a reader finds that out before it bites. See `_connect`
+        # for why the transport is named here rather than put in the call.
+        lines.append("")
+        lines.append("Recorded below the compositor through evdev. Replay does not")
+        lines.append("go back that way -- it sends input through pyguitest's own")
+        lines.append("backend, and some Wayland sessions drop uinput's pointer")
+        lines.append("events before the compositor sees them. If clicks here do")
+        lines.append("not land, replay over libei instead:")
+        lines.append('    connect(backend=["eiinput", "atspi", "windows"])')
     # Only a pointer to the notes, not the notes themselves. They answer the
     # question a reader asks *second* -- why a script is all coordinates when
     # the whole point of the tool is that it should not be -- and one recording
@@ -2894,6 +2922,18 @@ def _connect(state: _State) -> str:
     it. Both are real on the machine this was recorded on, and a Mac that has
     since lost either gets the named-backend refusal pyguitest documents rather
     than a silent downgrade to coordinates.
+
+    A Wayland recording has the same asymmetry and deliberately does *not* get
+    the same treatment. It was captured from evdev below the compositor, a path
+    replay cannot use, and the transport that reliably reaches a compositor is
+    `eiinput` -- also opt-in, so a bare `connect()` composes `uinput` instead,
+    whose pointer events some sessions drop before the compositor. The
+    difference is what the consent costs: macOS's PostEvent grant is already
+    held on the machine that did the recording and persists, while the libei
+    portal raises an interactive dialog, so naming `eiinput` here would make
+    every generated script stop for a prompt -- including the unattended runs
+    these scripts are written for. The header says what to connect with
+    instead, and `_header_lines` is where that is written.
     """
     if is_macos(state.session_type):
         return 'pyguitest.connect(backend=["macquartz", "macos"])'

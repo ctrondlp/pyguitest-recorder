@@ -3,7 +3,134 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
-## [Unreleased]
+## [0.13.0] — 2026-10-30
+
+### Changed
+
+- **The pyguitest floor is now 0.20.0, and `PROFILE` moves with it to
+  `pyguitest-0.20`.** Load-bearing rather than the usual "what the output was
+  checked against" claim, and of the kind `validate()` cannot catch: a
+  generated script calls `gui.focus_window(...)` for every window the
+  recording switches to, and before 0.20.0 that call abandoned its own retry
+  on the first failure -- one transient refusal consumed the whole `attempts`
+  budget, on the single call whose purpose is out-waiting a window manager
+  that grants focus late. An older pyguitest does not fail to *have* the
+  method, it gets it wrong, and the script then types into whatever held
+  focus. The floor and `PROFILE` stay a single value by design, since the
+  `require_version(...)` the generator emits is derived from `PROFILE`.
+
+- **A generated script's `KeymapWarning` filter now imports from the package
+  root.** Under `--suppress-keymap-warning` the script emitted
+  `from pyguitest.backends.input import KeymapWarning`, reaching into a
+  private module path pyguitest reserves the right to move. 0.20.0 exports
+  the class from `pyguitest` itself -- which is what makes the public
+  spelling safe to emit -- so that is what scripts now carry.
+
+### Fixed
+
+- **The native-Wayland backend now says what it missed, and reconciles what
+  it lost.** 0.12.0 added evdev capture below the compositor; this is the
+  integrity half. The kernel's per-reader buffer can overrun, and when it does
+  it says `SYN_DROPPED` -- after which the stream is meaningless until the
+  closing `SYN_REPORT`. Those events are now discarded rather than decoded, so
+  a half-accumulated packet can no longer surface as motion that never
+  happened, and the recording is *told* the drop occurred instead of quietly
+  being short a few events.
+
+  A drop also leaves held state wrong, which outlasts the gap: a key whose
+  release fell inside the window stays down for the rest of the recording. The
+  backend now re-reads the real state from the kernel with `EVIOCGKEY` at the
+  resync point and reconciles it -- a key whose release was dropped is
+  released, one held right through the overrun gets the press that was lost,
+  and a stuck pointer button is fixed the same way. Deliberately bounded: a
+  held key on a *different* device is left alone, a code that was never seen is
+  never invented, and a kernel that will not answer the ioctl leaves held state
+  untouched rather than guessing.
+
+  Device failures are honest now too. One unreadable `/dev/input` node no
+  longer costs the others -- the rest are opened and what was skipped is named
+  in the recording's notes, because a device missing from a capture is a reason
+  a later reader needs. Nothing openable at all is still a clean refusal, and
+  writes no note, since the refusal already carries its own reason. Per-device
+  state is also forgotten when a descriptor closes (`_forget_fd`), so a reused
+  fd cannot inherit the clock, drop, axis-range, pad and held-key state of the
+  device that had it before.
+
+  Carrying all that out needed a channel a capture backend did not have:
+  `notes` on the backend, drained into the recording by
+  `Recorder._collect_warnings` alongside the resolver's own late warnings.
+  Duck-typed, like `drain` already is -- `notes` is not in the
+  `CaptureBackend` protocol, so a backend with nothing to admit to says
+  nothing rather than having to carry an empty list to stay valid.
+
+- **The opt-in hardware tests no longer type into the desktop that runs
+  them.** `PGT_LIVE_INPUT_TESTS=1` creates real uinput devices and injects
+  real kernel input, and the events went to the session as well as to the
+  backend under test -- measured on Debian GNOME, where the absolute-position
+  test warped the real cursor into the top-left hot corner, the click opened
+  the Activities overview, and the next test typed "hi" into its search bar.
+  Destructive on a machine someone is using, and a privacy problem on any
+  machine, since the keystrokes land in whatever holds focus.
+
+  Each test device is now grabbed (`EVIOCGRAB`) on the backend's own
+  descriptor, which gives that descriptor exclusive delivery: the compositor's
+  descriptor for the device receives nothing while the whole round trip --
+  real uinput, real kernel, real capture -- stays intact. Verified by a second
+  reader standing in for the compositor: 0 events escape across a full run,
+  and 2 per keystroke without the grab. The grab only ever applies to a device
+  the tests created, and is refused loudly otherwise, because grabbing the
+  box's real keyboard would take input away from the person at it; if the
+  grab itself fails the tests skip rather than fall back to typing into the
+  session.
+
+  Also fixed a real flake these tests were carrying: the hotplug-rescan test
+  slept a fixed interval and assumed the new device had been picked up, which
+  failed about half the time on Debian while the backend was behaving
+  correctly -- a fresh uinput node is not openable the instant it appears, and
+  `pick_devices` opens and queries every device on the box, so registration
+  landed over a second after creation. It now waits for the registration it
+  actually depends on, and fails with that as the message if it never comes.
+
+- **A Wayland recording now says what replay will need, because it is not the
+  path capture used.** Capture reads evdev *below* the compositor; replay sends
+  through pyguitest's own input backend *above* it, and some Wayland sessions
+  drop uinput's pointer events before the compositor sees them -- measured on
+  COSMIC, GNOME and KWin. A generated script could therefore replay nothing
+  while looking perfectly correct. The note is now in both places a reader
+  looks: the session file's environment notes, and the generated script's
+  header, which names the fix outright --
+  `connect(backend=["eiinput", "atspi", "windows"])`.
+
+  It is not put into the generated `connect()` call, and the asymmetry with
+  macOS is deliberate. macOS names `macquartz` there because that grant is
+  already held on the machine that did the recording and persists; libei's
+  portal raises an interactive consent dialog, so emitting `eiinput` would make
+  every generated script stop for a prompt -- including the unattended runs
+  these scripts exist for. The header tells the reader what to change instead.
+
+  `docs/developers/status.md` no longer reads as though Wayland cannot be
+  recorded, and the package description names the display servers rather than
+  rolling them up as "Linux and BSD", since which one a session runs decides
+  which backend records it.
+
+- **The three errors this package hands a caller were unimportable from it.**
+  `ConfigError` is the clearest case: `Settings` is in the package `__all__`
+  and Settings validation raises it from ten places, so a caller could
+  construct the exported class but not handle what constructing it raises --
+  they had to reach into `pyguitest_recorder.config.settings`, a module path
+  this package reserves the right to move. `CaptureUnavailable` is the same
+  shape one layer out: `choose_backend` raises it and `Recorder` reaches that
+  during its own construction, so it is the first thing a library caller
+  meets on a machine with no usable capture path. `ValidationError` is the
+  generator's, raised when emitted calls do not match the installed pyguitest
+  API. All three are now exported.
+
+  `tests/test_config.py` asserts it as an invariant rather than three
+  assertions -- every exception class defined anywhere in the package appears
+  in `__all__` -- because naming cases individually is exactly what let them
+  be missed: pyguitest's own export test carried three hand-written cases and
+  a fourth exception still slipped past it. An exception genuinely internal
+  should take a leading underscore instead.
 
 ## [0.12.0] — 2026-10-29
 
