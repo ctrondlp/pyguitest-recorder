@@ -624,7 +624,7 @@ def test_suppress_keymap_warning_flag_reaches_the_generated_script(saved, tmp_pa
         ]
     )
     source = out.read_text()
-    assert "from pyguitest.backends.input import KeymapWarning" in source
+    assert "from pyguitest import KeymapWarning" in source
     assert 'warnings.filterwarnings("ignore", category=KeymapWarning)' in source
     compile(source, str(out), "exec")
 

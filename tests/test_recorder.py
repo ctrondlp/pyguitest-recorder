@@ -375,6 +375,35 @@ def _run(backend: Any) -> Recording:
     return _start(backend).run()
 
 
+class NotingBackend(_SilentBackend):
+    """A capture backend with something to admit to, the way evdev has.
+
+    `notes` is not in the `CaptureBackend` protocol -- the three fakes above
+    carry none and stay valid, which is the half of this worth a test of its
+    own.
+    """
+
+    notes = ["the kernel dropped input events while recording (SYN_DROPPED)"]
+
+
+def test_what_a_backend_admits_to_reaches_the_recording() -> None:
+    # The evdev backend learns two things only while capturing -- the kernel
+    # dropping events under load, a device it could not open -- and both are
+    # facts about how complete the recording is. Collected at the end like the
+    # resolver's late warnings, since the environment block was built before
+    # capture even started.
+    recording = _run(NotingBackend())
+    assert [n for n in recording.environment.notes if "SYN_DROPPED" in n]
+
+
+def test_a_backend_with_nothing_to_admit_to_adds_no_note() -> None:
+    # Only that the collection adds nothing of its own: the environment block
+    # has notes of its own to put here (an XWayland session says so), and this
+    # runs on machines that produce them.
+    recording = _run(_SilentBackend())
+    assert not [n for n in recording.environment.notes if "SYN_DROPPED" in n]
+
+
 def test_a_stop_from_another_thread_keeps_the_context_until_run_has_drained() -> None:
     """Resolution happens at consume time, so the session has to outlive `stop`.
 
@@ -874,6 +903,24 @@ class TestWindowsEnvironmentSnapshot:
         assert env.display == ""
         assert env.xwayland is False
         assert "xwayland" not in env.session_type.lower()
+
+    def test_an_evdev_recording_says_what_replay_will_need(self):
+        # The asymmetry that only shows up at replay: capture read the kernel's
+        # devices, and a generated script sends input back through pyguitest's
+        # own backend, whose uinput pointer events some Wayland sessions drop
+        # before the compositor. Said in the session file as well as the
+        # script, since whoever regenerates it later reads this instead.
+        env = self._describe(
+            "wayland-evdev",
+            {"WAYLAND_DISPLAY": "wayland-1"},
+            detected="SessionType.WAYLAND",
+        )
+        (note,) = [n for n in env.notes if "eiinput" in n]
+        assert "replay" in note
+
+    def test_an_xrecord_recording_is_told_nothing_about_replay_transports(self):
+        env = self._describe("xrecord", {"DISPLAY": ":0"}, detected="SessionType.X11")
+        assert not [n for n in env.notes if "eiinput" in n]
 
     def test_a_probed_xwayland_server_is_said_so_even_when_detection_says_x11(self):
         # The live case: `scoped_environment` strips WAYLAND_DISPLAY before

@@ -299,3 +299,53 @@ def test_exclude_windows_with_record_raw_is_a_self_defeating_combination():
     # would look scrubbed while being nothing of the kind.
     with pytest.raises(ConfigError, match="record_raw"):
         Settings(exclude_windows=("*Vault*",), record_raw=True)
+
+
+def test_every_error_the_package_hands_a_caller_is_exported() -> None:
+    """A caller who cannot name an exception cannot catch it.
+
+    `ConfigError` is why this is not hypothetical: `Settings` is in the
+    package `__all__` and Settings validation raises `ConfigError` from ten
+    places, so before this a caller could construct the exported class but
+    not handle what constructing it raises -- they had to reach into
+    `pyguitest_recorder.config.settings`, a module path this package reserves
+    the right to move. `CaptureUnavailable` is the same shape one layer out:
+    `choose_backend` raises it and `Recorder` reaches that during its own
+    construction, so it is the first thing a library caller meets on a
+    machine with no usable capture path.
+
+    Asked as an invariant rather than three assertions, because naming cases
+    individually is what let them be missed: pyguitest's own export test had
+    three hand-written cases and a fourth exception still slipped through.
+    An exception genuinely internal to this package should take a leading
+    underscore rather than be left out of `__all__`.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+
+    import pyguitest_recorder
+
+    found: dict[str, str] = {}
+    for mod_info in pkgutil.walk_packages(
+        pyguitest_recorder.__path__, pyguitest_recorder.__name__ + "."
+    ):
+        try:
+            mod = importlib.import_module(mod_info.name)
+        except Exception:  # noqa: BLE001 - a backend whose deps are absent here
+            continue
+        for name, obj in vars(mod).items():
+            if (
+                not name.startswith("_")
+                and inspect.isclass(obj)
+                and issubclass(obj, BaseException)
+                and obj.__module__ == mod.__name__
+            ):
+                found[name] = mod_info.name
+
+    assert found, "found no exceptions to check"
+    missing = sorted(set(found) - set(pyguitest_recorder.__all__))
+    assert not missing, (
+        "raised by the package but unimportable from it: "
+        f"{ {n: found[n] for n in missing} }"
+    )

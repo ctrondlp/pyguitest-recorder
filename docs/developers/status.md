@@ -301,6 +301,15 @@ is possible on: `x11` (GhostBSD), `win32` (Windows 11) and `macos`. The
 Wayland boxes cannot be recorded at all -- no Wayland capture backend, and
 their drivers click through AT-SPI actions, which emit no input events.
 
+> **Superseded on the Wayland point (2026-10-27 onward).** The paragraph
+> above is what was true in October 2026 and is kept as the record of that
+> run. There is a Wayland capture backend now -- evdev, below the compositor
+> -- run live on all five fleet compositors; see [the evdev sections
+> above](#wayland-the-evdev-backend-run-live-on-kde-plasma-6-2026-10-27).
+> What still holds is the *second* half: a driver clicking through AT-SPI
+> actions emits no input events, so a driver-driven run on those boxes
+> remains unrecordable for that reason rather than for want of a backend.
+
 | Platform | Events | Distinct names | Of those, verified controls | Unexplained |
 |---|---|---|---|---|
 | GhostBSD / x11 | 376 (302 observed) | 29 | 11 | 1 |
