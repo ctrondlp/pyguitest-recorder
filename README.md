@@ -396,6 +396,16 @@ Notepad), and what GTK4 hit-testing costs — are in
   works below the compositor, the element-resolution rules, and what has
   actually been run
 
+There is also a book. *Python Desktop Automation: Building Reliable
+Cross-Platform GUI Tests with pyguitest and pyguitest-recorder* gives this
+tool the whole of its Part V — recording a first workflow, reading the
+generated Python, and editing it into something maintainable — on top of the
+pyguitest API that output is written in. Free to read, pay what you want:
+[leanpub.com/python-desktop-automation](https://leanpub.com/python-desktop-automation).
+
+These pages stay authoritative where the two differ: the book is an edition
+and names the releases it was written against, while these track the code.
+
 ## License
 
 GPL-2.0-or-later, the same as [pyguitest](https://github.com/ctrondlp/pyguitest)
