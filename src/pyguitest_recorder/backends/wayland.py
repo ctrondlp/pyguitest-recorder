@@ -288,7 +288,24 @@ class WaylandCaptureBackend:
         """
         self._xkb: XkbTranslator | None = None
         self._held_shift = False  # fallback modifier state when xkb is absent
-        self._pending: dict[str, int] = {}
+        self._pending: dict[int | None, dict[str, int]] = {}
+        """Per device, the motion banked so far in the packet it is building.
+
+        Per device because a packet belongs to one: it runs from that device's
+        events to *that device's* SYN_REPORT, so a SYN_REPORT must never flush
+        motion another device banked, and a SYN_DROPPED must never discard it.
+        Shared, as this was, both were possible by construction.
+
+        Reaching either from userspace turns out to be another matter, and the
+        honest answer is that this is a latent trap rather than a bug anyone
+        has seen: the input core buffers a device's events and force-emits a
+        SYN_REPORT when its value buffer fills, so a reader is never handed a
+        partial packet and a second device is never mid-packet. Measured on
+        Debian -- an un-synced write delivers nothing at all, and 120 key
+        events in one packet came back as whole packets, three of them. So
+        the keying is kept for the invariant it makes unconditional, not for a
+        symptom it fixes. Empty entries are dropped so the map is `{}` at rest.
+        """
         self._dropped_fds: set[int | None] = set()
         """Fds in the middle of a SYN_DROPPED overrun, whose events are being
         discarded until the SYN_REPORT that closes the incomplete packet."""
@@ -412,6 +429,7 @@ class WaylandCaptureBackend:
         self._abs_ranges.pop(fd, None)
         self._padlike_fds.discard(fd)
         self._held_keys.pop(fd, None)
+        self._pending.pop(fd, None)
 
     def _learn_abs_range(self, e: Any, dev: Any) -> None:
         """Cache an absolute device's range, and seed the pointer from it.
@@ -595,14 +613,14 @@ class WaylandCaptureBackend:
         if ev.type == e.EV_KEY:
             self._decode_key(e, ev, ts, fd)
         elif ev.type == e.EV_REL:
-            self._decode_rel(e, ev, ts)
+            self._decode_rel(e, ev, ts, fd)
         elif ev.type == e.EV_ABS:
             if fd in self._padlike_fds:
                 return  # a touchpad's pad-local finger position, not a cursor
             if ev.code == e.ABS_X:
-                self._pending["x"] = self._scale_abs(ev.value, fd, axis=0)
+                self._bank(fd)["x"] = self._scale_abs(ev.value, fd, axis=0)
             elif ev.code == e.ABS_Y:
-                self._pending["y"] = self._scale_abs(ev.value, fd, axis=1)
+                self._bank(fd)["y"] = self._scale_abs(ev.value, fd, axis=1)
 
     def _decode_syn(self, e: Any, ev: Any, ts: float, fd: int | None) -> None:
         """Handle a synchronisation event: the end of a packet, or a loss.
@@ -620,7 +638,11 @@ class WaylandCaptureBackend:
             if fd in self._dropped_fds:
                 self._end_resync(e, fd, ts)
             else:
-                self._flush(ts)
+                self._flush(ts, fd)
+
+    def _bank(self, fd: int | None) -> dict[str, int]:
+        """This device's packet-in-progress, created on first use."""
+        return self._pending.setdefault(fd, {})
 
     def _begin_resync(self, fd: int | None) -> None:
         """Start discarding a device's stream, a SYN_DROPPED having arrived.
@@ -636,14 +658,12 @@ class WaylandCaptureBackend:
         (Documentation/input/event-codes.rst) is followed: discard through the
         next SYN_REPORT, then re-read the device's state.
 
-        `_pending` is shared across devices, a known limit of this decoder, so
-        this clears any packet in flight rather than only this device's. That
-        is the conservative side of the choice it forces -- dropping a healthy
-        neighbour's half-packet costs one event, keeping a corrupt one puts a
-        false coordinate in the recording.
+        Only this device's banked packet goes, since `_pending` is keyed by
+        descriptor: the overrun is per reader-device queue, so a second
+        pointer mid-packet lost nothing and has nothing to re-read.
         """
         self._dropped_fds.add(fd)
-        self._pending.clear()
+        self._pending.pop(fd, None)
 
     def _end_resync(self, e: Any, fd: int | None, ts: float) -> None:
         """Resume a device, reconciling what its keys are really doing.
@@ -661,17 +681,27 @@ class WaylandCaptureBackend:
         holds that modifier over the whole rest of the recording -- and
         pressing what is held keeps every release in the stream paired with a
         press, which is the shape the normalizer reconstructs holds from. The
-        recording says so either way: a note, not a silent repair.
+        recording says so either way: a note, not a silent repair -- written
+        *after* the kernel is asked, because whether the reconciliation
+        actually happened is part of what there is to admit to. Claiming held
+        keys were re-read when `EVIOCGKEY` refused would describe a repair
+        that did not occur, over a recording that can still hold a key down
+        for the whole rest of its length.
         """
         self._dropped_fds.discard(fd)
+        down = self._kernel_keys_down(e, fd)
         self.notes.append(
             "the kernel dropped input events while recording (SYN_DROPPED -- its "
             "queue for the recorder overran, which happens when the machine is "
-            "under load): the truncated packet was discarded and held keys were "
-            "re-read from the device, so some input is missing between the "
-            "overrun and the recovery"
+            "under load): the truncated packet was discarded and "
+            + (
+                "held keys were re-read from the device"
+                if down is not None
+                else "the device would not say which keys it holds, so one may "
+                "stay down for the rest of the recording"
+            )
+            + ", so some input is missing between the overrun and the recovery"
         )
-        down = self._kernel_keys_down(e, fd)
         if down is None:
             return  # cannot be asked; the held set stands rather than guessing
         held = self._held_keys.setdefault(fd, set())
@@ -794,11 +824,13 @@ class WaylandCaptureBackend:
             )
         )
 
-    def _decode_rel(self, e: Any, ev: Any, ts: float) -> None:
+    def _decode_rel(self, e: Any, ev: Any, ts: float, fd: int | None = None) -> None:
         if ev.code == e.REL_X:
-            self._pending["dx"] = self._pending.get("dx", 0) + ev.value
+            bank = self._bank(fd)
+            bank["dx"] = bank.get("dx", 0) + ev.value
         elif ev.code == e.REL_Y:
-            self._pending["dy"] = self._pending.get("dy", 0) + ev.value
+            bank = self._bank(fd)
+            bank["dy"] = bank.get("dy", 0) + ev.value
         elif ev.code in (e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES):
             # The same physical detent again, in 120ths: a modern mouse emits
             # BOTH the classic code (value 1) and the hi-res one (value 120)
@@ -833,23 +865,33 @@ class WaylandCaptureBackend:
                 )
             )
 
-    def _flush(self, ts: float) -> None:
+    def _flush(self, ts: float, fd: int | None = None) -> None:
         # Both branches stamp through `_stamp`, so when the ScreenCast cursor
         # source is running its true position is what every motion carries;
         # with it off `_stamp` returns the position each branch just computed,
         # so the behaviour is unchanged (the absolute and delta-tracked cases).
-        if "x" in self._pending or "y" in self._pending:
+        #
+        # Only this device's bank is flushed -- a SYN_REPORT closes the packet
+        # of the device that sent it, not whatever another pointer happens to
+        # be mid-way through. `self._pos` stays shared, as the one cursor the
+        # seat actually has.
+        pending = self._pending.get(fd)
+        if not pending:
+            return
+        if "x" in pending or "y" in pending:
             prev = self._pos or (0, 0)
             self._pos = (
-                self._pending.pop("x", prev[0]),
-                self._pending.pop("y", prev[1]),
+                pending.pop("x", prev[0]),
+                pending.pop("y", prev[1]),
             )
             x, y = self._stamp()
             self._emit(
                 RawEvent(kind="motion", timestamp=ts, x=x, y=y, screen=self._screen)
             )
-        dx = self._pending.pop("dx", 0)
-        dy = self._pending.pop("dy", 0)
+        dx = pending.pop("dx", 0)
+        dy = pending.pop("dy", 0)
+        if not pending:
+            self._pending.pop(fd, None)  # keep the map `{}` at rest
         if dx or dy:
             # A relative device knows only deltas; its absolute position is
             # tracked from the screen's centre once the screen is known, and

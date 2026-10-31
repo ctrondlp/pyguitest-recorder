@@ -45,7 +45,27 @@ was released.
   and a stuck pointer button is fixed the same way. Deliberately bounded: a
   held key on a *different* device is left alone, a code that was never seen is
   never invented, and a kernel that will not answer the ioctl leaves held state
-  untouched rather than guessing.
+  untouched rather than guessing -- and the note says which of those happened,
+  since a note claiming a re-read that was refused would describe a repair
+  that did not occur, over a recording that can still hold a key down for the
+  whole rest of its length.
+
+  Each device now accumulates its own packet, where the accumulator used to be
+  shared across all of them. A packet belongs to one device -- it runs from
+  that device's events to *that device's* `SYN_REPORT` -- so a shared
+  accumulator meant a `SYN_REPORT` could flush motion a second device had
+  banked, and a `SYN_DROPPED` could discard it, neither of which the overrun
+  had anything to do with. Keyed by descriptor, neither is expressible.
+
+  Stated as the latent trap it is, rather than a symptom: on real hardware
+  the ordinary two-pointer case does **not** reproduce it, and was measured
+  not reproducing it on Debian and COSMIC. The input core buffers a device's
+  events and force-emits a `SYN_REPORT` when its value buffer fills, so a
+  reader is never handed a partial packet and a second device is never found
+  mid-packet -- an un-synced write delivers nothing at all, and 120 key events
+  written as one packet came back as three whole ones. The keying is kept
+  because it makes the invariant hold unconditionally instead of resting on
+  that kernel behaviour, which nothing in this backend states or checks.
 
   Device failures are honest now too. One unreadable `/dev/input` node no
   longer costs the others -- the rest are opened and what was skipped is named

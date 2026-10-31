@@ -2933,7 +2933,7 @@ def _connect(state: _State) -> str:
     portal raises an interactive dialog, so naming `eiinput` here would make
     every generated script stop for a prompt -- including the unattended runs
     these scripts are written for. The header says what to connect with
-    instead, and `_header_lines` is where that is written.
+    instead, and `_header` is where that is written.
     """
     if is_macos(state.session_type):
         return 'pyguitest.connect(backend=["macquartz", "macos"])'

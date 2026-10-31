@@ -277,6 +277,50 @@ class TestDroppedEvents:
         assert _drain(b) == []
         assert b._pending == {}
 
+    def test_another_devices_half_packet_survives_this_ones_overrun(self):
+        # The overrun is per reader-device queue, so a second pointer lost
+        # nothing. A shared accumulator discarded its banked motion anyway and
+        # its own SYN_REPORT could never flush it again -- real input thrown
+        # away by a neighbour's bad luck.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._decode(e, _FakeEvent(e.EV_REL, e.REL_X, 10), 9)  # mid-packet
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        assert _drain(b) == []  # the dropped device contributes nothing
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (ev,) = _drain(b)
+        assert (ev.kind, ev.dx) == ("motion", 10)
+
+    def test_two_pointers_packets_do_not_merge(self):
+        # The same keying, without an overrun involved: a SYN_REPORT closes the
+        # packet of the device that sent it and no other. Shared, the first
+        # flush summed both devices' deltas into one motion.
+        #
+        # Asserted at the decoder, which is the only level that can state it:
+        # the kernel force-emits a SYN_REPORT when a device's value buffer
+        # fills, so it never hands a reader a partial packet and the live
+        # two-pointer case cannot reach this (checked on hardware, Debian and
+        # COSMIC, where it does not reproduce). That makes this an invariant
+        # the decoder owns rather than a kernel behaviour it may lean on.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._decode(e, _FakeEvent(e.EV_REL, e.REL_X, 10), 9)
+        b._decode(e, _FakeEvent(e.EV_REL, e.REL_X, 3), 11)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 11)
+        (ev,) = _drain(b)
+        assert ev.dx == 3  # not 13
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (ev,) = _drain(b)
+        assert ev.dx == 10
+        assert b._pending == {}  # nothing left banked behind either device
+
+    def test_a_syn_report_for_a_device_with_nothing_banked_emits_nothing(self):
+        # Every packet ends in one, including the packets that carried only
+        # keys -- those must not fall through to the motion branches.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        assert _drain(b) == []
+        assert b._pending == {}
+
     def test_the_stream_resumes_after_the_closing_syn_report(self):
         b = WaylandCaptureBackend([])
         b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
@@ -293,6 +337,25 @@ class TestDroppedEvents:
         b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
         b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
         assert any("SYN_DROPPED" in note for note in b.notes)
+
+    def test_the_note_does_not_claim_a_re_read_that_was_refused(self):
+        # The note is the admission, so it cannot itself be wrong: with the
+        # ioctl refused (what `_GONE_FD` arranges) nothing was reconciled, and
+        # a key can still be held down for the rest of the recording.
+        b = WaylandCaptureBackend([])
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), self._GONE_FD)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), self._GONE_FD)
+        (note,) = b.notes
+        assert "re-read" not in note
+        assert "would not say which keys it holds" in note
+
+    def test_the_note_reports_the_re_read_when_the_kernel_answered(self):
+        b = WaylandCaptureBackend([])
+        b._kernel_keys_down = lambda _e, _fd: set()
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_DROPPED, 0), 9)
+        b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
+        (note,) = b.notes
+        assert "held keys were re-read from the device" in note
 
     def test_a_key_whose_release_was_dropped_is_released(self):
         # The harm that makes this worth doing: a lost Shift release holds the
@@ -426,18 +489,24 @@ class TestDescriptorReuse:
         # device the rescan picks up can inherit a departed one's number --
         # and with it the wrong clock, a stranger's absinfo range, or a key
         # held by a device that is gone.
+        # Stated as an invariant over every per-descriptor container rather
+        # than a list of the ones that existed when this was written: each new
+        # one is a map `_forget_fd` has to learn about, and a hand-written
+        # list goes quietly stale the moment one is added (`_pending` was
+        # added and missed exactly that way). Every dict and set on this
+        # backend is keyed by descriptor, so the sweep needs no allowlist --
+        # and a future container that is not fd-keyed will fail here and ask
+        # to be thought about.
         b = WaylandCaptureBackend([])
-        b._monotonic_fds.add(9)
-        b._dropped_fds.add(9)
-        b._abs_ranges[9] = (0, 32767, 0, 32767)
-        b._padlike_fds.add(9)
-        b._held_keys[9] = {e.KEY_LEFTSHIFT}
+        keyed = {k: v for k, v in vars(b).items() if isinstance(v, (dict, set))}
+        assert keyed, "no per-descriptor state found -- has it been renamed?"
+        for store in keyed.values():
+            if isinstance(store, set):
+                store.add(9)
+            else:
+                store[9] = {e.KEY_LEFTSHIFT}
         b._forget_fd(9)
-        assert 9 not in b._monotonic_fds
-        assert 9 not in b._dropped_fds
-        assert 9 not in b._abs_ranges
-        assert 9 not in b._padlike_fds
-        assert 9 not in b._held_keys
+        assert [name for name, store in keyed.items() if 9 in store] == []
 
 
 class _FakeAbsInfo:
@@ -803,8 +872,13 @@ class TestHardwareRoundTrip:
         backend = WaylandCaptureBackend([ui.device.path])
         backend.start()
         time.sleep(0.2)
-        grabbed = self._isolate(backend, ui.device.path)
+        # Inside the `try`, not before it: `_isolate` skips or fails when the
+        # grab is refused or the device is not ours, and outside it that left
+        # the reader thread running and the uinput node alive for the rest of
+        # the session.
+        grabbed = None
         try:
+            grabbed = self._isolate(backend, ui.device.path)
             inject(ui)
             time.sleep(0.4)
         finally:
@@ -900,9 +974,11 @@ class TestHardwareRoundTrip:
         # the real cursor for, and the click below then lands wherever that
         # left it. Ungrabbed on Debian GNOME that meant a click into the
         # top-left hot corner, which opens the Activities overview -- the
-        # search bar that the next test's "hi" was then typed into.
-        grabbed = self._isolate(backend, ui.device.path)
+        # search bar that the next test's "hi" was then typed into. Called
+        # inside the `try` so a refused grab still tears the backend down.
+        grabbed = None
         try:
+            grabbed = self._isolate(backend, ui.device.path)
             ui.write(e.EV_KEY, e.BTN_LEFT, 1)  # click, no motion first
             ui.syn()
             # Released for the same reason as in the clock test: a button left
