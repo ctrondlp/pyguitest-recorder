@@ -23,7 +23,7 @@ from .generator.python import ValidationError
 from .model import Event, Recording
 from .recorder import Recorder
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
     "CaptureUnavailable",

@@ -3,6 +3,123 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.14.0] — 2026-11-03
+
+A minor rather than a patch because of the first item: a configuration that
+used to run now fails to load.
+
+### Changed
+
+- **BREAKING: `sensitive` together with `record_raw` is refused outright.** A
+  config or command line carrying both previously ran and now exits with a
+  `ConfigError`. This is the combination `exclude_windows` has always
+  refused, one promise over, and for the same reason: the raw stream is
+  captured before the normalizer runs, and it is the normalizer that decides
+  a text run is sensitive — so `record_raw` kept every keystroke in the
+  clear, `keysym` and `text` per event, reassemblable into exactly the
+  password `sensitive` was asked to protect. A session file carrying both
+  looked scrubbed while being nothing of the kind.
+
+  Refused rather than filtered, because raw's whole value is being
+  unfiltered: stripping the keys out of a diagnostic stream whose keyboard
+  half *is* the diagnostic leaves something that no longer answers the
+  question it was kept for, and doing it silently would be the same false
+  impression from the other side. Whichever is actually wanted, say so. The
+  fix is to drop one of the two settings.
+
+- **`--sensitive`'s help no longer claims it is never written to disk.** It
+  said "treat all typed text as secret; never write it to disk", which the
+  prose documentation contradicts in three places — redaction is a
+  *generation*-time step, so that regenerating later can still produce a
+  working script, and a saved recording is a credential-bearing artifact
+  whatever the flag says. The implementation was right and the one-line help
+  was wrong; it now says what the flag governs and points at
+  `--save-session`.
+
+- **A generated script is written atomically, and a new one is mode 0600.**
+  `write_text` created it at 0644 under the usual umask while the session
+  file beside it has always been 0600, and a script carries every
+  non-password string the recording typed — readable by every other local
+  account on a shared workstation or a multi-user build host. It now goes
+  through a temp file in the same directory and is renamed into place, so an
+  interrupt mid-write leaves the previous script or nothing rather than a
+  half-written one that still looks like a test.
+
+  An existing file keeps the mode it already has: widening a generated script
+  to commit it, or to let a CI user read it, is a deliberate act and a
+  regenerate should not quietly undo it. **Except under `--no-redact`**,
+  which forces 0600 regardless — consent to publish the old contents is not
+  consent to publish a password the next run writes in clear. Keyed on the
+  flag rather than on whether a sensitive event exists, deliberately:
+  password detection is best-effort, so a content check would relax the mode
+  in exactly the case where detection had already failed.
+
+### Added
+
+- **`--no-redact` now says so on stderr when it writes**, naming the file and
+  reading back its actual mode. Worded as what the flag does rather than as
+  "wrote a password", and emitted unconditionally: warning only where a
+  sensitive event exists would go silent in the case that matters most, a
+  password field the accessibility tree never published as one — which is
+  precisely when redaction had nothing to redact and the literal went in
+  anyway.
+
+- **A macOS CI job**, which this repository had never had although
+  `backends/macos.py` ships, the `macos` extra exists, and both MacOS X
+  classifiers are declared. `tests/test_macos.py` says of itself that it is
+  driven from a machine that is not a Mac, against a stand-in `Quartz` in
+  `sys.modules`; what a fake cannot see is whether the names it provides are
+  the names PyObjC really exports, and a transcription error in the binding
+  is the likeliest way that code is wrong. The job runs the suite on Darwin
+  and then checks every entry in `_QUARTZ_NEEDED` against the real module.
+  Advisory for now, the route the `windows` job also took, until it has been
+  watched passing rather than promoted on the commit that introduces it.
+
+- **`SECURITY.md`**: a private reporting channel, and a threat model
+  separating desktop-wide input capture — which is what recording *is* —
+  from a privacy control that fails to do what it says. The known, deliberate
+  exposures are listed so they need not be re-reported.
+
+### Fixed
+
+- **A dead capture-reader thread left the recorder waiting forever.**
+  `WaylandCaptureBackend.events()` blocks on a queue whose only terminator is
+  a sentinel, and the sentinel was posted by `stop()` alone. So an exception
+  escaping the reader thread — a decode fault, a selector that could not be
+  built or registered, a device condition none of the inner handlers name —
+  killed the producer silently and stranded the consumer in `queue.get()`
+  until somebody interrupted the process. Every exit path now posts the
+  terminator exactly once.
+
+  A failure ends the stream and is admitted to in the recording's notes; the
+  events captured before it are kept, rather than an exception discarding a
+  recording the user had already made. That is the trade `_collect_the_tail`
+  already makes for an interrupted run. A new `failed` property exposes the
+  exception for a caller that wants to tell the two endings apart.
+
+- **`stop()` closed input devices while the reader might still be reading
+  them.** It joined with a three-second timeout and then closed every device
+  regardless of whether the thread had actually ended, racing both the read
+  and the selector registration naming its fd. It now checks `is_alive()`
+  after the join and, if the reader is still running, leaves the descriptors
+  open and says so in the notes — leaking them for the life of the process is
+  the lesser harm, and a silent race is worse than a recorded one.
+
+### Documentation
+
+- **A CI comment named a pyguitest floor five releases out of date** —
+  `>=0.15.0`, against a real floor of `>=0.20.0` — in the block a maintainer
+  reads when deciding whether a floor bump is safe. It no longer names a
+  version at all: the floor itself is the only copy worth reading, and this
+  comment had drifted behind it three times.
+
+- **`_require_version_line`'s docstring illustrated `PROFILE` as
+  `"pyguitest-0.18"`**, two minors after the fact, on the function that turns
+  the profile into the emitted `require_version(...)` call. It now gives the
+  shape rather than an example release.
+
+- `pyproject.toml`'s dependency list no longer mixes quote styles.
+
 ## [0.13.0] — 2026-10-30
 
 ### Changed
