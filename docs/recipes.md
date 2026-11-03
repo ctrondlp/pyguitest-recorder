@@ -165,9 +165,22 @@ against a password field is redacted the same way. `--sensitive` extends that
 to everything typed, which is the right default when recording anything that
 touches a login.
 
+What `--sensitive` governs is the **generated script**. A `--save-session`
+`.json` still holds the text, for the same reason redaction is a generation
+step at all — so that regenerating later can still produce a working script —
+and that file is credential-bearing whatever the flag says (see below).
+`--record-raw` is refused in combination with `--sensitive`, as it is with
+`--exclude-window`: the raw stream is captured before the normalizer decides
+anything is sensitive, so keeping both would write every keystroke out in the
+clear while the flag said the opposite.
+
 `--no-redact` does the opposite and writes password-field text into the script
 as a literal. There is no good reason to use it outside debugging the redactor
-itself.
+itself. It says so on stderr when it writes, naming the file and its mode, and
+the script is forced to mode 0600 even when the file already existed at a
+wider one — ordinarily a regenerate preserves the mode you set, but consent to
+publish the old contents is not consent to publish a password the next run
+writes in clear.
 
 `--exclude-window PATTERN` keeps whole windows out of the recording rather
 than redacting what was typed into them — anything typed, clicked or dragged

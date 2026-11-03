@@ -5,6 +5,7 @@ An unset flag that stays `None` is the mechanism by which the config file
 wins, and no end-to-end test would notice the difference.
 """
 
+import stat
 import sys
 
 import pytest
@@ -1127,3 +1128,96 @@ def test_help_names_the_three_modes():
     help_text = build_parser().format_help()
     assert "--regenerate" in help_text and "--doctor" in help_text
     assert "with no flag it records" in help_text
+
+
+class TestGeneratedScriptPermissions:
+    """A generated script is as private as the session file beside it.
+
+    `write_text` left it at 0644 under the usual umask while
+    `Recording.save` has always used `mkstemp`'s 0600 -- and the script
+    carries every string the recording typed, password text included under
+    `--no-redact`. Two artifacts of one recording disagreeing about who may
+    read them is the kind of gap nobody checks.
+    """
+
+    def _emit_to(self, path, recording, **settings):
+        from pyguitest_recorder import cli
+
+        cli._emit(recording, Settings(output=str(path), **settings))
+
+    @pytest.fixture
+    def recording(self, window):
+        rec = Recording()
+        rec.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
+        return rec
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_a_new_script_is_owner_only(self, tmp_path, recording):
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        assert stat.S_IMODE(script.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_a_script_and_its_session_file_agree(self, tmp_path, recording):
+        script, session = tmp_path / "out.py", tmp_path / "out.json"
+        self._emit_to(script, recording, session_file=str(session))
+        assert stat.S_IMODE(script.stat().st_mode) == stat.S_IMODE(
+            session.stat().st_mode
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_regenerating_keeps_a_mode_the_user_widened(self, tmp_path, recording):
+        # Someone who chmodded a generated script to commit it, or to let a
+        # build user read it, asked for that; a regenerate must not undo it.
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        script.chmod(0o644)
+        self._emit_to(script, recording)
+        assert stat.S_IMODE(script.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_no_redact_overrides_a_widened_mode(self, tmp_path, recording):
+        """Preserving the mode alone was not safe, which is why `restrict` exists.
+
+        Consent to publish the old contents is not consent to publish a
+        password the next run writes in clear: regenerating with
+        `--no-redact` over a script somebody had chmodded to 0644 kept it
+        0644, so the literal password text landed in a world-readable file.
+        """
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        script.chmod(0o644)
+        self._emit_to(script, recording, redact_sensitive=False)
+        assert stat.S_IMODE(script.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_no_redact_is_owner_only_on_a_new_file_too(self, tmp_path, recording):
+        script = tmp_path / "fresh.py"
+        self._emit_to(script, recording, redact_sensitive=False)
+        assert stat.S_IMODE(script.stat().st_mode) == 0o600
+
+    def test_no_redact_says_so_on_stderr(self, tmp_path, recording, capsys):
+        # The flag is set at the start of a run and read at the end, and a run
+        # can be minutes long; the warning belongs where the file appears.
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording, redact_sensitive=False)
+        err = capsys.readouterr().err
+        assert "--no-redact" in err
+        assert "0600" in err
+
+    def test_redacting_runs_say_nothing_about_it(self, tmp_path, recording, capsys):
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        assert "--no-redact" not in capsys.readouterr().err
+
+    def test_the_script_is_still_written_correctly(self, tmp_path, recording):
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        source = script.read_text(encoding="utf-8")
+        assert "import pyguitest" in source
+        assert "connect" in source
+
+    def test_no_temp_file_is_left_behind(self, tmp_path, recording):
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording)
+        assert [p.name for p in tmp_path.iterdir()] == ["out.py"]

@@ -396,6 +396,7 @@ class Settings:
         self._validate_check_key_is_not_the_stop_key()
         self._validate_header_needs_include_header()
         self._validate_exclude_windows()
+        self._validate_sensitive_with_record_raw()
 
     def _validate_timeout_numbers(self) -> None:
         """Reject a `timeout_factor`, `default_timeout` or `max_timeout` unusable value.
@@ -529,6 +530,32 @@ class Settings:
                 "stream is captured before windows are resolved, so it would "
                 "keep everything exclusion promised to withhold -- drop one "
                 "of the two"
+            )
+
+    def _validate_sensitive_with_record_raw(self) -> None:
+        """Refuse `sensitive` together with `record_raw`, as `exclude_windows` is.
+
+        Exactly the combination `_validate_exclude_windows` refuses, one
+        promise over: the raw stream is captured before the normalizer runs,
+        and it is the normalizer that decides a text run is sensitive. So
+        `record_raw` keeps every keystroke in the clear -- `keysym` and
+        `text` per event, reassemblable into the password `sensitive` was
+        asked to protect -- and a session file carrying both would look
+        scrubbed while being nothing of the kind.
+
+        Refused rather than filtered because raw's whole value is being
+        unfiltered: stripping the keys out of a diagnostic stream whose
+        keyboard half is the diagnostic leaves something that no longer
+        answers the question it was kept for, and doing it silently would be
+        the same false impression from the other side. Whichever the caller
+        actually wants, they should say so.
+        """
+        if self.sensitive and self.record_raw:
+            raise ConfigError(
+                "sensitive cannot be honoured with record_raw: the raw stream "
+                "is captured before the normalizer marks text sensitive, so it "
+                "would keep in the clear every keystroke sensitive promised to "
+                "protect -- drop one of the two"
             )
 
     def merged(self, **overrides: Any) -> Settings:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import glob
 import os
+import selectors
 import subprocess
 import sys
 import textwrap
@@ -1153,3 +1154,155 @@ class TestCursorSourceStamping:
         _feed(b, _FakeEvent(e.EV_KEY, e.BTN_LEFT, 1))
         (click,) = _drain(b)
         assert (click.x, click.y) == (0, 0)
+
+
+class _StuckThread:
+    """A reader that never stops, without costing the join its wall time.
+
+    `stop` asks a thread only for `join` and `is_alive`, so the branch under
+    test is reachable without a real thread and without waiting out the
+    three-second timeout in a suite that otherwise runs in seconds.
+    """
+
+    def __init__(self, alive=True):
+        self._alive = alive
+        self.joined_with = None
+
+    def join(self, timeout=None):
+        self.joined_with = timeout
+
+    def is_alive(self):
+        return self._alive
+
+
+class _ClosableDevice:
+    """An evdev device that only records whether it was closed."""
+
+    def __init__(self, fd=7, path="/dev/input/event7"):
+        self._fd, self.path, self.closed = fd, path, False
+
+    def fileno(self):
+        return self._fd
+
+    def close(self):
+        self.closed = True
+
+
+class TestReaderFailureContract:
+    """A reader thread that dies must not strand the consumer in `queue.get()`.
+
+    `events()` blocks on a queue whose only terminator is the sentinel, and
+    before this the sentinel came from `stop` alone -- so an exception
+    escaping the reader left nothing to end the stream and the recorder waited
+    for input that could never arrive. Every exit path now posts it.
+    """
+
+    def _failing(self, exc):
+        backend = WaylandCaptureBackend([])
+
+        def boom(_sel):
+            raise exc
+
+        backend._reader_loop = boom
+        return backend
+
+    def test_a_dead_reader_terminates_the_event_stream(self):
+        backend = self._failing(ValueError("decode fault"))
+        backend._run()
+        # Would block forever before the fix; the sentinel ends it.
+        assert list(backend.events()) == []
+
+    def test_events_already_captured_survive_the_failure(self):
+        backend = self._failing(ValueError("decode fault"))
+        _feed(backend, _FakeEvent(e.EV_KEY, e.BTN_LEFT, 1))
+        backend._run()
+        # Queued before the fault, so they are still the user's recording --
+        # and they arrive before the terminator, not after it.
+        (click,) = list(backend.events())
+        assert click.kind == "button_press"
+
+    def test_the_failure_is_admitted_to_in_the_notes(self):
+        backend = self._failing(ValueError("decode fault"))
+        backend._run()
+        (note,) = backend.notes
+        assert "capture stopped early" in note
+        assert "ValueError: decode fault" in note
+
+    def test_failed_carries_the_exception_for_a_caller_that_wants_it(self):
+        exc = ValueError("decode fault")
+        backend = self._failing(exc)
+        backend._run()
+        assert backend.failed is exc
+
+    def test_failed_is_none_after_a_clean_stop(self):
+        backend = WaylandCaptureBackend([])
+        backend._reader_loop = lambda _sel: None
+        backend._run()
+        assert backend.failed is None
+        assert backend.notes == []
+
+    def test_a_selector_that_cannot_be_built_still_terminates(self, monkeypatch):
+        # The failure the old code could not survive at all: raised before the
+        # loop, so no `finally` of any kind had been entered.
+        def boom():
+            raise OSError("no file descriptors")
+
+        monkeypatch.setattr(selectors, "DefaultSelector", boom)
+        backend = WaylandCaptureBackend([])
+        backend._run()
+        assert list(backend.events()) == []
+        assert "OSError: no file descriptors" in backend.notes[0]
+
+    def test_a_registration_failure_still_terminates(self):
+        # Registration happens inside `_reader_loop`, over real device
+        # objects; a device whose `fileno` is unusable raised straight out.
+        backend = WaylandCaptureBackend([])
+        backend._devices = [_ClosableDevice(fd=-1)]
+        backend._run()
+        assert list(backend.events()) == []
+        assert backend.failed is not None
+
+
+class TestStopLifecycle:
+    """`stop` must not close descriptors the reader may still be reading."""
+
+    def test_a_live_reader_keeps_its_devices_open(self):
+        backend = WaylandCaptureBackend([])
+        device = _ClosableDevice()
+        backend._devices = [device]
+        backend._thread = _StuckThread(alive=True)
+        backend.stop()
+        assert not device.closed, "closed a device under a live reader"
+        (note,) = backend.notes
+        assert "did not stop within 3s" in note
+
+    def test_a_stopped_reader_releases_its_devices(self):
+        backend = WaylandCaptureBackend([])
+        device = _ClosableDevice()
+        backend._devices = [device]
+        backend._thread = _StuckThread(alive=False)
+        backend.stop()
+        assert device.closed
+        assert backend.notes == []
+
+    def test_stop_still_joins_before_deciding(self):
+        backend = WaylandCaptureBackend([])
+        thread = _StuckThread(alive=False)
+        backend._thread = thread
+        backend.stop()
+        assert thread.joined_with == 3
+
+    def test_stop_is_safe_to_call_twice(self):
+        backend = WaylandCaptureBackend([])
+        backend._devices = [_ClosableDevice()]
+        backend._thread = _StuckThread(alive=False)
+        backend.stop()
+        backend.stop()  # must not raise on an already-closed device
+        assert list(backend.events()) == []
+
+    def test_stop_after_the_reader_already_failed_is_harmless(self):
+        backend = WaylandCaptureBackend([])
+        backend._reader_loop = lambda _sel: (_ for _ in ()).throw(ValueError("x"))
+        backend._run()
+        backend.stop()
+        assert list(backend.events()) == []
