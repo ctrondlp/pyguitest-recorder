@@ -5,6 +5,7 @@ An unset flag that stays `None` is the mechanism by which the config file
 wins, and no end-to-end test would notice the difference.
 """
 
+import os
 import stat
 import sys
 
@@ -1203,7 +1204,54 @@ class TestGeneratedScriptPermissions:
         self._emit_to(script, recording, redact_sensitive=False)
         err = capsys.readouterr().err
         assert "--no-redact" in err
-        assert "0600" in err
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_the_warning_names_the_mode_where_there_is_one(
+        self, tmp_path, recording, capsys
+    ):
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording, redact_sensitive=False)
+        assert "is mode 0600" in capsys.readouterr().err
+
+    def test_mode_note_invents_nothing_off_posix(self, tmp_path, monkeypatch):
+        """`_mode_note` reports a mode only where there is one to report.
+
+        Tested on the helper rather than through a whole run, because
+        `os.name` is what `pathlib` dispatches on too: patching it around
+        `_emit` makes `Path()` build a `WindowsPath` and raise. The target is
+        therefore built before the patch, and the only call under it returns
+        before it touches a path at all.
+        """
+        from pyguitest_recorder import cli
+
+        target = tmp_path / "out.py"
+        target.write_text("")
+        target.chmod(0o600)
+        if os.name == "posix":
+            assert cli._mode_note(target) == " is mode 0600"
+        monkeypatch.setattr(cli.os, "name", "nt")
+        assert cli._mode_note(target) == ""
+
+    def test_the_warning_claims_no_mode_where_there_is_none(
+        self, tmp_path, recording, capsys, monkeypatch
+    ):
+        """The warning must not invent a number where `_mode_note` gives none.
+
+        This is why the mode assertion above is guarded rather than
+        universal: the first version required "0600" on every platform and
+        reddened the Windows job, where there is no POSIX mode and printing
+        one anyway would be the same false claim the warning was rewritten to
+        avoid. Stubbing `_mode_note` covers that branch wherever the suite
+        runs, not only on Windows.
+        """
+        from pyguitest_recorder import cli
+
+        monkeypatch.setattr(cli, "_mode_note", lambda _path: "")
+        script = tmp_path / "out.py"
+        self._emit_to(script, recording, redact_sensitive=False)
+        err = capsys.readouterr().err
+        assert "--no-redact" in err
+        assert "mode" not in err
 
     def test_redacting_runs_say_nothing_about_it(self, tmp_path, recording, capsys):
         script = tmp_path / "out.py"
