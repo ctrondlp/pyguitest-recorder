@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import signal
+import stat
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -318,7 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--sensitive",
         action="store_true",
         default=None,
-        help="treat all typed text as secret; never write it to disk",
+        help="treat all typed text as secret; keep it out of the generated"
+        " script (a saved session still carries it -- see --save-session)",
     )
     privacy.add_argument(
         "--no-redact",
@@ -655,6 +659,78 @@ def _trimmed_events(
     return kept
 
 
+def _mode_note(path: Path) -> str:
+    """The mode clause a warning can append, or empty where it is not a fact.
+
+    Read rather than asserted. The first version of the `--no-redact` warning
+    stated "is mode 0600" as literal text, which made it a claim the code was
+    not checking -- and under a bug that preserved a widened mode it printed
+    0600 over a 0644 file, telling the user the opposite of the truth about a
+    file holding their password. Windows has no POSIX mode to report, so it
+    gets the warning without the clause rather than a number that means
+    nothing there.
+    """
+    if os.name != "posix":
+        return ""
+    try:
+        return f" is mode {stat.S_IMODE(path.stat().st_mode):04o}"
+    except OSError:
+        return ""
+
+
+def _write_script(target: Path, source: str, *, restrict: bool = False) -> None:
+    """Write a generated script to `target`, readable by its owner alone.
+
+    `write_text` created it at 0644 under the usual umask, while the session
+    file beside it has always been 0600 (`Recording.save`, via `mkstemp`) --
+    and a generated script carries every non-password string the recording
+    typed, plus password text itself under `--no-redact`. On a shared
+    workstation or a multi-user build host that was readable by every other
+    local account, so a newly written script now starts as private as the
+    session file does.
+
+    An existing file otherwise keeps the mode it already has. Someone who
+    widened a generated script deliberately -- to commit it, to let a CI user
+    read it -- asked for that, and a regenerate should not quietly undo it.
+    Narrowing it would be just as wrong in the other direction.
+
+    `restrict` is the exception, and it exists because preserving the mode
+    alone was not safe: regenerating over a script somebody had chmodded to
+    0644 kept it 0644, and with `--no-redact` that put password text into a
+    world-readable file. Consent to publish the *old* contents is not consent
+    to publish a password the next run writes in clear, so redaction being off
+    overrides the preserved mode and forces 0600.
+
+    Deliberately keyed on the flag and not on whether the recording actually
+    holds a sensitive event. Password detection is best-effort -- a toolkit
+    that publishes no password role produces no sensitive event at all (see
+    the recorder's privacy notes) -- so a content check would relax the mode
+    in exactly the case where detection had already failed. Fail closed.
+
+    Written through a temp file in the same directory and moved into place, so
+    an interrupt mid-write leaves the previous script or nothing, never a
+    half-written one that still looks like a test. Same reasoning as
+    `Recording.save`, and the temp file is mode 0600 from `mkstemp` for the
+    window before the final mode is applied.
+    """
+    existing: int | None = None
+    with contextlib.suppress(OSError):
+        existing = stat.S_IMODE(target.stat().st_mode)
+    descriptor, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as tmp:
+            tmp.write(source)
+        if existing is not None and not restrict:
+            os.chmod(tmp_name, existing)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_name)
+        raise
+
+
 def _write_source(source: str) -> None:
     """Write a generated script to stdout as UTF-8, whatever stdout's code page is.
 
@@ -742,10 +818,35 @@ def _emit(
         ).save(settings.session_file)
         print(f"Recording saved to {settings.session_file}", file=sys.stderr)
     if settings.output:
-        Path(settings.output).write_text(source, encoding="utf-8")
+        _write_script(
+            Path(settings.output), source, restrict=not settings.redact_sensitive
+        )
         print(f"Script written to {settings.output}", file=sys.stderr)
     else:
         _write_source(source)
+    if not settings.redact_sensitive:
+        # Said once, where the file has just been written, because the flag is
+        # set at the start of a run and read at the end of it -- and a run can
+        # be minutes long. Covers stdout too: there the text is on a terminal
+        # and in whatever the shell redirected it to, which no mode protects.
+        #
+        # Unconditional, and worded as what the flag *does* rather than as
+        # "wrote a password": warning only where a sensitive event exists
+        # would stay silent in the one case that matters most, a password
+        # field the accessibility tree never published as one, which is
+        # exactly when redaction had nothing to redact and the literal went
+        # in anyway. Fail closed, and do not claim more than is known.
+        print(
+            "WARNING: --no-redact is in effect, so password-field text goes "
+            "into the script as a literal instead of os.environ. "
+            + (
+                f"{settings.output}{_mode_note(Path(settings.output))}; "
+                "treat it like a password file."
+                if settings.output
+                else "The script went to stdout, so it is wherever that went."
+            ),
+            file=sys.stderr,
+        )
     _summarize(analyzed, problems)
     return 1 if problems else 0
 

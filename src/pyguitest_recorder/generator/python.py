@@ -2656,10 +2656,12 @@ def _drop_unused_bindings(body: list[str]) -> list[str]:
 def _require_version_line() -> str:
     """The version-floor opener, derived from PROFILE so the two cannot drift.
 
-    PROFILE is "pyguitest-0.18"-shaped; the call takes the dotted release
-    alone. `Session.require_version` treats it as a floor, not a pin, so a
-    newer pyguitest replays the script without complaint -- see that method's
-    own docstring for the exact comparison.
+    PROFILE is "pyguitest-<major>.<minor>"-shaped; the call takes the dotted
+    release alone. Written as the shape rather than an example release, which
+    is what left this docstring naming 0.18 two minors after the fact.
+    `Session.require_version` treats it as a floor, not a pin, so a newer
+    pyguitest replays the script without complaint -- see that method's own
+    docstring for the exact comparison.
     """
     return f'gui.require_version("{PROFILE.removeprefix("pyguitest-")}")'
 

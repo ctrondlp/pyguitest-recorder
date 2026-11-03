@@ -301,6 +301,34 @@ def test_exclude_windows_with_record_raw_is_a_self_defeating_combination():
         Settings(exclude_windows=("*Vault*",), record_raw=True)
 
 
+def test_sensitive_with_record_raw_is_a_self_defeating_combination():
+    """The same false impression as the exclusion case, one promise over.
+
+    `sensitive` is decided by the normalizer; the raw stream is captured
+    before it runs. So a session file written with both carried `keysym` and
+    `text` per event -- the password reassemblable straight out of
+    `recording.raw` -- while the flag asked for the opposite.
+    """
+    with pytest.raises(ConfigError, match="record_raw"):
+        Settings(sensitive=True, record_raw=True)
+
+
+def test_sensitive_with_record_raw_is_refused_at_load_time_too(tmp_path):
+    # Not only from the constructor: the pair is just as reachable from a
+    # config file, where nobody is watching argparse reject it.
+    path = tmp_path / "config.toml"
+    path.write_text("[privacy]\nsensitive = true\nrecord_raw = true\n")
+    with pytest.raises(ConfigError, match="record_raw"):
+        load_settings(path)
+
+
+def test_sensitive_and_record_raw_are_each_usable_alone():
+    # Only the combination is refused. Either one by itself is a supported
+    # configuration and must stay one.
+    assert Settings(sensitive=True).sensitive is True
+    assert Settings(record_raw=True).record_raw is True
+
+
 def test_every_error_the_package_hands_a_caller_is_exported() -> None:
     """A caller who cannot name an exception cannot catch it.
 

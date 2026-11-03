@@ -249,6 +249,19 @@ class WaylandCaptureBackend:
         self._queue: queue.Queue[RawEvent | None] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._failure: Exception | None = None
+        """The exception that ended the reader early, or None.
+
+        Kept as the exception rather than a flag so a caller that wants the
+        traceback has it (`__traceback__`), while `notes` carries the one
+        line a reader of the recording needs. See `_run`.
+
+        `Exception`, not `BaseException`, because that is all `_run` catches
+        -- so this staying None means "no ordinary failure", which is a clean
+        stop in every case that can actually arise here (a `KeyboardInterrupt`
+        is delivered to the main thread, not to a daemon reader) but is not
+        quite the same sentence.
+        """
         self._devices: list[Any] = []
         self._abs_ranges: dict[int, tuple[int, int, int, int]] = {}
         self._padlike_fds: set[int] = set()
@@ -502,17 +515,38 @@ class WaylandCaptureBackend:
                 yield item
 
     def stop(self) -> None:
-        """Stop the reader and release the devices."""
+        """Stop the reader and release the devices. Safe to call more than once.
+
+        The join is followed by an `is_alive` check because what comes after
+        it closes the very descriptors the reader reads from. The loop wakes
+        every 0.2s, so a thread still alive after three seconds is stuck
+        somewhere a longer wait will not fix -- and closing a device
+        underneath a live `read()` races both that read and the selector
+        registration naming its fd. Leaking those descriptors for the life of
+        the process is the lesser harm of the two, and the recording says it
+        happened rather than leaving a silent race behind.
+
+        The cursor helper is stopped either way: it is a separate process the
+        reader only reads a position from, so nothing races it, and leaving
+        one running is a leak with no upside.
+        """
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=3)
-        for dev in self._devices:
-            with contextlib.suppress(OSError):
-                dev.close()
-        if self._xkb is not None:
-            with contextlib.suppress(Exception):
-                self._xkb.close()
-            self._xkb = None
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=3)
+        if thread is not None and thread.is_alive():
+            self.notes.append(
+                "the capture reader did not stop within 3s, so its input "
+                "devices were left open rather than closed underneath it"
+            )
+        else:
+            for dev in self._devices:
+                with contextlib.suppress(OSError):
+                    dev.close()
+            if self._xkb is not None:
+                with contextlib.suppress(Exception):
+                    self._xkb.close()
+                self._xkb = None
         if self._cursor is not None:
             with contextlib.suppress(Exception):
                 self._cursor.stop()
@@ -532,12 +566,69 @@ class WaylandCaptureBackend:
     """
 
     def _run(self) -> None:
+        """Read devices until `stop`, and never leave a consumer waiting.
+
+        Every exit path goes through the `finally`, because a reader thread
+        that dies is invisible from the consuming side: `events()` blocks on
+        a queue whose only terminator is the sentinel, so an exception
+        escaping this thread -- a decode fault, a selector that cannot be
+        built or registered, a device condition none of the handlers in
+        `_reader_loop` name -- stranded the recorder in `queue.get()` until
+        somebody interrupted the process. A dead producer has to be
+        observable by its consumer.
+
+        A failure ends the stream and is admitted to in `notes`, which
+        `Recorder._collect_warnings` carries into the recording; the events
+        captured before it are kept. That is deliberately not an exception
+        raised into the consumer: it is the same trade `_collect_the_tail`
+        makes for an interrupted run -- what was captured is worth more than
+        what will now never arrive -- and raising here would discard a
+        recording the user had already made. `failed` exposes the exception
+        for a caller that wants to tell the two endings apart.
+
+        `except Exception`, not `BaseException`, so a `SystemExit` still
+        unwinds; it reaches the same `finally` either way, which is what
+        actually guarantees the sentinel.
+        """
+        import selectors  # noqa: PLC0415
+
+        sel: Any = None
+        try:
+            sel = selectors.DefaultSelector()
+            self._reader_loop(sel)
+        except Exception as exc:
+            self._failure = exc
+            self.notes.append(
+                "capture stopped early: the reader failed with "
+                f"{type(exc).__name__}: {exc} -- input after that point is "
+                "missing from this recording"
+            )
+        finally:
+            if sel is not None:
+                with contextlib.suppress(Exception):
+                    sel.close()
+            # Exactly one terminator, posted whatever ended the loop. A
+            # second from `stop` is harmless: `events` returns on the first
+            # and `drain` skips sentinels outright.
+            self._queue.put(None)
+
+    @property
+    def failed(self) -> Exception | None:
+        """The exception that ended the reader early, or None for a clean stop.
+
+        The consuming side's way to tell "the user stopped this" from "the
+        reader died", both of which end `events()`. `notes` already carries
+        the human-readable half into the recording.
+        """
+        return self._failure
+
+    def _reader_loop(self, sel: Any) -> None:
+        """Poll the registered devices until `stop` is set. Raises on failure."""
         import selectors  # noqa: PLC0415
         import time  # noqa: PLC0415
 
         from evdev import ecodes as e  # noqa: PLC0415
 
-        sel = selectors.DefaultSelector()
         watched: set[str] = set()
         for dev in self._devices:
             sel.register(dev.fileno(), selectors.EVENT_READ, dev)

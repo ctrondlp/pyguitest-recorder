@@ -167,6 +167,41 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e '.[x11,dev]'
+      # Pinned over the top of `dev`'s `ruff>=0.6`/`mypy>=1.11`, which resolve
+      # to whatever shipped that morning. ruff ships a minor roughly every
+      # other week and mypy is past 2.x, so a newly default-on rule or a
+      # tightened inference turns `main` red on a commit that changed nothing
+      # -- and the fix ("pin it") then lands under time pressure, which is the
+      # worst moment to decide whether a newly-flagged pattern is worth
+      # fixing. The lower bounds stay in `dev` for contributors; the gate
+      # takes exact versions. `lint-next` watches the newest ones, where drift
+      # is news rather than a blocked merge; bump these when it reports clean.
+      - run: pip install 'ruff==0.16.5' 'mypy==2.3.1'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+
+  lint-next:
+    # The same checks against the newest ruff and mypy, allowed to fail. This
+    # is how a linter release becomes a thing to look at on purpose instead of
+    # a red `main` nobody asked for, and it deliberately gates nothing:
+    # `publish` does not list it in `needs`. Runs on the schedule too, since a
+    # drift probe is most useful when nobody pushed.
+    name: lint and types (newest, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install -e '.[x11,dev]'
+      - run: pip install --upgrade ruff mypy
+      # Reported so a failure below can be read against a version without
+      # digging through the install log.
+      - run: |
+          ruff --version
+          mypy --version
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
@@ -232,22 +267,25 @@ jobs:
       # for.
       #
       # pyguitest resolves from PyPI here like every other job's, because the
-      # floor in pyproject.toml is now `pyguitest>=0.15.0` -- the release the
-      # generator's output was last validated against. The step before it was
-      # 0.14.0, whose `macos` backend exists, which the macOS capture backend
-      # resolves windows and elements through; before that 0.12.0, for the
+      # floor in pyproject.toml is the release the generator's output was last
+      # validated against. Deliberately not named here: this comment has now
+      # drifted behind the real floor three times, and the floor itself is the
+      # only copy worth reading -- `pyguitest-floor` installs exactly it, and
+      # `test_generator.py` asserts PROFILE matches whatever is installed, so
+      # the pair cannot disagree without reddening a job. Historically the
+      # floor has held the platform: 0.11.0 for `pyguitest.backends.win32`
+      # (before which this job installed pyguitest from git, since no
+      # published version imported here at all), 0.12.0 for the
       # `Element.expand()`/`.collapse()` and direct `.selectable` read the
-      # generator emits. Before 0.11.0 (`pyguitest.backends.win32`) this
-      # job installed pyguitest from git instead, since no published version
-      # imported here at all; the bridge is gone and the floor holds the
-      # platform.
+      # generator emits, 0.14.0 for the `macos` backend the macOS capture
+      # backend resolves windows and elements through.
       #
-      # So this repository does not build at all until pyguitest 0.15.0 is on
-      # PyPI, and not only here: every job installs this package, so `tests`,
-      # `lint` and `live` fail at their own install steps for the same reason.
-      # That is the honest outcome of a floor raised ahead of its release, and
-      # it clears the moment the release lands -- but a red run here before
-      # then is the ordering, not a regression in this repository.
+      # So this repository does not build at all until the declared floor is
+      # on PyPI, and not only here: every job installs this package, so
+      # `tests`, `lint` and `live` fail at their own install steps for the
+      # same reason. That is the honest outcome of a floor raised ahead of its
+      # release, and it clears the moment the release lands -- but a red run
+      # here before then is the ordering, not a regression in this repository.
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -283,6 +321,131 @@ jobs:
         # the gate learned to find ruff as an importable module and not only
         # as a PATH binary, and a stale pattern here makes this guard
         # silently dead rather than red.
+        run: |
+          set -eo pipefail
+          python -m pytest -q -m needs_ruff -rs 2>&1 | tee marked.txt
+          if grep -q "ruff is unavailable" marked.txt; then
+            echo "::error::ruff-dependent tests skipped despite the dev extra"
+            exit 1
+          fi
+
+  macos:
+    name: the suite on macOS, where Darwin is the host rather than a mock
+    if: github.event_name != 'schedule'
+    runs-on: macos-latest
+    # `backends/macos.py` ships, `pyproject.toml` declares the `macos` extra
+    # and both MacOS X classifiers, and docs/developers/status.md records
+    # three live runs on a granted macOS 26.7 Mac -- but until this job
+    # nothing in CI ran on Darwin at all, while `windows` had existed on
+    # precisely the same reasoning. The gap was the one cross-platform claim
+    # this repository made and never checked.
+    #
+    # `tests/test_macos.py` says of itself that it is "driven from a machine
+    # that is not a Mac", and drives everything against a stand-in `Quartz`
+    # parked in `sys.modules`. That suite is thorough -- translation,
+    # keycodes, modifier flags, teardown, and a cross-repository check of
+    # `_KEYCODES` against `pyguitest.backends.macquartz` -- and there is
+    # exactly one thing it cannot see: whether the names it fakes are the
+    # names PyObjC really exports. A transcription error in the binding is
+    # the likeliest way this code is wrong, and a fake never sees it.
+    #
+    # Nothing here can install an event tap: a runner has no interactive
+    # window server and no TCC grant. So what this proves is what `windows`
+    # proves on its platform -- every module imports, the suite collects, the
+    # tests written to run anywhere pass -- plus the probe below, which is the
+    # part only a Mac can answer. Advisory for now (`continue-on-error`), the
+    # route `windows` and pyguitest's own `macos` job both took: it is
+    # promoted to a gate, and added to `publish`'s `needs`, once it has been
+    # watched passing rather than on the commit that introduces it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version: this job is about the platform, and Python-to-Python
+          # differences are the `tests` matrix's business.
+          python-version: "3.12"
+
+      # `macos` brings `pyguitest[macos]`, i.e. the two PyObjC frameworks the
+      # backend resolves the tap and the keycodes through. `dev` brings ruff,
+      # which the generator shells out to -- without it the rendering
+      # assertions skip rather than fail, and a skip here would hide what
+      # this job is for. `x11` is absent for the same reason it is absent
+      # from `windows`: python-xlib is a Linux dependency.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[macos,dev]'
+
+      # The counterpart of `windows`' win32 check, and for the same reason:
+      # without it a pyguitest that silently lacked the module would send
+      # every macOS test into the skip path and this job would pass having
+      # tested none of what it exists for.
+      - name: Check the installed pyguitest carries the macOS backends
+        run: |
+          python -c "import pyguitest.backends.macos"
+          python -c "import pyguitest.backends.macquartz"
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      # The one step no other runner can run. Every assertion is about what
+      # this package derives from a real Darwin host, not about what that
+      # host answers -- the runner's grants are GitHub's business and change
+      # without notice, so requiring a particular verdict would pin their
+      # image into the suite.
+      #
+      # The entry points are checked by name against the real module rather
+      # than by reading `unavailable_reason()`'s prose. The first version of
+      # this step matched substrings in that sentence ("CGEvent",
+      # "CFMachPort") and was wrong: run on a real Mac (macOS 26.7, 2026-11-02)
+      # it covered 23 of the 34 names in `_QUARTZ_NEEDED` and would have let a
+      # missing `CFRunLoopRun`, `kCGHIDEventTap`, `kCGKeyboardEventKeycode` or
+      # `kCGScrollWheelEventDeltaAxis*` print "the binding resolved" and exit
+      # 0. A false pass in the one check the job exists for. `hasattr` over
+      # the list itself cannot drift from it, and reports every missing name
+      # at once instead of whichever the reason happened to mention.
+      - name: Check what the backend makes of a real Mac
+        run: |
+          python - <<'PY'
+          import sys
+
+          import Quartz
+
+          from pyguitest_recorder.backends import macos
+
+          assert sys.platform == "darwin", sys.platform
+
+          # The transcription error this job exists to catch: a name this code
+          # reaches for that PyObjC does not export. A fake Quartz in
+          # sys.modules has every name the tests give it, so this is invisible
+          # to the suite above by construction.
+          needed = macos._QUARTZ_NEEDED
+          missing = [name for name in needed if not hasattr(Quartz, name)]
+          print(f"_QUARTZ_NEEDED: {len(needed) - len(missing)}/{len(needed)} resolve")
+          if missing:
+              sys.exit(f"the real Quartz lacks: {', '.join(missing)}")
+
+          # Then the verdict, reported rather than required -- except for the
+          # one reason that cannot be true here, since the step above installed
+          # the extra.
+          reason = macos.unavailable_reason()
+          print(f"unavailable_reason() -> {reason!r}")
+          print(f"available()          -> {macos.available()}")
+          if reason is not None and "pyguitest[macos]" in reason:
+              sys.exit(f"the macos extra is installed, yet: {reason}")
+          print(
+              "the binding resolved"
+              if reason is None
+              else "the binding resolved; the remaining reason is the TCC grant"
+          )
+          PY
+
+      - name: Check the formatter-dependent tests actually ran
+        # Same guard as `windows`, same reason: `dev` installs ruff, so a skip
+        # for want of it here would mean the marker is firing when it should
+        # not and the rendering assertions had quietly stopped running.
         run: |
           set -eo pipefail
           python -m pytest -q -m needs_ruff -rs 2>&1 | tee marked.txt
