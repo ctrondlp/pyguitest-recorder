@@ -3,6 +3,54 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.15.0] — 2026-11-04
+
+A minor rather than a patch because the pyguitest floor moves: a pair that
+installed before -- this recorder with pyguitest 0.20.x -- no longer does.
+
+### Changed
+
+- **The pyguitest floor is now 0.21.0, and `PROFILE` moves with it to
+  `pyguitest-0.21`.** Load-bearing in both of the ways a floor step can be.
+  The quiet one, which `validate()` cannot catch: a generated script calls
+  `Element.click()` for every click the recording resolved to an element, and
+  0.21.0 is where that call takes a control's `activate` action as a last
+  resort on a non-text role. Before it, a control publishing only `activate`
+  -- GTK4's `GtkExpander`, measured live on 4.24.1 -- fell through to a
+  coordinate click, which on that toolkit's X11 build lands nowhere, since
+  every one of its widgets reports its position as (0, 0); the script ran,
+  the expander stayed shut. The loud one, which `validate()` would report
+  under an older install: `Role.SWITCH`, `Role.TREE_TABLE` and
+  `Role.LEVEL_BAR` are new in 0.21.0, and the generator now renders those
+  three roles through them rather than as string literals, so the floor is
+  what makes that output correct. The floor and `PROFILE` stay a single value
+  by design, since the `require_version(...)` the generator emits is derived
+  from `PROFILE`.
+
+- **A click on a GTK4 window resolves to the widget under it.** Nothing here
+  changed; what changed is what pyguitest answers. The resolver asks
+  `element_at` for the widget under each click and `extents()` for its
+  rectangle, and under 0.20 a GTK4 application answered neither usefully on
+  X11: every one of its widgets reports its screen position as (0, 0)
+  (measured live on 4.24.1, as it does on Wayland), so `element_at` found
+  nothing of it under any real click and `extents()` answered `(0, 0, w, h)`.
+  0.21.0 reads such an application in window coordinates and places each
+  rectangle by the window's real position from the X11 backend, so a
+  recording made against a GTK4 application now carries the element and its
+  true rectangle where it used to carry a bare coordinate and the origin.
+
+- **A message box and a file dialog are windows to the resolver, the effect
+  listener and the generator.** GTK3's `GtkMessageDialog` and Qt's
+  `QMessageBox` publish the role `alert`, `GtkFileChooserDialog` (and so Qt's
+  `QFileDialog` on a GTK platform theme) `file chooser` -- neither `dialog`,
+  measured live on seven desktops, and pyguitest 0.21.0 added both to
+  `Role.WINDOW_ROLES`. Every copy of that set here follows: an effect inside
+  a Save dialog is tied to the dialog rather than walked through to the
+  application and tied to no window, the resolver tells the dialog's Cancel
+  apart from the main window's by the dialog's own title, and the generator
+  scopes the lookup to `gui.element(role="file chooser", name=...)` the way
+  it already did for a `dialog`.
+
 ## [0.14.0] — 2026-11-03
 
 A minor rather than a patch because of the first item: a configuration that

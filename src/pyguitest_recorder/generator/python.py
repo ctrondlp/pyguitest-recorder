@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.20"
+PROFILE = "pyguitest-0.21"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -142,6 +142,29 @@ instead, which is the failure mode the call exists to prevent. 0.20 also
 exports `KeymapWarning` from the package root, which is the name
 `--quiet-keymap-warning` scripts filter on; emitting the public spelling is
 only safe because this floor guarantees it is there.
+
+0.21 is both shapes at once. The 0.16.0 one: `Element.click()` -- written
+for every click this generator resolved to an element -- now takes a
+control's `activate` action as a last resort on any non-text role, where
+0.20 fell straight through to a coordinate click. Measured live on GTK4
+4.24.1 (pyguitest-torture-test's Containers page): a `GtkExpander` publishes
+`activate` and nothing else, so a recorded click on one replayed under 0.20
+as a coordinate click -- and where the toolkit publishes no usable position
+either, as GTK4 does not under X11, never drove the control at all. The
+0.18 one: `Role.SWITCH`, `Role.TREE_TABLE` and `Role.LEVEL_BAR` are
+new, and `_ROLE_CONSTANTS` renders those three roles through them rather
+than as string literals, which `validate()` would (rightly) report under an
+older install -- so emitting them is only safe because this floor
+guarantees they are there. The same release also changes what reaches the
+resolver at capture time from an application whose AT-SPI screen
+rectangles cannot be believed -- GTK4 4.24.1, where every widget reports
+(0, 0) under X11 as under Wayland: `extents()` now places such an element
+by its window-relative rectangle and the window's real position rather
+than answering (0, 0, w, h), and `element_at` asks the application in
+window coordinates rather than passing it over, so a click on a GTK4
+window resolves to the widget under it where it used to resolve to
+nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
+there, which `_WINDOW_ROLES` below mirrors.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -211,6 +234,13 @@ _ROLE_CONSTANTS = {
     "slider": "SLIDER",
     "icon": "ICON",
     "label": "LABEL",
+    # pyguitest 0.21.0's three GTK4 roles -- `GtkSwitch`, `GtkColumnView` and
+    # `GtkLevelBar`. The floor is what makes naming them safe: `validate()`
+    # checks every `Role.X` against the installed pyguitest, and an older
+    # one has no such members.
+    "switch": "SWITCH",
+    "tree table": "TREE_TABLE",
+    "level bar": "LEVEL_BAR",
 }
 
 
@@ -994,8 +1024,13 @@ _SELECTION_NAMED_ROLES = frozenset({"page tab list", "combo box"})
 # running application: measured on GhostBSD, `gui.menu_item("Help")` resolved
 # into mate-panel rather than the application under test, and the panel's
 # entry is not even on screen, so the replay failed clicking it. A dialog
-# beats the frame behind it because it is the nearer of the two.
-_WINDOW_ROLES = frozenset({"dialog", "frame", "window", "application"})
+# beats the frame behind it because it is the nearer of the two. `alert` and
+# `file chooser` are what a message box and a file dialog really publish
+# (pyguitest 0.21.0's `Role.WINDOW_ROLES`, measured live): without them a
+# Save dialog's button was scoped to nothing, or to the frame behind it.
+_WINDOW_ROLES = frozenset(
+    {"dialog", "frame", "window", "alert", "file chooser", "application"}
+)
 
 
 def _window_scope(element: ElementRef) -> tuple[str, str] | None:
@@ -2715,7 +2750,7 @@ def _warning_suppression(options: GeneratorOptions) -> list[str]:
                 "# --suppress-keymap-warning: uinput's keyboard-layout caveat is",
                 "# silenced below; typed text still depends on the layout matching.",
                 # The package root, not `pyguitest.backends.input`: the class
-                # is exported from 0.20 (this package's floor), and the
+                # is exported from 0.20 (below this package's floor), and the
                 # backends path is a private module pyguitest reserves the
                 # right to move -- a generated script should not depend on it.
                 "from pyguitest import KeymapWarning",

@@ -66,6 +66,47 @@ def test_nearest_skips_a_window_role_source():
     assert log.nearest(after=1000.0, within=0.6, toplevel="Target") is None
 
 
+def test_nearest_skips_a_message_box_or_file_dialog_that_took_focus():
+    # The two toplevel roles GTK and Qt publish besides frame/window/dialog
+    # (pyguitest 0.21.0's `Role.WINDOW_ROLES`): a Save dialog taking focus
+    # is no more a click target than a frame is.
+    for role in ("alert", "file chooser"):
+        log = AtspiEffectLog()
+        _put(log, at=1000.3, name="Target", role=role)
+        assert log.nearest(after=1000.0, within=0.6, toplevel="Target") is None, role
+
+
+class _Node:
+    """The slice of `Atspi.Accessible` `_toplevel_name` walks."""
+
+    def __init__(self, role, name, parent=None):
+        self._role, self._name, self._parent = role, name, parent
+
+    def get_role_name(self):
+        return self._role
+
+    def get_name(self):
+        return self._name
+
+    def get_parent(self):
+        return self._parent
+
+
+def test_an_effect_in_a_file_dialog_is_tied_to_the_dialog():
+    # Before `file chooser` and `alert` counted as toplevels the walk went
+    # straight through a Save dialog to the application and named no
+    # window, so `nearest(toplevel="Save")` never matched the effect.
+    from pyguitest_recorder.windows.atspi_effects import AtspiEffectLog as Log
+
+    app = _Node("application", "census")
+    for role in ("file chooser", "alert"):
+        dialog = _Node(role, "Save", parent=app)
+        button = _Node("push button", "Cancel", parent=_Node("panel", "", dialog))
+        assert Log._toplevel_name(button) == "Save", role
+    unknown = _Node("push button", "Cancel", parent=_Node("panel", "", app))
+    assert Log._toplevel_name(unknown) == ""
+
+
 def test_nearest_skips_a_nameless_source():
     log = AtspiEffectLog()
     _put(log, at=1000.3, name="", role="list item")
