@@ -45,8 +45,13 @@ _EVENTS = (
 )
 # Toplevel roles: where the ancestry walk stops, and the sources `nearest`
 # refuses (a window that took focus names no widget). A page tab is NOT one --
-# it is a perfectly good click target, so it must not be excluded here.
-_WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+# it is a perfectly good click target, so it must not be excluded here. The
+# same five as pyguitest's `Role.WINDOW_ROLES`: `alert` is what GTK3's
+# GtkMessageDialog and Qt's QMessageBox publish, `file chooser` what
+# GtkFileChooserDialog does (measured live on seven desktops), and without
+# them an effect inside a message box or a Save dialog was walked straight
+# through to the application and tied to no window at all.
+_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert", "file chooser"})
 
 
 @dataclass(frozen=True)

@@ -2751,6 +2751,19 @@ def test_the_bare_text_leaf_recovery_is_windows_only():
     assert made.resolve(140, 130).element.role == "text"
 
 
+def test_a_file_dialog_of_the_clicked_window_is_another_toplevel():
+    # pid equality cannot tell a Save dialog's Cancel from the main window's
+    # -- same process -- but the dialog's own title in the element's path
+    # can, now that `file chooser` and `alert` are toplevel roles (what GTK3
+    # and Qt really publish for a file dialog and a message box; pyguitest
+    # 0.21.0's `Role.WINDOW_ROLES`). Before, the path entry was not a
+    # toplevel and the element was taken for the clicked window's own.
+    made = popup_resolver()
+    for role in ("file chooser", "alert"):
+        element = ElementRef(role="button", name="Cancel", path=((role, "Save"),))
+        assert made._other_toplevel_of(element, WindowRef(title="Target")) == "Save"
+
+
 def test_a_toplevel_name_with_trailing_whitespace_is_not_another_toplevel():
     # `_identify` strips the window's title; the path entry it is compared
     # against has to be stripped the same way, or a trailing space refuses an

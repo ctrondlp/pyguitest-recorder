@@ -1612,6 +1612,41 @@ def test_a_button_recorded_as_button_still_names_the_role_constant(window):
     assert validate(source) == []
 
 
+def test_every_role_constant_the_generator_names_is_one_the_floor_pyguitest_has():
+    # `_ROLE_CONSTANTS` is a promise about the installed pyguitest: each value
+    # is emitted as `Role.<value>`, which `validate()` then checks against the
+    # real `Role`. A member added here ahead of the floor that ships it would
+    # make every script naming that role INVALID on exactly the install the
+    # floor allows -- so the table is held to the installed `Role` directly,
+    # and to the role *string* that member carries, since the table's keys are
+    # the strings recordings arrive with. ("button" is at-spi2's own rename of
+    # "push button", the one key that legitimately maps to another's member.)
+    import pyguitest
+
+    for role, constant in generator_module._ROLE_CONSTANTS.items():
+        assert hasattr(pyguitest.Role, constant), f"{role!r} -> Role.{constant}"
+        expected = "push button" if role == "button" else role
+        assert getattr(pyguitest.Role, constant) == expected, constant
+
+
+def test_the_gtk4_roles_render_as_constants(window):
+    # pyguitest 0.21.0 added these three; before it they rendered as string
+    # literals, which worked but read as roles pyguitest had never heard of.
+    for role, constant in (
+        ("switch", "SWITCH"),
+        ("tree table", "TREE_TABLE"),
+        ("level bar", "LEVEL_BAR"),
+    ):
+        element = ElementRef(role=role, name="Wi-Fi")
+        source = render(
+            WaitForElement(element=element),
+            Click(target=Target(x=1, y=2, window=window, element=element)),
+        )
+        assert f"role=Role.{constant}" in source, role
+        assert f'role="{role}"' not in source, role
+        assert validate(source) == [], role
+
+
 @pytest.mark.needs_ruff
 def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
     # A "Save" button in a Save As dialog and one in Preferences: identical
@@ -3262,6 +3297,28 @@ def test_a_dialog_beats_the_frame_behind_it_as_the_scope(window):
     assert 'gui.button("Save", within=save_as)' in source
     assert "TortureTest" not in source.split("def main")[1]
     assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_file_dialog_and_a_message_box_scope_like_a_dialog(window):
+    # What GTK3 and Qt really publish for a Save dialog and a message box
+    # -- `file chooser` and `alert`, not `dialog` (pyguitest 0.21.0's
+    # `Role.WINDOW_ROLES`). Before they counted here, a button in either
+    # was scoped to the frame behind it, or to nothing.
+    for role, title, bound in (
+        ("file chooser", "Save As", "save_as"),
+        ("alert", "Unsaved Changes", "unsaved_changes"),
+    ):
+        element = ElementRef(
+            role="push button",
+            name="Cancel",
+            path=(("frame", "TortureTest"), (role, title)),
+        )
+        source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
+        assert f'gui.element(role="{role}", name="{title}")' in source, role
+        assert f'gui.button("Cancel", within={bound})' in source, role
+        assert "TortureTest" not in source.split("def main")[1], role
+        assert validate(source) == [], role
 
 
 @pytest.mark.needs_ruff

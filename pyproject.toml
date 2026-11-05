@@ -268,7 +268,18 @@ dependencies = [
     # `pyguitest.backends.input` -- a module path pyguitest reserves the right
     # to move. Both reasons are load-bearing, not the "what was checked
     # against" claim alone.
-    "pyguitest>=0.20.0",
+    #
+    # 0.21.0 raises it for both reasons at once. `Element.click()`, which a
+    # generated script calls for every click resolved to an element, now
+    # takes a control's `activate` action as a last resort on a non-text
+    # role; under an older install a control publishing only `activate` (a
+    # GTK4 expander, measured live) fell through to a coordinate click that
+    # on that toolkit's X11 build lands nowhere, so `validate()` cannot see
+    # the difference. And `Role.SWITCH`, `Role.TREE_TABLE` and
+    # `Role.LEVEL_BAR` are new there: the generator renders those roles
+    # through them, which `validate()` *would* report against an older
+    # pyguitest -- the floor is what makes emitting them correct.
+    "pyguitest>=0.21.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

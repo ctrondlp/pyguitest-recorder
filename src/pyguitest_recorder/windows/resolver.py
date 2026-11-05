@@ -52,12 +52,17 @@ that a deep chain cannot wander into the session's own shell."""
 MAX_DEPTH = 24
 """Descent limit, so a malformed accessible tree cannot spin forever."""
 
-WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert", "file chooser"})
 """Accessible roles that are a toplevel rather than something to click.
 
-The same three pyguitest's `Role.WINDOW_ROLES` counts as windows, spelled
+The same five pyguitest's `Role.WINDOW_ROLES` counts as windows, spelled
 out here because they arrive as plain role strings from a recording that
-may have been made on another machine.
+may have been made on another machine. `alert` (GTK3's GtkMessageDialog,
+Qt's QMessageBox) and `file chooser` (GtkFileChooserDialog, and Qt's
+QFileDialog on a GTK platform theme) are the two pyguitest 0.21.0 added,
+measured live on seven desktops: neither publishes `dialog`, so a Cancel
+button in a Save dialog had no toplevel in its path to be scoped by or
+told apart from the main window's Cancel.
 """
 
 MENU_OWNER_ROLES = frozenset({"menu", "combo box"})
@@ -1591,7 +1596,7 @@ class DesktopResolver:
         )
         return False
 
-    _TOPLEVEL_ROLES = ("frame", "dialog", "window")
+    _TOPLEVEL_ROLES = WINDOW_ROLES
     """Roles `path` uses for a toplevel ancestor -- see `_other_toplevel_of`."""
 
     def _other_toplevel_of(self, element: ElementRef, window: WindowRef) -> str | None:
@@ -2472,7 +2477,7 @@ class DesktopResolver:
                 window = window.parent
                 if window is None:
                     return
-                if window.role in ("window", "frame", "dialog"):
+                if window.role in WINDOW_ROLES:
                     break
             else:
                 return
