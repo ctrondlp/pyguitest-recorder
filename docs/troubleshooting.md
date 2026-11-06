@@ -305,6 +305,16 @@ winning over the frame behind it — so a regenerated script carries
 script, that is the difference, and regenerating from the saved session is
 the fix.
 
+**The scope is found by title, not by role.** A toplevel is the one thing
+the three accessibility bridges flatly disagree about: at-spi calls a Qt main
+window a `frame`, while UIA's Window control type and AX's `AXWindow` are
+both `window`. A scope written as `gui.element(role="frame", name=...)`
+therefore resolved on Linux and raised `ElementNotFound` on the *second
+statement* of the script on Windows and macOS, before anything had been
+driven. Since 0.16.1 the scope is `gui.window_element(title)`, which names no
+role and answers on all three. Regenerating from the saved session is the fix
+for an older script.
+
 **A tab bar is never used as that scope.** Qt publishes a tab bar's
 accessible name as its *selected tab's* label, so `role="page tab list",
 name="Displays"` named whatever happened to be selected while recording and
@@ -396,7 +406,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.22.0 or newer is required
+older than the recording expects. **pyguitest 0.23.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),
