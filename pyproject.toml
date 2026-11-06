@@ -279,7 +279,18 @@ dependencies = [
     # `Role.LEVEL_BAR` are new there: the generator renders those roles
     # through them, which `validate()` *would* report against an older
     # pyguitest -- the floor is what makes emitting them correct.
-    "pyguitest>=0.21.0",
+    #
+    # 0.22.0 is different, and honestly so: nothing a generated script
+    # calls is new in it (the bundle/AUMID launching and the pid= window
+    # filter are session-authoring surface, not generated output). The
+    # floor follows PROFILE there purely by the pairing discipline above
+    # -- PROFILE claims the surface the output was checked against, the
+    # nightly pyguitest-main job pins PROFILE to the installed
+    # major.minor, and the require_version(...) the generator emits is
+    # derived from PROFILE, so a floor left behind at 0.21.0 would have
+    # the generator emitting a guard the package itself did not promise.
+    # The binding *functional* floor remains the 0.21.0 reasons above.
+    "pyguitest>=0.22.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

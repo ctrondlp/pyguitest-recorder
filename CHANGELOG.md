@@ -3,6 +3,29 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.16.0] — 2026-11-05
+
+A minor rather than a patch because the pyguitest floor moves: a pair that
+installed before -- this recorder with pyguitest 0.21.x -- no longer does.
+
+### Changed
+
+- **The pyguitest floor is now 0.22.0, and `PROFILE` moves with it to
+  `pyguitest-0.22` -- and unlike the last step, this one is the pairing
+  discipline alone, said plainly.** Nothing a generated script calls is new
+  in pyguitest 0.22.0: its additions (a macOS `.app` bundle and a Windows
+  packaged application launching as applications through `start_app`, and
+  the `pid=` window filter) are session-authoring surface, not generated
+  output, and the binding *functional* floor remains 0.21.0's reasons. The
+  floor follows anyway because the three values are one value by design:
+  `PROFILE` claims the pyguitest surface the output was checked against,
+  the nightly `pyguitest-main` job pins `PROFILE` to the installed
+  major.minor, and the `require_version(...)` the generator emits is
+  derived from `PROFILE` -- a floor left behind at 0.21.0 would have the
+  generator emitting a guard the packaging itself did not promise.
+  `pyproject.toml`'s floor comment carries the same distinction, so the
+  next bump can tell an honest pairing step from a load-bearing one.
+
 ## [0.15.0] — 2026-11-04
 
 A minor rather than a patch because the pyguitest floor moves: a pair that
