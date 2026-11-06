@@ -290,7 +290,7 @@ dependencies = [
     # derived from PROFILE, so a floor left behind at 0.21.0 would have
     # the generator emitting a guard the package itself did not promise.
     # The binding *functional* floor remains the 0.21.0 reasons above.
-    "pyguitest>=0.22.0",
+    "pyguitest>=0.23.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

@@ -211,16 +211,55 @@ def test_a_click_on_a_tree_item_is_emitted_as_a_select(window):
 
 
 @pytest.mark.needs_ruff
-def test_a_click_on_a_radio_is_emitted_as_a_select(window):
-    # Measured on Windows 11: a coordinate click on this radio did nothing at
-    # all, while `select()` moved it and left the other radio group alone.
-    radio = ElementRef(role="radio button", name="High", actions=(), selectable=True)
+def test_a_click_on_a_radio_is_emitted_as_a_click_not_a_select(window):
+    # A radio was a `_SELECT_ROLES` member until the cross-platform matrix
+    # measured the two bridges against each other. The original note here was
+    # that a *coordinate* click on a Windows radio did nothing while
+    # `select()` moved it -- both true, and neither says anything about
+    # `Element.click()`, which is what this renders now. Measured two runs per
+    # route: `click()` drives the radio on Mint/X11, Hyprland and Windows 10
+    # alike; `select()` only on Windows, raising ElementNotActionable on
+    # at-spi, where a Qt radio reports selectable=False. See _SELECT_ROLES.
+    #
+    # `actions` carries `toggle` because that is what at-spi publishes for one
+    # ("Set Focus", "Toggle"); it is in `_CLICK_ACTIONS`, so the radio is
+    # clickable on both platforms and never falls to a coordinate for want of
+    # this rung.
+    radio = ElementRef(
+        role="radio button", name="High", actions=("toggle",), selectable=True
+    )
     source = render(Click(target=Target(x=1, y=2, window=window, element=radio)))
-    assert 'gui.element(role=Role.RADIO_BUTTON, name="High").select()' in source
+    assert 'gui.element(role=Role.RADIO_BUTTON, name="High").click()' in source
+    assert ".select()" not in source
     assert validate(source) == []
 
 
-@pytest.mark.parametrize("role", ["radio button", "tree item"])
+@pytest.mark.needs_ruff
+def test_a_radio_recorded_on_either_bridge_renders_the_same_call(window):
+    # The point of the change, stated as the property it buys: the two
+    # bridges report a radio differently, and the rendered call must not
+    # depend on which one recorded it.
+    atspi = ElementRef(
+        role="radio button",
+        name="High",
+        actions=("Set Focus", "Toggle"),
+        selectable=False,
+    )
+    uia = ElementRef(
+        role="radio button",
+        name="High",
+        actions=("do default action", "invoke", "select", "toggle"),
+        selectable=True,
+    )
+    from_atspi = render(Click(target=Target(x=1, y=2, window=window, element=atspi)))
+    from_uia = render(Click(target=Target(x=1, y=2, window=window, element=uia)))
+    assert 'gui.element(role=Role.RADIO_BUTTON, name="High").click()' in from_atspi
+    assert 'gui.element(role=Role.RADIO_BUTTON, name="High").click()' in from_uia
+    assert "gui.move_mouse(" not in from_atspi
+    assert "gui.move_mouse(" not in from_uia
+
+
+@pytest.mark.parametrize("role", ["tree item", "list item", "table row"])
 def test_select_wins_over_a_click_action_where_selecting_is_the_act(window, role):
     # UIA publishes `do default action` on these too, and a tree row's
     # default action there is a double click -- `click()` would toggle the
@@ -661,7 +700,7 @@ def test_wait_for_an_ambiguous_element_is_scoped_too(window):
         WaitForElement(element=in_import),
         Click(target=Target(x=1, y=2, window=window, element=in_export)),
     )
-    assert 'gui.element(role="dialog", name="Import")' in source
+    assert 'gui.window_element("Import")' in source
     assert "gui.wait_for_element(" in source
     assert "within=import_window" in source
     assert validate(source) == []
@@ -1521,7 +1560,7 @@ def test_a_check_on_an_ambiguous_element_is_scoped_too(window):
         ),
         Click(target=Target(x=3, y=4, window=window, element=in_export)),
     )
-    assert 'gui.element(role="dialog", name="Import")' in source
+    assert 'gui.window_element("Import")' in source
     assert "expect_checked(" in source
     # Long enough to be reformatted onto multiple lines by ruff, so check the
     # pieces rather than one contiguous call string.
@@ -1662,8 +1701,8 @@ def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
         Click(target=Target(x=1, y=2, window=window, element=save_as)),
         Click(target=Target(x=3, y=4, window=window, element=preferences)),
     )
-    assert 'gui.element(role="dialog", name="Save As")' in source
-    assert 'gui.element(role="dialog", name="Preferences")' in source
+    assert 'gui.window_element("Save As")' in source
+    assert 'gui.window_element("Preferences")' in source
     # The sugar is kept, scoped: `gui.button` takes `within=` like the rest.
     assert 'gui.button("Save", within=' in source
     # No unscoped mention of the ambiguous pair -- every use of it is scoped.
@@ -1692,8 +1731,8 @@ def test_disambiguation_walks_past_a_shared_immediate_parent(window):
         Click(target=Target(x=1, y=2, window=window, element=in_import)),
         Click(target=Target(x=3, y=4, window=window, element=in_export)),
     )
-    assert 'gui.element(role="frame", name="Import")' in source
-    assert 'gui.element(role="frame", name="Export")' in source
+    assert 'gui.window_element("Import")' in source
+    assert 'gui.window_element("Export")' in source
     # The shared "Content" panel never gets bound -- it disambiguates nothing.
     assert 'name="Content"' not in source
     assert validate(source) == []
@@ -1769,7 +1808,7 @@ def test_the_same_element_mentioned_twice_is_not_treated_as_a_collision(window):
         Click(target=Target(x=1, y=2, window=window, element=element)),
         Click(target=Target(x=3, y=4, window=window, element=element)),
     )
-    assert source.count('gui.element(role="dialog", name="Sync")') == 1
+    assert source.count('gui.window_element("Sync")') == 1
     assert source.count('gui.button("Retry", within=sync).click()') == 2
     assert "could not be told apart" not in source
     assert validate(source) == []
@@ -3222,9 +3261,12 @@ def test_a_tab_bar_is_never_the_scope_anchor(window):
     # The tab bar must not be bound as a scope, by any spelling.
     assert 'name="Displays"' not in source
     assert "page tab list" not in source
-    # The frame above it is stable and unshared, so that is the anchor.
-    assert 'gui.element(role="frame", name="TortureTest")' in source
-    assert 'gui.element(role="frame", name="Preferences")' in source
+    # The frame above it is stable and unshared, so that is the anchor -- and
+    # it is anchored through `window_element`, which names no role at all,
+    # since `frame` is at-spi's word for a toplevel and UIA and AX both say
+    # `window`. See _ancestor_lookup.
+    assert 'gui.window_element("TortureTest")' in source
+    assert 'gui.window_element("Preferences")' in source
     assert "within=" in source
     assert validate(source) == []
 
@@ -3277,7 +3319,7 @@ def test_a_lookup_is_scoped_to_the_window_it_was_recorded_in(window):
         path=(("application", "torture_test"), ("frame", "TortureTest")),
     )
     source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
-    assert 'gui.element(role="frame", name="TortureTest")' in source
+    assert 'gui.window_element("TortureTest")' in source
     assert 'gui.menu_item("Help", within=torturetest)' in source
     # The bare, desktop-wide lookup must not appear at all.
     assert 'gui.menu_item("Help")' not in source
@@ -3315,7 +3357,10 @@ def test_a_file_dialog_and_a_message_box_scope_like_a_dialog(window):
             path=(("frame", "TortureTest"), (role, title)),
         )
         source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
-        assert f'gui.element(role="{role}", name="{title}")' in source, role
+        # Anchored by title through `window_element`, not by role: a file
+        # chooser and an alert are both toplevels, and the three bridges do
+        # not agree on what to call one. See _ancestor_lookup.
+        assert f'gui.window_element("{title}")' in source, role
         assert f'gui.button("Cancel", within={bound})' in source, role
         assert "TortureTest" not in source.split("def main")[1], role
         assert validate(source) == [], role
@@ -3344,7 +3389,7 @@ def test_a_check_is_scoped_like_the_click_on_the_same_element(window):
         WaitForElement(element=element),
     )
     # The frame is bound once and shared, not searched for three times.
-    assert source.count('gui.element(role="frame", name="TortureTest")') == 1
+    assert source.count('gui.window_element("TortureTest")') == 1
     # The click, the check and the wait each carry it.
     assert source.count("within=torturetest") == 3
     assert validate(source) == []
@@ -3391,3 +3436,202 @@ class TestRequireVersionPreamble:
     def test_the_emitted_call_validates_against_the_installed_pyguitest(self, window):
         source = render(self._click(window), require_version=True)
         assert validate(source) == []
+
+
+# -- a click into a text field is a focus, not a coordinate -----------------
+#
+# Qt's AT-SPI bridge publishes SetFocus for an entry and nothing else, so
+# every one of these elements is the real measured shape: `actions=()` --
+# confirmed, nothing to act through -- on a text role with a usable name.
+
+
+@pytest.mark.needs_ruff
+@pytest.mark.parametrize("role", ["entry", "text", "password text"])
+def test_a_click_into_a_text_field_is_emitted_as_focus(window, role):
+    field = ElementRef(role=role, name="Search Field", actions=())
+    source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
+    assert ".focus()" in source
+    assert "gui.move_mouse(" not in source
+    assert "gui.click(" not in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_the_focus_rung_drops_the_pointer_capabilities(window):
+    # The point of the rung, and the thing a reader of the preamble sees: one
+    # coordinate click is what put POINTER_MOVE/POINTER_BUTTON and
+    # WINDOW_GEOMETRY into a `require(...)` for a script whose every other act
+    # was named -- and the preamble then refuses the whole script on line 1 of
+    # a desktop that has no pointer injection to offer.
+    field = ElementRef(role="entry", name="Search Field", actions=())
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=field)),
+        capability_preamble=True,
+    )
+    assert "Capability.POINTER_MOVE" not in source
+    assert "Capability.POINTER_BUTTON" not in source
+    assert "Capability.WINDOW_GEOMETRY" not in source
+    assert "Capability.ELEMENT_ACTION" in source
+
+
+@pytest.mark.needs_ruff
+def test_the_focus_rung_says_why_it_is_not_a_coordinate(window):
+    field = ElementRef(role="entry", name="Search Field", actions=())
+    source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
+    assert "no click or press action" in source
+    assert "Search Field" in source
+
+
+@pytest.mark.needs_ruff
+def test_a_text_field_with_a_click_action_still_focuses(window):
+    # The rung runs ahead of `_click_call`, so a recorded click action does
+    # not divert it. That ordering is deliberate and measured: UIA publishes
+    # `invoke`/`do default action` for an entry, so a Windows recording
+    # rendered `.click()` -- which at-spi refuses with ElementNotActionable,
+    # taking the rest of the script with it on a compositor that has no
+    # coordinate fallback. `focus()` works on both bridges. See _focus_click.
+    field = ElementRef(
+        role="entry", name="Search Field", actions=("do default action", "invoke")
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
+    assert ".focus()" in source
+    assert ".click()" not in source
+
+
+@pytest.mark.needs_ruff
+def test_an_entry_recorded_on_either_bridge_renders_the_same_call(window):
+    # The property the ordering buys, stated directly.
+    atspi = ElementRef(role="entry", name="Search Field", actions=("Set Focus",))
+    uia = ElementRef(
+        role="entry", name="Search Field", actions=("do default action", "invoke")
+    )
+    from_atspi = render(Click(target=Target(x=1, y=2, window=window, element=atspi)))
+    from_uia = render(Click(target=Target(x=1, y=2, window=window, element=uia)))
+    assert ".focus()" in from_atspi
+    assert ".focus()" in from_uia
+    assert "gui.move_mouse(" not in from_atspi
+    assert "gui.move_mouse(" not in from_uia
+
+
+def test_a_double_click_in_a_text_field_does_not_become_focus(window):
+    # A double click selects a word and a triple selects the line. focus()
+    # reproduces neither, so the pair keeps the coordinate it needs.
+    field = ElementRef(role="entry", name="Search Field", actions=())
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=field), count=2)
+    )
+    assert ".focus()" not in source
+    assert "gui.double_click(" in source
+
+
+def test_an_unnamed_text_field_stays_a_coordinate(window):
+    # focus() needs a locator like every other named rung. Nothing can name
+    # this one, so the coordinate is still the only option.
+    field = ElementRef(role="entry", name="", actions=())
+    source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
+    assert ".focus()" not in source
+    assert "gui.move_mouse(" in source
+
+
+def test_a_text_field_with_uncaptured_actions_still_focuses(window):
+    # Unlike `select`, this rung does not consult `actions` at all, so
+    # `actions is None` changes nothing -- and that is the design rather than
+    # an oversight.
+    #
+    # `_select_click` has to be careful with unknown actions because it is
+    # inferring a *different act* (selecting rather than activating) from a
+    # capability flag, and guessing that from absent data would change what
+    # the script does. Here the act is not in doubt: the element's role says
+    # it is a text field, a click into a text field is a focus, and the
+    # typing that follows is rendered as `set_text`, which replaces the
+    # contents wholesale. So the role alone decides it, which also means a
+    # recording made before `actions` existed re-renders through the portable
+    # call rather than the one that only suits at-spi.
+    field = ElementRef(role="entry", name="Search Field", actions=None)
+    source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
+    assert ".focus()" in source
+    assert "gui.move_mouse(" not in source
+
+
+def test_locators_absolute_keeps_the_coordinate_for_a_text_field(window):
+    # The setting that says to favour coordinates wins over the rung, the way
+    # it already does over every other named path.
+    field = ElementRef(role="entry", name="Search Field", actions=())
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=field)),
+        locators="absolute",
+    )
+    assert ".focus()" not in source
+    assert "gui.click(" in source
+
+
+@pytest.mark.needs_ruff
+def test_a_right_click_in_a_text_field_is_not_a_focus(window):
+    # Element.focus() takes no button, so rendering a recorded right click as
+    # one would turn a context menu into a focus -- the same reason the whole
+    # element path is left-click only.
+    field = ElementRef(role="entry", name="Search Field", actions=())
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=field), button=3)
+    )
+    assert ".focus()" not in source
+    assert "gui.click(3)" in source
+
+
+# -- a window-scoped lookup must not name the toplevel's role ---------------
+
+
+@pytest.mark.needs_ruff
+def test_a_window_scope_anchor_uses_window_element(window):
+    # at-spi calls a Qt main window a `frame`; UIA and AX both call it a
+    # `window`. Naming the recorded role in the anchor made the *second*
+    # statement of an otherwise fully portable script raise ElementNotFound
+    # on Windows and macOS -- measured, before any control had been driven.
+    button = ElementRef(
+        role="push button",
+        name="Save",
+        actions=("click",),
+        path=(("frame", "Example"),),
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=button)))
+    assert 'gui.window_element("Example")' in source
+    assert 'role="frame"' not in source
+    assert "Role.FRAME" not in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+@pytest.mark.parametrize("role", ["frame", "window", "dialog", "alert", "file chooser"])
+def test_every_window_role_anchors_through_window_element(window, role):
+    button = ElementRef(
+        role="push button", name="Save", actions=("click",), path=((role, "Example"),)
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=button)))
+    assert 'gui.window_element("Example")' in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_non_window_anchor_keeps_its_role(window):
+    # The role-and-name form is what tells two identically named panes apart,
+    # so only the toplevel loses its role.
+    first = ElementRef(
+        role="push button",
+        name="Apply",
+        actions=("click",),
+        path=(("frame", "Example"), ("panel", "Left")),
+    )
+    second = ElementRef(
+        role="push button",
+        name="Apply",
+        actions=("click",),
+        path=(("frame", "Example"), ("panel", "Right")),
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=first)),
+        Click(target=Target(x=3, y=4, window=window, element=second)),
+    )
+    assert 'name="Left"' in source
+    assert 'name="Right"' in source
+    assert "Role.PANEL" in source or 'role="panel"' in source
+    assert validate(source) == []

@@ -3,6 +3,69 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.17.0] — 2026-11-06
+
+A minor, because the pyguitest floor moves to 0.23.0 and `PROFILE` with it:
+a pair that installed before -- this recorder with pyguitest 0.22.x -- no
+longer does.
+
+The floor is load-bearing, and for an unusual reason. Nothing a generated
+script *calls* is new: `window_element()` and `Element.focus()`, which this
+release starts emitting, are both present in 0.22.0, so `validate()` would
+pass against it. What an older pyguitest gets wrong is the *replay*, on two
+desktops out of seven: a Mac composes no input backend at all from a plain
+`connect()` before 0.22.1, and before 0.23.0 `role="page tab"` and
+`role="list item"` match nothing there; on COSMIC, before 0.23.0, every key
+that is not typed text is dropped, which loses the Return that commits a
+`set_text`. A script generated here replays on five of seven desktops under
+0.22.0 and on all seven under 0.23.0 -- the "an older install gets it wrong
+rather than lacks it" case a declared floor exists to catch.
+
+What changes is which call the generator writes for three controls, in each
+case because the old choice was decided by whichever accessibility bridge
+happened to record it. All three were found by recording one Qt fixture on
+Linux/X11 and on Windows and replaying each script on seven desktops.
+
+### Fixed
+
+- **A click into a text field is now `focus()`, not a coordinate -- and the
+  rung runs ahead of the click rung, so it does not depend on what the
+  recording platform published.** at-spi offers a Qt entry `SetFocus` and
+  nothing else, so the ladder fell through to a bare coordinate; UIA offers
+  `invoke`, so a Windows recording wrote `.click()`, which at-spi then
+  refuses with `ElementNotActionable`. Both failed on the other platform.
+  The coordinate was the worse of the two: `geometry()` answers the client
+  rectangle on X11 and the frame rectangle on GNOME Shell, COSMIC, macOS and
+  Windows, so a window-relative point recorded on X11 landed short of the
+  field on every frame-rect platform -- on one of them it hit the check box
+  above and silently un-ticked it, and the script still exited zero.
+  Focusing is what the click was for, since the typing that follows is
+  rendered as `set_text`.
+
+  Dropping the pointer also shortens the `gui.require(...)` preamble: that
+  one coordinate was why `POINTER_MOVE`, `POINTER_BUTTON` and
+  `WINDOW_GEOMETRY` were demanded by a script whose every other act was
+  named, which refused the whole thing on the first line of a compositor
+  with no pointer injection to offer.
+
+- **A window-scoped `within=` anchor is now `gui.window_element(title)`,
+  which names no role.** at-spi calls a Qt main window a `frame`; UIA's
+  Window control type and AX's `AXWindow` are both `window`. Asked three
+  ways on one fixture window the disagreement is exactly mutual --
+  `element(role="frame", ...)` answers on X11 and raises on macOS,
+  `element(role="window", ...)` the reverse, and `window_element(title)`
+  answers on both. So a recording made on Linux raised `ElementNotFound` on
+  the *second statement* of the script on Windows and macOS, before any
+  control had been driven.
+
+- **A click on a radio button is `click()` rather than `select()`.** at-spi
+  reports a Qt radio `selectable=False`, UIA reports it `True`, so the
+  select rung only ever fired for a Windows recording -- and `select()` is
+  the one verb at-spi refuses, taking the rest of the script with it.
+  Measured per route, `click()` is the only verb that drives the control on
+  X11, Hyprland and Windows alike, and a radio is `clickable` on both
+  bridges, so it cannot fall to a coordinate for want of the rung.
+
 ## [0.16.0] — 2026-11-05
 
 A minor rather than a patch because the pyguitest floor moves: a pair that

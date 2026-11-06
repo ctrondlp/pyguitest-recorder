@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.22"
+PROFILE = "pyguitest-0.23"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -142,6 +142,22 @@ instead, which is the failure mode the call exists to prevent. 0.20 also
 exports `KeymapWarning` from the package root, which is the name
 `--quiet-keymap-warning` scripts filter on; emitting the public spelling is
 only safe because this floor guarantees it is there.
+
+0.23 is a load-bearing floor rather than a pairing step, and it is the first
+one whose reason is a *platform* rather than a call. Nothing new is emitted:
+`window_element()` and `Element.focus()` -- both of which this generator
+started writing in recorder 0.17.0 -- are present in 0.22.0, so `validate()`
+would pass against it. What an older pyguitest gets wrong is the replay.
+Measured on one recorded script replayed across seven desktops: under 0.22.0 a
+Mac composes no input backend at all from a plain `connect()`, so the script
+raises `CapabilityUnsupported` on its first statement; `role="page tab"` and
+`role="list item"` match nothing there, so a recorded tab or row click cannot
+resolve; and on COSMIC every key that is not typed text is silently dropped,
+which loses the Return that commits a `set_text`. 0.23.0 fixes all four. So a
+script generated here replays on five of seven desktops under 0.22.0 and on
+all seven under 0.23.0 -- which is exactly the "an older install gets it
+wrong rather than lacks it" case the floor exists for, the same shape as
+0.16.0 and 0.20.
 
 0.21 is both shapes at once. The 0.16.0 one: `Element.click()` -- written
 for every click this generator resolved to an element -- now takes a
@@ -205,8 +221,28 @@ _TEXT_ROLES = frozenset({"entry", "text", "password text"})
 # double click -- it toggles the row rather than selecting it. Not every
 # selectable role: an AT-SPI menu item carries SELECTABLE too, and selecting
 # one only highlights it where the recording chose it.
+#
+# `radio button` is deliberately **not** here, though it was until the
+# cross-platform matrix measured it. The two bridges disagree about the
+# control: at-spi reports a Qt radio as `selectable=False` with actions
+# ("Set Focus", "Toggle"), while UIA reports `selectable=True` with
+# ("do default action", "invoke", "select", "toggle"). So this rung only ever
+# fired for a *Windows* recording -- and `select()` is the one verb at-spi
+# refuses, raising ElementNotActionable mid-script. Measured on the fixture,
+# two runs per route per box:
+#
+#                    Mint/X11   Hyprland   Windows 10
+#     select()         0/2        0/2          2/2
+#     click()          2/2        2/2          2/2
+#     do_action(Toggle) 2/2       2/2          0/2
+#
+# `click()` is the only verb that works everywhere, and `clickable` is true
+# for a radio on both bridges (`toggle` and `invoke` are both in
+# `_CLICK_ACTIONS`), so dropping the role here sends both platforms' radios
+# down `_click_call` to the one call that ports. A Windows-recorded script
+# lost its radio *and* everything after it on every at-spi box before this.
 _SELECT_ROLES = frozenset(
-    {"radio button", "page tab", "tree item", "list item", "table row", "table cell"}
+    {"page tab", "tree item", "list item", "table row", "table cell"}
 )
 
 # Role value -> the Role enum member name, for readable output.
@@ -1412,47 +1448,17 @@ class PythonGenerator:
         return ends - replayed
 
     def _emit_click(self, event: Click, state: _State) -> None:
-        """Render a click, preferring the element under the pointer.
+        """Render a click: the named ladder first, a coordinate only if it declines.
 
-        Only a left click can take the element path. `Element.click()` accepts
-        no button argument, so rendering a recorded right click that way would
-        turn a context menu into an ordinary activation -- a script that runs
-        cleanly and does the wrong thing, which is the worst outcome here.
+        The two halves are split because the ladder is a sequence of rungs
+        that each either render and stop or decline and fall through, while
+        this is the one path that is always available -- so keeping them in
+        one function made the shape of "elements lead, coordinates follow"
+        harder to read than it is, and the ladder's own rungs are listed in
+        `_emit_named_click` in the order they are tried.
         """
-        if (
-            event.button == 1
-            and event.count in (1, 2)
-            and self._disclosure_click(event, state)
-        ):
-            state.bare_click_pending = False
+        if self._emit_named_click(event, state):
             return
-        if event.button == 1 and event.count == 2 and self._expand_click(event, state):
-            state.bare_click_pending = False
-            return
-        if event.button == 1 and event.count == 2 and self._double_click(event, state):
-            state.bare_click_pending = False
-            return
-        if event.button == 1:
-            element = event.target.element
-            if (
-                element is not None
-                and element.role in _SELECT_ROLES
-                and self._select_click(event, state)
-            ):
-                return
-            call = self._click_call(element, state)
-            if call is not None:
-                state.lines.extend([call] * event.count)
-                state.pointer = None
-                state.bare_click_pending = False
-                self._note_element_repeat(event, state)
-                return
-            if self._select_click(event, state):
-                return
-            if self._effective_click_via(state) == "action":
-                self._note_action_unavailable(event, state)
-                state.bare_click_pending = False
-                return
         if state.bare_click_pending:
             state.capabilities.add("TIMING")
             self._comment(
@@ -1475,6 +1481,57 @@ class PythonGenerator:
             state.lines.extend([f"gui.click({button})"] * event.count)
             self._note_repeat(event, state)
         state.bare_click_pending = True
+
+    def _emit_named_click(self, event: Click, state: _State) -> bool:
+        """Try each named rendering in turn; True once one has been emitted.
+
+        The ladder, in order: a disclosure gutter, an expand/collapse, a
+        double click, a selection, a plain `click()`, a selection again for a
+        role that offers one but no click action, and a text field's
+        `focus()`. Each rung is a method of its own that explains the control
+        it exists for; this is only their order, which matters because
+        several of them can apply to the same element and the earlier
+        reading is the more specific one.
+
+        Only a left click takes any of them. `Element.click()` accepts no
+        button argument, so rendering a recorded right click that way would
+        turn a context menu into an ordinary activation -- a script that runs
+        cleanly and does the wrong thing, which is the worst outcome here.
+        """
+        if event.button != 1:
+            return False
+        if event.count in (1, 2) and self._disclosure_click(event, state):
+            state.bare_click_pending = False
+            return True
+        if event.count == 2 and self._expand_click(event, state):
+            state.bare_click_pending = False
+            return True
+        if event.count == 2 and self._double_click(event, state):
+            state.bare_click_pending = False
+            return True
+        element = event.target.element
+        if (
+            element is not None
+            and element.role in _SELECT_ROLES
+            and self._select_click(event, state)
+        ):
+            return True
+        if self._focus_click(event, state):
+            return True
+        call = self._click_call(element, state)
+        if call is not None:
+            state.lines.extend([call] * event.count)
+            state.pointer = None
+            state.bare_click_pending = False
+            self._note_element_repeat(event, state)
+            return True
+        if self._select_click(event, state):
+            return True
+        if self._effective_click_via(state) == "action":
+            self._note_action_unavailable(event, state)
+            state.bare_click_pending = False
+            return True
+        return False
 
     def _effective_click_via(self, state: _State) -> str:
         """The route the `click_via` option resolves to for this render.
@@ -1538,6 +1595,92 @@ class PythonGenerator:
         call = self._element_locator_call(element, state, "select()")
         if call is None:
             return False
+        state.lines.append(call)
+        state.pointer = None
+        state.bare_click_pending = False
+        return True
+
+    def _focus_click(self, event: Click, state: _State) -> bool:
+        """Render a click into a text field as `focus()`, where that is what it did.
+
+        Ahead of `_click_call`, which is the whole point and was learned the
+        hard way -- see the end of this docstring.
+
+        Qt's AT-SPI bridge publishes `SetFocus` for an entry and nothing else
+        -- no `click`, no `press`, and no `activate` for 0.21's last-resort
+        rung to take -- so a recorded click into a text field fell all the way
+        through the ladder to a bare coordinate.
+
+        That mattered more than one locator usually does, because the
+        coordinate it fell to is the single least portable thing this generator
+        emits. Measured across six boxes on one window of fixed 980x620 client
+        size: `geometry()` answers the *client* rectangle on X11 (Mint,
+        GhostBSD) and the *frame* rectangle on GNOME Shell, COSMIC, macOS and
+        Windows, which puts the window-relative origin up to 39px apart
+        between two platforms showing the identical window. A point recorded
+        on X11 therefore landed 8-26px short of the field -- itself only
+        21-26px tall, depending on the platform's own metrics -- on all four
+        frame-rect platforms, and inside it on the two X11 ones. On Ubuntu it
+        did not merely miss: it landed on the check box above and silently
+        un-ticked it, so the script reported success having driven the wrong
+        control backwards.
+
+        Focusing is what the click was *for*. The text that follows it is
+        rendered as `set_text`, which replaces the field's contents wholesale
+        and does not care where the caret landed -- so nothing about the
+        recording is lost by not reproducing the pointer. And `Element.focus()`
+        needs no pointer, no rectangle and no accessible action, only a name:
+        the call itself was confirmed to focus the field on all six -- X11,
+        XWayland/GNOME, COSMIC, Hyprland, FreeBSD and macOS -- where
+        `click(via="pointer")`, the other candidate, drove it on three,
+        raising `CapabilityUnsupported` on Hyprland (no ELEMENT_GEOMETRY) and
+        `AccessDenied` on GNOME Shell.
+
+        One honest qualification: on COSMIC the *end-to-end* interaction is
+        still unreliable, and not because of this call. `focus()` reports the
+        field focused and `set_text` lands its text there, both confirmed by
+        reading the element back; what goes missing is the Return that commits
+        it, which is a keystroke-delivery problem on that compositor and is
+        the one platform of the six where this sequence does not finish.
+
+        Dropping the pointer also shortens what the script *demands*: a
+        coordinate click is why `POINTER_MOVE`, `POINTER_BUTTON` and
+        `WINDOW_GEOMETRY` appeared in a `gui.require(...)` preamble for a
+        recording whose every other act was named, and one un-nameable control
+        refusing the whole script on line 1 is the capability preamble working
+        exactly as designed against an input it should never have been given.
+
+        And this runs *before* `_click_call` rather than after it, because
+        the two bridges disagree about an entry the same way they disagree
+        about a radio. UIA publishes `do default action` and `invoke` for one,
+        so `clickable` is true and a Windows recording rendered
+        `...name="Search Field").click()` -- a call at-spi then refuses with
+        ElementNotActionable, since a Qt entry there offers no click or press
+        and a compositor with no ELEMENT_GEOMETRY has no coordinate fallback
+        left either. Measured: the Windows-recorded script drove two of six
+        controls on Hyprland and on GNOME, dying at the entry, while the
+        at-spi-recorded script -- identical but for this one call -- passed on
+        Windows. So the ordering is not a preference between two working
+        renderings; `focus()` is the one that works on both bridges, and
+        asking `clickable` first only produces a call that happens to suit
+        whichever machine recorded it.
+
+        A single click only. A double click in a text field selects a word and
+        a triple selects the line; `focus()` reproduces neither, so those keep
+        the coordinate they need.
+        """
+        element = event.target.element
+        if event.count != 1 or element is None or element.role not in _TEXT_ROLES:
+            return False
+        call = self._element_locator_call(element, state, "focus()")
+        if call is None:
+            return False
+        self._comment(
+            f"{element.name!r} offered {element_api(state.session_type)} no click"
+            " or press action, and a click into a text field is a focus -- so"
+            " this is focus() rather than a coordinate, which ports",
+            state,
+        )
         state.lines.append(call)
         state.pointer = None
         state.bare_click_pending = False
@@ -2383,12 +2526,50 @@ class PythonGenerator:
             return state.scope_vars[ancestor]
         role, name = ancestor
         state.capabilities.add("ELEMENT_TREE")
-        args = self._role_arg(role, state)
         taken = set(state.scope_vars.values()) | set(state.windows.values()) | _RESERVED
         var_name = _identifier(name or role, taken)
-        state.lines.append(f"{var_name} = gui.element({args}, name={_literal(name)})")
+        state.lines.append(f"{var_name} = {self._ancestor_lookup(role, name, state)}")
         state.scope_vars[ancestor] = var_name
         return var_name
+
+    def _ancestor_lookup(self, role: str, name: str, state: _State) -> str:
+        """How to find a scoping ancestor, by the kind of thing it is.
+
+        A *toplevel* ancestor is found with `window_element`, not with
+        `element(role=..., name=...)`, and this is the single most portable
+        line in a generated script -- because the role of a toplevel is the
+        one role the three accessibility bridges flatly disagree about. at-spi
+        calls a Qt main window a `frame`; UIA's Window control type and AX's
+        `AXWindow` are both `window`. So a recording made on Linux, where
+        every window-scoped lookup takes the nearest window-ish ancestor as
+        its `within=`, emitted `gui.element(role="frame", name="...")` -- and
+        that line raised `ElementNotFound` on the second statement of the
+        script, before a single control had been driven. Measured on Windows,
+        where the whole six-interaction script -- fully named and otherwise
+        portable -- failed at the anchor; and confirmed on macOS by asking for
+        the anchor directly, since a Mac could not get as far as the anchor
+        until `macquartz` joined automatic composition.
+
+        `window_element` is pyguitest's own answer to this ("Scopes an element
+        search to one window via `within=`"): it matches a *window* by title
+        and hands back its Element, so no role is named and there is nothing
+        left to disagree about. Asked three ways on the same fixture window,
+        the disagreement is exactly mutual and `window_element` is the only
+        spelling that answers on both:
+
+                                      Mint/X11          macOS
+            element(role="frame")     Element('frame')  ElementNotFound
+            element(role="window")    ElementNotFound   Element('window')
+            window_element(title)     Element('frame')  Element('window')
+
+        Anything else -- a real disambiguating ancestor, a dialog's own inner
+        pane -- keeps the role-and-name form, which is what tells two
+        identically named panes apart.
+        """
+        if role in _WINDOW_ROLES and name:
+            return f"gui.window_element({_literal(name)})"
+        args = self._role_arg(role, state)
+        return f"gui.element({args}, name={_literal(name)})"
 
     def _role_arg(self, role: str, state: _State) -> str:
         """Render the `role=` argument, as a Role constant where one exists."""
