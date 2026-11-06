@@ -3165,14 +3165,15 @@ def _unknown_api(tree: ast.AST) -> list[str]:
             message, known = holders[value.id]
             if known and node.attr not in known:
                 problems.append(f"{message} {node.attr!r}")
-        elif element_names and _is_element_call(value):
+        elif (
+            element_names and _is_element_call(value) and node.attr not in element_names
+        ):
             # `gui.element(...).double_click()` is an attribute read on a
             # *result*, not on a `gui` name, so the check above cannot see it --
             # and it is the one API surface a generated script calls that way.
             # Unchecked, a method the installed pyguitest does not have reached
             # the file and failed at replay with an AttributeError naming it.
-            if node.attr not in element_names:
-                problems.append(f"pyguitest.Element has no method {node.attr!r}")
+            problems.append(f"pyguitest.Element has no method {node.attr!r}")
     return problems
 
 
