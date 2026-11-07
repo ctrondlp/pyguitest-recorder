@@ -44,8 +44,27 @@ class _RuleNames(ctypes.Structure):
 
 
 def _bind() -> Any:
-    """Load libxkbcommon and declare the functions used, or raise OSError."""
+    """Load libxkbcommon and declare the functions used, or raise OSError.
+
+    A library old enough to be missing one of these symbols is reported the
+    same way an absent one is. `ctypes` raises `AttributeError` for a symbol
+    the object does not export, which is neither what this function documents
+    nor what `XkbTranslator.create` catches -- so the documented clean
+    fallback used to be a crash instead. Measured on Fedora 19, whose
+    `libxkbcommon.so.0` has no `xkb_state_key_get_utf8`: importing a module
+    that merely *asks* whether a translator can be built raised through, and
+    took a whole test session's collection down with it.
+    """
     lib = ctypes.CDLL("libxkbcommon.so.0")
+    try:
+        _declare(lib)
+    except AttributeError as exc:
+        raise OSError(f"libxkbcommon.so.0 is too old: {exc}") from exc
+    return lib
+
+
+def _declare(lib: Any) -> None:
+    """Declare every function used; AttributeError if the library lacks one."""
     lib.xkb_context_new.restype = ctypes.c_void_p
     lib.xkb_context_new.argtypes = [ctypes.c_int]
     lib.xkb_keymap_new_from_names.restype = ctypes.c_void_p
@@ -75,7 +94,6 @@ def _bind() -> Any:
     ]
     for unref in ("xkb_state_unref", "xkb_keymap_unref", "xkb_context_unref"):
         getattr(lib, unref).argtypes = [ctypes.c_void_p]
-    return lib
 
 
 class XkbTranslator:

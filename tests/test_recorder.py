@@ -396,6 +396,56 @@ def test_what_a_backend_admits_to_reaches_the_recording() -> None:
     assert [n for n in recording.environment.notes if "SYN_DROPPED" in n]
 
 
+class LateNotingBackend(_SilentBackend):
+    """A backend whose note is written during teardown, as Wayland's is.
+
+    `WaylandCaptureBackend.stop()` adds its reader-still-alive timeout note
+    there -- the note that says the recording may have lost events -- so it
+    arrives after `run()` has already collected everything it could see.
+    """
+
+    def __init__(self, *events: RawEvent) -> None:
+        super().__init__(*events)
+        self.notes: list[str] = []
+
+    def stop(self) -> None:
+        self.notes.append("the capture reader did not stop; events may be missing")
+
+
+def test_a_note_written_during_teardown_still_reaches_the_recording() -> None:
+    # The single warning most worth having was the one guaranteed to be
+    # missing: `run()` collects notes at its own end and the CLI calls
+    # `stop()` afterwards, so a note added by the backend's shutdown reached
+    # neither the saved session nor the generated script.
+    backend = LateNotingBackend()
+    recorder = _start(backend)
+    recording = recorder.run()
+    assert not [n for n in recording.environment.notes if "may be missing" in n]
+    recorder.stop()
+    assert [n for n in recording.environment.notes if "may be missing" in n]
+
+
+class FailingMidStreamBackend(_SilentBackend):
+    """A backend that delivers some events and then fails, as win32 can."""
+
+    def events(self):
+        yield from self._events
+        raise CaptureUnavailable("the message pump died")
+
+
+def test_a_capture_failure_mid_recording_keeps_what_was_captured() -> None:
+    # Nothing above run() catches this: the CLI's handler wraps start(), and
+    # main() catches only ConfigError and ValueError -- so letting it
+    # propagate would discard an hour of recording as a traceback. What was
+    # captured before the failure is a real recording.
+    backend = FailingMidStreamBackend(
+        RawEvent(kind="key_press", timestamp=1.0, keysym="a"),
+    )
+    recording = _run(backend)
+    assert recording.events, "the events captured before the failure were lost"
+    assert [n for n in recording.environment.notes if "capture failed while" in n]
+
+
 def test_a_backend_with_nothing_to_admit_to_adds_no_note() -> None:
     # Only that the collection adds nothing of its own: the environment block
     # has notes of its own to put here (an XWayland session says so), and this

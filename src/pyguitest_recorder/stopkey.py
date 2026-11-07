@@ -145,7 +145,8 @@ class StopKey:
         # passing through mid-run: only the former registers as progress.
         _, key = parse_chord(self.chord)
         counted = raw.kind == "key_press" and (not key or raw.keysym == key)
-        if self._held and raw.timestamp - self._held[-1].timestamp > self.interval:
+        last = self._last_chord_press(key)
+        if counted and last is not None and raw.timestamp - last > self.interval:
             # Too slow to be one run, so the earlier presses were the
             # application's and this one starts a new run of its own.
             record = self._hand_back()
@@ -156,6 +157,24 @@ class StopKey:
             self._held = []
             return Outcome([], stop=True)
         return Outcome([], registered=counted)
+
+    def _last_chord_press(self, key: str) -> float | None:
+        """When the run's last press of the chord's own key arrived, or None.
+
+        The interval is between the *taps* a person makes, so it has to be
+        measured against the last of those and not against whatever event
+        happens to be held last. The chord's modifiers pass through
+        `_belongs` -- deliberately, so releasing and re-pressing them between
+        taps does not break the run -- and comparing against one of those
+        meant a modifier arriving in the gap kept resetting the clock: two
+        taps further apart than `interval` still completed the run, because
+        the only comparison ever made was against the modifier traffic
+        between them.
+        """
+        for event in reversed(self._held):
+            if event.kind == "key_press" and (not key or event.keysym == key):
+                return event.timestamp
+        return None
 
     def release(self) -> list[RawEvent]:
         """Hand back whatever is held, for a run that ended without completing.

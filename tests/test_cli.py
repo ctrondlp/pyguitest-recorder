@@ -1166,6 +1166,35 @@ class TestGeneratedScriptPermissions:
             session.stat().st_mode
         )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_a_symlinked_output_is_written_through_not_replaced(
+        self, tmp_path, recording
+    ):
+        # `os.replace` replaces the *link*, so this reported writing
+        # `latest.py` while leaving the file it named untouched and swapping
+        # the link for a regular file -- a silent no-op for anyone who keeps
+        # a symlink pointing at their current script.
+        real = tmp_path / "script.py"
+        real.write_text("# the file the link names\n", encoding="utf-8")
+        link = tmp_path / "latest.py"
+        link.symlink_to(real)
+        self._emit_to(link, recording)
+        assert link.is_symlink(), "the link itself was replaced"
+        assert "gui.click()" in real.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_a_symlink_to_a_missing_file_creates_what_it_names(
+        self, tmp_path, recording
+    ):
+        # A reader of the link expects the script to appear where it points.
+        real = tmp_path / "not-yet.py"
+        link = tmp_path / "latest.py"
+        link.symlink_to(real)
+        self._emit_to(link, recording)
+        assert link.is_symlink()
+        assert real.is_file()
+        assert "gui.click()" in real.read_text(encoding="utf-8")
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
     def test_regenerating_keeps_a_mode_the_user_widened(self, tmp_path, recording):
         # Someone who chmodded a generated script to commit it, or to let a

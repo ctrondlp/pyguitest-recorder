@@ -322,7 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="treat all typed text as secret; keep it out of the generated"
-        " script (a saved session still carries it -- see --save-session)",
+        " script (a saved session still carries it -- see --save-session,"
+        " and --no-redact writes it into the script as a literal)",
     )
     privacy.add_argument(
         "--no-redact",
@@ -712,7 +713,20 @@ def _write_script(target: Path, source: str, *, restrict: bool = False) -> None:
     half-written one that still looks like a test. Same reasoning as
     `Recording.save`, and the temp file is mode 0600 from `mkstemp` for the
     window before the final mode is applied.
+
+    **A symlinked target is resolved first, so the script lands where the
+    link points.** `os.replace` replaces the *link*, which made
+    `--output link.py` report writing `link.py` while leaving the file it
+    named untouched and swapping the link for a regular file -- a silent
+    no-op for anyone who keeps `latest.py` pointing at a script, and the
+    same class of bug pyguitest fixed for the window-capture path. Resolved
+    before the mode is read as well, so the preserved mode is the real
+    file's. A link whose target does not exist resolves to that path and the
+    write creates it, which is what a reader of the link expects; a loop or
+    an unreadable path leaves the original target to fail on its own terms.
     """
+    with contextlib.suppress(OSError, RuntimeError):
+        target = target.resolve()
     existing: int | None = None
     with contextlib.suppress(OSError):
         existing = stat.S_IMODE(target.stat().st_mode)

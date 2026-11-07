@@ -664,6 +664,16 @@ class WaylandCaptureBackend:
         OSError escaping onto the reader thread would end it -- every event
         for the rest of the recording silently lost, the one failure mode
         this backend must never have.
+
+        A device found here was, by definition, not open between capture
+        start and this moment -- there is no kernel buffer to retroactively
+        read from an fd nobody held, so whatever it emitted before `_rescan`
+        found it is gone. Measured: a uinput device created and clicked
+        within the first second of a fresh recording lost the click outright,
+        with nothing in the recording to say why it looked one event short.
+        A note here is the only way this ever becomes visible -- the same
+        reasoning `_RESCAN_SECONDS`'s own docstring gives for why the
+        rescan exists at all, just not yet carried to its result.
         """
         import selectors  # noqa: PLC0415
 
@@ -684,6 +694,11 @@ class WaylandCaptureBackend:
                 continue
             watched.add(path)
             self._devices.append(dev)
+            self.notes.append(
+                f"a new input device appeared during the recording and was "
+                f"added to capture ({dev.name or path}): whatever it emitted "
+                f"before this point is missing from this recording"
+            )
 
     def _decode(self, e: Any, ev: Any, fd: int | None = None) -> None:
         ts = ev.timestamp()

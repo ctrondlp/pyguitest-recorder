@@ -650,6 +650,64 @@ class TestThePyguitestDependency:
         monkeypatch.setattr(win32_module.importlib.util, "find_spec", _missing)
         assert not win32_module._pyguitest_win32_available()
 
+    def test_the_import_itself_raises_the_typed_error(self, monkeypatch):
+        # `_pyguitest_win32_available` asks `find_spec`, which is a different
+        # question from the import succeeding -- so the test above covered
+        # the gate and left `_key_vocabulary`'s own ImportError-to-
+        # CaptureUnavailable conversion unexercised. A regression there
+        # reaches a caller as a ModuleNotFoundError from four frames down,
+        # which says nothing about what to install.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def refusing(name, *args, **kwargs):
+            if name == "pyguitest.backends.win32":
+                raise ImportError("no pyguitest.backends.win32 here")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", refusing)
+        with pytest.raises(CaptureUnavailable, match="pyguitest"):
+            win32_module._key_vocabulary()
+
+
+class TestTheStartErrorIsRecordedBeforeReady:
+    """`start()` must not be able to wake before the error is recorded.
+
+    The pump thread signals `_ready` from a `finally` that runs while an
+    install-phase exception is still propagating. Recording the error in the
+    *outer* handler therefore left a window in which `start()` woke, read
+    `_start_error` as None, and returned success -- the "started fine,
+    recorded nothing" symptom the error path exists to close. This pins the
+    ordering rather than the timing, which no amount of sleeping could make
+    reliable.
+    """
+
+    def test_ready_is_only_set_after_the_error_is_stored(self, monkeypatch):
+        fake = FakeUser32()
+        seen = []
+
+        made = Win32CaptureBackend()
+        real_set = made._ready.set
+
+        def recording_set():
+            # What `start()` would see at the instant it is allowed to wake.
+            seen.append(made._start_error)
+            real_set()
+
+        def raising_install(id_hook, proc, hmod, thread_id):
+            raise OSError("SetWindowsHookExW blew up")
+
+        fake.SetWindowsHookExW = raising_install
+        patch_windows(monkeypatch, fake_user32=fake)
+        monkeypatch.setattr(made._ready, "set", recording_set)
+        with pytest.raises(OSError, match="blew up"):
+            made.start()
+        assert seen, "the pump thread never signalled readiness"
+        assert isinstance(seen[0], OSError), (
+            f"_ready was set while _start_error was {seen[0]!r}"
+        )
+
 
 class TestCallbackIsolation:
     """An exception inside a hook must never cost the chain its event.
@@ -1133,6 +1191,53 @@ class TestStartStopEvents:
             made.start()
         assert fake.unhooked == [1]  # the keyboard hook that did install
         assert calls["n"] == 2  # stopped after the mouse hook failed
+
+    def test_an_install_that_raises_is_reported_rather_than_recording_nothing(
+        self, monkeypatch
+    ):
+        # The silent failure this closes: `_start_error` recorded only the
+        # two "the hook returned 0" outcomes, so a *raise* from any of these
+        # calls -- a ctypes.ArgumentError, an OSError from
+        # SetWindowsHookExW/GetMessageW/GetCurrentThreadId -- ended the pump
+        # thread with `_ready` set and no error recorded. start() returned
+        # normally, the sentinel was queued, events() ended at once, and the
+        # caller recorded nothing and was told nothing.
+        fake = FakeUser32()
+
+        def raising_install(id_hook, proc, hmod, thread_id):
+            raise OSError("SetWindowsHookExW blew up")
+
+        fake.SetWindowsHookExW = raising_install
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        with pytest.raises(OSError, match="blew up"):
+            made.start()
+
+    def test_a_pump_that_raises_after_the_start_reaches_events(self, monkeypatch):
+        # The other half, and what `events()`'s `isinstance(item, Exception)`
+        # branch was written for: a failure *after* `_ready` is set has
+        # nobody waiting on `_start_error`, so the queue is the only route
+        # to the caller. Nothing ever put an exception on it, which left
+        # that branch unreachable.
+        fake = FakeUser32()
+
+        def raising_pump(*_args):
+            raise OSError("GetMessageW blew up")
+
+        fake.GetMessageW = raising_pump
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        try:
+            with pytest.raises(
+                CaptureUnavailable, match="GetMessageW blew up"
+            ) as raised:
+                list(made.events())
+        finally:
+            made.stop()
+        # Wrapped in this package's own error, with the original kept as the
+        # cause so the traceback still names the call that failed.
+        assert isinstance(raised.value.__cause__, OSError)
 
     def test_start_events_stop_round_trips_one_click(self, monkeypatch):
         fake = FakeUser32()

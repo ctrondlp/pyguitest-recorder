@@ -1042,6 +1042,37 @@ class TestHardwareRoundTrip:
         ]
         assert f9, "the hotplugged device's keystroke was not captured"
 
+    def test_a_rescanned_device_notes_that_it_was_not_watched_before_now(self):
+        # The sibling of the test above: that test proves a hotplugged device
+        # IS captured once the rescan finds it. This proves the recording
+        # says so when it happens -- there is no kernel buffer to retroactively
+        # read from an fd nobody held, so anything the device emitted between
+        # its own creation and the rescan noticing it is gone, and silently
+        # looking complete is the one failure mode this backend's own
+        # _RESCAN_SECONDS docstring says it must never produce.
+        backend = WaylandCaptureBackend()
+        backend._RESCAN_SECONDS = 0.3
+        backend.start()
+        time.sleep(0.4)
+        assert backend.notes == []
+        ui = self._open_device(
+            {e.EV_KEY: [e.KEY_F9, e.KEY_A]}, name="pg-wl-hotplug-note"
+        )
+        grabbed = None
+        try:
+            deadline = time.monotonic() + 15.0
+            while ui.device.path not in {d.path for d in list(backend._devices)}:
+                assert time.monotonic() < deadline, (
+                    "the rescan never registered the hotplugged device"
+                )
+                time.sleep(0.05)
+            grabbed = self._isolate(backend, ui.device.path)
+        finally:
+            self._teardown(backend, ui, grabbed)
+        assert len(backend.notes) == 1
+        assert "pg-wl-hotplug-note" in backend.notes[0]
+        assert "missing from this recording" in backend.notes[0]
+
 
 def test_importing_the_backend_without_evdev_is_a_clean_refusal():
     """`import ...backends.wayland` must not raise when python-evdev is absent.

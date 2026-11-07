@@ -154,11 +154,20 @@ and a status message that appears while writing:
 
 ```python
 gui.button("Save").click()
-gui.wait_for_window("Save As", timeout=10)
-gui.text_field("Name").set_text("report.txt")
-gui.button("Save").click()
+save_as = gui.window_element("Save As")
+gui.text_field("Name", within=save_as).set_text("report.txt")
+gui.button("Save", within=save_as).click()
 gui.wait_until_gone(name="Saving…", timeout=10)
 ```
+
+`within=save_as` is doing real work there, and the recorder emits it for the
+same reason: `wait_for_window` hands back a `Window`, which is the handle for
+geometry and placement and scopes nothing, so an unscoped
+`gui.text_field("Name")` searches the whole accessible tree and can answer
+with a field of that name in another window. `window_element` is the call
+that returns the dialog's own `Element` to scope by -- and it is also why
+*both* `Save` buttons above resolve, the one in the document window and the
+one in the dialog.
 
 Same interaction, same recorder. The second one reads like a test someone
 wrote on purpose, and it survives everything the first one does not — and the
@@ -582,7 +591,15 @@ desktop before it is read as one about your code.
 
 Neither platform has a system-wide bridge to switch on — UI Automation and
 Accessibility are always live, so an empty tree there points somewhere more
-specific:
+specific. **On macOS, rule the permission out first**: the *inspecting*
+process has to be trusted as an accessibility client, granted by hand under
+System Settings › Privacy & Security › Accessibility, and until it is, the
+AX API answers nothing for any application — a tree that is empty because
+the tool was never allowed to read it, not because the target publishes
+nothing. `pyguitest doctor` reports the grant, and
+`gui.supports(Capability.ELEMENT_TREE)` is the programmatic answer -- the
+`macos` backend withholds the element capabilities until the grant is there.
+With that confirmed:
 
 - **Windows: a custom-drawn or raw Win32 control has no automation peer.**
   Standard WinForms and WPF controls are UI-Automation-visible by

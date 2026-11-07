@@ -510,7 +510,13 @@ def _build_window(title: str, at: tuple[int, int], size: tuple[int, int]) -> int
     )
 
     def add(class_name, text, style, box, control_id):
-        """Create one child control in the tab page, and return its handle."""
+        """Create one child control in the probe window, and return its handle.
+
+        In the window, not in a tab page: the parent is the top-level `hwnd`,
+        and this builds the tab control itself as well as the controls of
+        every tab -- Win32 tab pages are not windows, so there is no page to
+        parent anything to.
+        """
         return _create(hwnd, hinstance, class_name, text, style, box, control_id)
 
     tab_style = _WS_VISIBLE | _WS_TABSTOP

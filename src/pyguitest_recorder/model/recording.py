@@ -34,16 +34,33 @@ def _text(data: dict[str, Any], key: str) -> str:
     return value
 
 
-def _list(data: dict[str, Any], key: str) -> list[Any]:
+def _list(data: dict[str, Any], key: str, of: type | None = None) -> list[Any]:
     """One list field of a serialized object, or `ValueError` naming it.
 
     Deliberately not `list(data.get(key, []))`: a string is iterable, so a
     hand-edited `"capabilities": "x"` would come back as one capability per
     character instead of as a refusal.
+
+    `of` checks the *items* too, which the shape of the field demands:
+    `capabilities` and `notes` are lists of strings and `raw` a list of
+    objects, and without this `{"capabilities": [1]}` or `{"raw": ["event"]}`
+    loaded cleanly, sat in a typed field holding something else, and was
+    written straight back out by `to_dict`. A recording is a file
+    `--regenerate` invites people to edit, so its fields are checked rather
+    than trusted -- the same reason every scalar above is.
     """
     value = data.get(key, [])
     if not isinstance(value, list):
         raise ValueError(f"'{key}' is not a list (got {type(value).__name__})")
+    if of is not None:
+        for index, item in enumerate(value):
+            # bool is an int subclass, and `of=int` is not used here, but the
+            # check is written to refuse it for the reason `_number` does.
+            if not isinstance(item, of) or isinstance(item, bool):
+                raise ValueError(
+                    f"'{key}'[{index}] is not a {of.__name__} "
+                    f"(got {type(item).__name__})"
+                )
     return value
 
 
@@ -66,7 +83,14 @@ def _number(data: dict[str, Any], key: str) -> float:
     value = data.get(key, 0.0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"'{key}' is not a number (got {type(value).__name__})")
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError as exc:
+        # An int too large for a float -- `10**1000` passes the type check
+        # above and raises here. The documented contract for a malformed
+        # recording is ValueError, which is what the CLI catches, so an
+        # OverflowError escaping it reached the user as a traceback.
+        raise ValueError(f"'{key}' is too large to be a number ({value!r})") from exc
 
 
 def _whole(data: dict[str, Any], key: str, default: int = 0) -> int:
@@ -89,9 +113,15 @@ def _screen(entry: Any) -> tuple[int, int, int, float]:
         raise ValueError(
             f"a 'screens' entry is not [index, width, height, scale] (got {entry!r})"
         )
+    if any(isinstance(field, bool) for field in entry):
+        # `int(True)` is 1 and `float(True)` is 1.0, so `[true, 1920, 1080,
+        # 1.0]` coerced to a screen at index 1 rather than being refused --
+        # a geometry nobody wrote. Refused by name for the same reason
+        # `_number` and `_whole` refuse it: bool is an int subclass.
+        raise ValueError(f"a 'screens' entry holds a boolean (got {entry!r})")
     try:
         return (int(entry[0]), int(entry[1]), int(entry[2]), float(entry[3]))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"a 'screens' entry is not four numbers (got {entry!r})"
         ) from exc
@@ -157,11 +187,11 @@ class Environment:
             display=_text(data, "display"),
             screens=[_screen(entry) for entry in _list(data, "screens")],
             capture_backend=_text(data, "capture_backend"),
-            capabilities=list(_list(data, "capabilities")),
+            capabilities=list(_list(data, "capabilities", of=str)),
             pyguitest_version=_text(data, "pyguitest_version"),
             recorder_version=_text(data, "recorder_version"),
             xwayland=_flag(data, "xwayland"),
-            notes=list(_list(data, "notes")),
+            notes=list(_list(data, "notes", of=str)),
             recorded_at=_text(data, "recorded_at"),
         )
 
@@ -267,6 +297,15 @@ class Recording:
         # instances of 'str' and 'int'`, outside the `ValueError` that
         # `--regenerate` promises and past `main()`'s `except ValueError`.
         version = _whole(data, "format")
+        if version < 0:
+            # Only "newer than this" was refused, so a negative version
+            # loaded as a valid recording -- and a format is a number
+            # compared against, not a measurement, so there is no reading
+            # under which -1 means anything.
+            raise ValueError(
+                f"'format' is not a format version ({version}); the field "
+                "counts up from zero"
+            )
         if version > FORMAT_VERSION:
             raise ValueError(
                 f"recording format {version} is newer than this recorder "
@@ -294,7 +333,7 @@ class Recording:
         recording = cls(
             events=events,
             environment=Environment.from_dict(data.get("environment", {})),
-            raw=_list(data, "raw"),
+            raw=_list(data, "raw", of=dict),
             started_at=_number(data, "started_at"),
         )
         # Every delay is recomputed from the neighbour the sort above just gave

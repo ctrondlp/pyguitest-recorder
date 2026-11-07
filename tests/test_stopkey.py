@@ -62,6 +62,42 @@ def test_a_press_too_slow_to_belong_starts_a_run_of_its_own():
     assert stop.feed(key(5.1)).stop
 
 
+def test_modifier_traffic_does_not_keep_a_slow_run_alive():
+    """The interval is between the taps, not between the held events.
+
+    A chord's modifiers pass through `_belongs` on purpose, so releasing and
+    re-pressing them between taps does not break the run -- but the interval
+    was measured against whatever was held *last*, which is one of those. So
+    a modifier arriving in the gap reset the clock, and two taps further
+    apart than `interval` still completed the run: a ctrl held down while
+    somebody worked for ten seconds, then pressed F12 again, read as a
+    deliberate double-tap and stopped the recording.
+    """
+    stop = StopKey(chord="ctrl+F12", interval=1.0)
+    assert stop.feed(key(0.0, keysym="Control_L")).registered is False
+    assert stop.feed(key(0.1, keysym="F12")).registered is True
+    # ctrl held down through nine seconds of work. X11 auto-repeat makes that
+    # a *stream* of presses, each well inside the interval, and they are
+    # transparent to the run by design (`_belongs`) -- so the comparison
+    # never found a gap and the stream kept the run alive indefinitely.
+    for index in range(18):
+        stop.feed(key(0.5 + 0.5 * index, keysym="Control_L"))
+    outcome = stop.feed(key(9.4, keysym="F12"))
+    assert not outcome.stop, "two taps 9.3s apart completed a 1.0s chord"
+    assert stop.pending_presses == 1
+
+
+def test_two_taps_inside_the_interval_still_complete_through_a_modifier():
+    # The other half: the modifier traffic must not break a run that really
+    # is two quick taps.
+    stop = StopKey(chord="ctrl+F12", interval=1.0)
+    stop.feed(key(0.0, keysym="Control_L"))
+    stop.feed(key(0.1, keysym="F12"))
+    stop.feed(key(0.2, keysym="Control_L", kind="key_release"))
+    stop.feed(key(0.3, keysym="Control_L"))
+    assert stop.feed(key(0.4, keysym="F12")).stop
+
+
 def test_a_completed_run_leaves_nothing_held():
     stop = StopKey()
     stop.feed(key(1.0))
