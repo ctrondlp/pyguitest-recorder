@@ -425,6 +425,40 @@ def test_recording_from_dict_rejects_a_format_that_is_not_a_whole_number():
             Recording.from_dict({"format": bad})
 
 
+def test_recording_from_dict_rejects_a_negative_format():
+    # Only "newer than this recorder" was refused, so -1 loaded as a valid
+    # recording. A format is a number compared against, not a measurement:
+    # there is no reading under which a negative one means anything.
+    with pytest.raises(ValueError, match="not a format version"):
+        Recording.from_dict({"format": -1})
+
+
+def test_recording_from_dict_rejects_a_number_too_large_to_be_one():
+    # `10**1000` passes the int check and then raises OverflowError inside
+    # `float()` -- outside the ValueError the load contract promises and the
+    # CLI catches, so it reached the user as a traceback.
+    with pytest.raises(ValueError, match="too large to be a number"):
+        Recording.from_dict({"started_at": 10**1000})
+
+
+def test_recording_from_dict_validates_the_items_of_its_list_fields():
+    # A list of the wrong *thing* used to load cleanly, sit in a typed field
+    # holding something else, and be written straight back out.
+    with pytest.raises(ValueError, match=r"'capabilities'\[0\] is not a str"):
+        Recording.from_dict({"environment": {"capabilities": [1]}})
+    with pytest.raises(ValueError, match=r"'notes'\[1\] is not a str"):
+        Recording.from_dict({"environment": {"notes": ["fine", {}]}})
+    with pytest.raises(ValueError, match=r"'raw'\[0\] is not a dict"):
+        Recording.from_dict({"raw": ["event"]})
+
+
+def test_a_screen_entry_holding_a_boolean_is_refused():
+    # `int(True)` is 1 and `float(True)` is 1.0, so this coerced to a screen
+    # at index 1 -- a geometry nobody wrote -- rather than being refused.
+    with pytest.raises(ValueError, match="holds a boolean"):
+        Recording.from_dict({"environment": {"screens": [[True, 1920, 1080, 1.0]]}})
+
+
 def test_recording_from_dict_rejects_a_malformed_environment_field():
     # Every member is read through the same check, so a hand-edited one fails
     # naming itself rather than as whatever it broke when it was first used.

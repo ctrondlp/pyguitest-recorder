@@ -156,6 +156,36 @@ def test_docs_name_the_check_key_the_code_defaults_to():
         assert key.lower() in _read(page).lower(), f"{page} does not name {key}"
 
 
+def test_a_fragment_on_a_cross_page_link_resolves_too():
+    """`other.md#section`, which the link check below drops on the floor.
+
+    It splits the fragment off to find the file and then discards it, and the
+    in-page anchor check only looks at links whose whole target is an anchor
+    -- so a heading renamed on one page broke every link into it from another
+    while both tests stayed green. Same failure as a broken in-page anchor,
+    and just as invisible: the page renders, the click scrolls nowhere.
+    """
+    seen = 0
+    for page in _PAGES:
+        for target in _LINK.findall(_read(page)):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            path, _, fragment = target.partition("#")
+            if not path or not fragment:
+                continue
+            linked = (_ROOT / page).parent / path
+            if linked.suffix != ".md" or not linked.is_file():
+                continue
+            text = linked.read_text(encoding="utf-8")
+            headings = {_slug(heading) for heading in _HEADING.findall(text)}
+            seen += 1
+            assert _slug(fragment) in headings, (
+                f"{page} links to {target} with no such heading on {path}"
+            )
+    # Guard against the filtering above silently matching nothing.
+    assert seen > 3, f"only {seen} cross-page fragments were checked"
+
+
 def test_relative_links_point_at_something_that_exists():
     for page in _PAGES:
         for target in _LINK.findall(_read(page)):
@@ -218,15 +248,20 @@ def test_absolute_links_into_this_repository_resolve():
 
     `blob/main/<path>` names a file and `tree/main/<dir>` names a directory,
     and either is a 404 once what it names is renamed or unshipped -- the same
-    question the relative-link test asks of the pages under docs/.
+    question the relative-link test asks of the pages under docs/. A fragment
+    on one of these is checked too, the same way the cross-page fragment test
+    checks a relative link's: being absolute is why the README uses these
+    links at all, and it does not exempt them from the heading moving under
+    them.
     """
     checked = 0
     for page in _PAGES:
         for target in _LINK.findall(_read(page)):
             if not target.startswith(_REPO):
                 continue
-            rest = target[len(_REPO) :].split("#", 1)[0]
-            kind, _, path = rest.partition("/main/")
+            rest = target[len(_REPO) :]
+            kind, _, after = rest.partition("/main/")
+            path, _, fragment = after.partition("#")
             if not path or kind not in ("blob", "tree"):
                 continue
             checked += 1
@@ -235,6 +270,12 @@ def test_absolute_links_into_this_repository_resolve():
             if kind == "tree":
                 assert (linked / "README.md").exists(), (
                     f"{page} links to the directory {path}, which has no README"
+                )
+            elif fragment and linked.suffix == ".md":
+                text = linked.read_text(encoding="utf-8")
+                headings = {_slug(heading) for heading in _HEADING.findall(text)}
+                assert _slug(fragment) in headings, (
+                    f"{page} links to {target} with no such heading on {path}"
                 )
     assert checked > 5, "the README's links went unchecked"
 

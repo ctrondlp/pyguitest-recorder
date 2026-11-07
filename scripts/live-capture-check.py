@@ -27,6 +27,7 @@ hits, from the other side.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -136,6 +137,12 @@ def start_a11y_bus() -> list[subprocess.Popen[bytes]]:
     Every process started is returned, because every one of them has to be
     stopped: the registry used to be started and forgotten, and each run left an
     orphaned `at-spi2-registryd` behind on the machine it ran on.
+
+    A failure partway through stops what did start before re-raising, for the
+    same reason. The launcher is started first and the registry second, and a
+    raise from the second one left `main()` with an empty list -- so its
+    `finally` had nothing to stop and the launcher outlived the run, which is
+    the leak this function exists to prevent.
     """
     bus = a11y_daemon("at-spi-bus-launcher")
     if bus is None or not os.environ.get(INNER):
@@ -147,20 +154,49 @@ def start_a11y_bus() -> list[subprocess.Popen[bytes]]:
             stderr=subprocess.DEVNULL,
         )
     ]
-    time.sleep(2)
-    # Started by hand because systemd activation is not available on a private
-    # session bus. Without it the bus exists and answers nothing -- and
-    # `Atspi.get_desktop(0)` still succeeds against that, which is why the
-    # resolver probes by counting children rather than by asking for a desktop.
-    registry = a11y_daemon("at-spi2-registryd")
-    if registry is not None:
-        started.append(
-            subprocess.Popen(
-                [registry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-        )
+    try:
         time.sleep(2)
+        # Started by hand because systemd activation is not available on a
+        # private session bus. Without it the bus exists and answers nothing
+        # -- and `Atspi.get_desktop(0)` still succeeds against that, which is
+        # why the resolver probes by counting children rather than by asking
+        # for a desktop.
+        registry = a11y_daemon("at-spi2-registryd")
+        if registry is not None:
+            started.append(
+                subprocess.Popen(
+                    [registry], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            )
+            time.sleep(2)
+    except BaseException:
+        for process in started:
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                stop(process)
+        raise
     return started
+
+
+def _a11y_verdict(started: list[subprocess.Popen[bytes]]) -> str:
+    """How to describe the accessibility bus this run actually has.
+
+    Three answers, because there are three states and only two used to be
+    reported: a bus that is up, one whose processes have died, and one that
+    was never fully started because `at-spi2-registryd` is not installed --
+    the registry is what resolves elements, and without it the bus exists
+    and answers nothing.
+    """
+    if not started:
+        return "none (elements off)"
+    dead = [process for process in started if process.poll() is not None]
+    if dead:
+        return (
+            f"none (elements off) -- {len(dead)} of its processes exited "
+            "during start-up"
+        )
+    if a11y_daemon("at-spi2-registryd") is None:
+        return "none (elements off) -- no at-spi2-registryd to resolve elements"
+    return "private"
 
 
 def stop(process: subprocess.Popen[bytes]) -> None:
@@ -779,7 +815,13 @@ def main() -> int:
         # replay that did nothing came to exit 0 on GhostBSD.
         os.environ["DISPLAY"] = display
         a11y = start_a11y_bus()
-        print("accessibility bus:", "private" if a11y else "none (elements off)")
+        # "private" means a bus that can actually resolve an element, not a
+        # launcher that was spawned. Two different ways it cannot: a process
+        # that exited during start-up, and `at-spi2-registryd` not being
+        # installed at all -- in which case `start_a11y_bus` starts only the
+        # launcher and every process in the list is alive. Either way a run
+        # that named nothing used to read as a pass with elements on.
+        print("accessibility bus:", _a11y_verdict(a11y))
         return check(
             display, record_motion=args.record_motion, do_replay=not args.no_replay
         )

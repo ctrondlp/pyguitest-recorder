@@ -8,6 +8,8 @@ keyboard record the characters actually typed.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from pyguitest_recorder.backends._xkb import XkbTranslator
@@ -76,3 +78,32 @@ class TestGermanLayout:
 def test_create_returns_none_for_a_nonexistent_layout():
     # A keymap that cannot be built is a clean fallback, not a crash.
     assert XkbTranslator.create("this-is-not-a-layout") is None
+
+
+def test_a_library_too_old_for_a_symbol_is_a_clean_fallback(monkeypatch):
+    # Found on Fedora 19, whose libxkbcommon.so.0 exports no
+    # `xkb_state_key_get_utf8`. ctypes raises AttributeError for a symbol the
+    # object does not export -- which `create` did not catch, so merely asking
+    # whether a translator could be built raised through. The module-level
+    # `skipif` in this very file does that at import time, so the failure
+    # arrived as a collection error that took the whole session down rather
+    # than as the documented None.
+    import ctypes as _ctypes
+
+    from pyguitest_recorder.backends import _xkb
+
+    class OldLibrary:
+        """Exports everything except the one symbol an old build lacks."""
+
+        def __getattr__(self, name):
+            if name == "xkb_state_key_get_utf8":
+                raise AttributeError(
+                    "/lib64/libxkbcommon.so.0: undefined symbol: xkb_state_key_get_utf8"
+                )
+            return mock.Mock()
+
+    monkeypatch.setattr(_ctypes, "CDLL", lambda name: OldLibrary())
+
+    with pytest.raises(OSError, match="too old"):
+        _xkb._bind()
+    assert XkbTranslator.create("us") is None

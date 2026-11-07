@@ -9,6 +9,7 @@ import ast
 import inspect
 import math
 import re
+import re as _re
 import sys
 
 import pytest
@@ -64,6 +65,34 @@ def window_pattern(source):
 def render(*events, **options):
     recording = Recording(events=list(events))
     return generate(recording, GeneratorOptions(include_header=False, **options))
+
+
+def window_scope(title: str) -> str:
+    """How a generated script renders a `within=` scope on `title`.
+
+    One place, because the spelling is load-bearing and changed once: a
+    window-ish scope is matched *exactly* rather than as a substring, since
+    `window_element` takes a plain string as a substring and a fixture with
+    "Recorder Check" and "Recorder Check Two" open at once then bound the
+    wrong one. See `_exact_title_pattern`.
+    """
+    import ast
+
+    pattern = ast.unparse(ast.Constant("^" + _re.escape(title) + "$"))
+    return double_quoted(f"gui.window_element(re.compile({pattern}))")
+
+
+def double_quoted(source: str) -> str:
+    """`source` with single-quoted literals rewritten as double-quoted.
+
+    The generator formats its output with ruff where ruff is installed and
+    falls back to a different quote style where it is not -- so an assertion
+    naming a quoted literal passes on a developer's machine and fails on a
+    test box without ruff. Normalising here keeps such an assertion about the
+    call it is checking rather than about which tools the box happens to
+    have. Measured on the KDE box, which has no ruff.
+    """
+    return source.replace("'", '"')
 
 
 def _is_private(name: str) -> bool:
@@ -700,9 +729,122 @@ def test_wait_for_an_ambiguous_element_is_scoped_too(window):
         WaitForElement(element=in_import),
         Click(target=Target(x=1, y=2, window=window, element=in_export)),
     )
-    assert 'gui.window_element("Import")' in source
+    assert window_scope("Import") in double_quoted(source)
     assert "gui.wait_for_element(" in source
     assert "within=import_window" in source
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_a_scoped_wait_waits_for_its_scope_first(window):
+    """The container is usually the thing that has yet to appear.
+
+    The scope binding is an immediate lookup emitted on the line above its
+    user -- right for a click, where the dialog is already on screen, and
+    wrong for a wait, whose premise is that it is not. So an unscoped script
+    waited and a scoped one raised `WindowNotFound` one line earlier,
+    turning a valid wait into an immediate failure.
+    """
+    in_import = ElementRef(role="push button", name="OK", path=(("dialog", "Import"),))
+    in_export = ElementRef(role="push button", name="OK", path=(("dialog", "Export"),))
+    source = render(
+        WaitForElement(element=in_import, timeout=12.0),
+        Click(target=Target(x=1, y=2, window=window, element=in_export)),
+    )
+    lines = [line.strip() for line in source.splitlines()]
+    waited = next(i for i, line in enumerate(lines) if "gui.expect_window(" in line)
+    bound = next(i for i, line in enumerate(lines) if "gui.window_element(" in line)
+    used = next(i for i, line in enumerate(lines) if "gui.wait_for_element(" in line)
+    assert waited < bound < used, source
+    # And it waits as long as the wait it is for, not pyguitest's default.
+    assert "timeout=12" in lines[waited]
+    assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_two_windows_with_different_timeouts_still_collide(window):
+    # The warning keyed on the rendered lookup, which embeds `timeout=`, so
+    # two windows that find the same live window went unwarned whenever
+    # their timeouts differed -- and the timeout has nothing to do with
+    # which window the call finds.
+    first = WindowRef(title="Open File", app_id="org.x.A", pid=100)
+    second = WindowRef(title="Open File", app_id="org.x.A", pid=200)
+    recording = Recording(
+        events=[
+            WaitForWindow(window=first, timeout=4.0),
+            WaitForWindow(window=second, timeout=30.0),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "timeout=4" in source and "timeout=30" in source, source
+    assert "are different windows in the" in source
+
+
+def test_a_scope_that_is_not_a_toplevel_is_waited_for_and_raises(window):
+    # `wait_for_element` answers None on timeout and `within=None` means
+    # *unscoped*, so a scope that never appeared silently widened the lookup
+    # to the whole tree -- the exact failure the scope exists to prevent.
+    # `expect_element` is the raising sibling.
+    first = ElementRef(
+        role="push button", name="OK", path=(("panel", "Left"), ("group", "Shared"))
+    )
+    second = ElementRef(
+        role="push button", name="OK", path=(("panel", "Right"), ("group", "Shared"))
+    )
+    recording = Recording(
+        events=[
+            WaitForElement(element=first, timeout=9.0),
+            Click(target=Target(x=1, y=2, window=window, element=second)),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    # Asserted on the *binding* line, not on a substring of the whole file:
+    # the inferred wait itself calls `wait_for_element(role=..., within=...)`,
+    # so a prefix search for that text finds the wrong call whenever the
+    # formatter leaves it on one line -- which is what happens where ruff is
+    # not installed. Caught on the KDE box.
+    bindings = [
+        line.strip()
+        for line in source.splitlines()
+        if _re.match(r"\s*\w+ = gui\.(expect|wait_for)_element\(", line)
+    ]
+    assert bindings, source
+    assert all("gui.expect_element(" in line for line in bindings), bindings
+
+
+def test_a_scoped_wait_anchors_the_window_it_waits_for(window):
+    # The wait and the binding must match the title the same way: a plain
+    # string matches as a substring, so waiting for "Recorder Check" was
+    # satisfied instantly by "Recorder Check Two" while the anchored binding
+    # beneath it then raised. Caught by the live capture check.
+    element = ElementRef(
+        role="push button", name="OK", path=(("application", "app"), ("dialog", "Save"))
+    )
+    other = ElementRef(
+        role="check box", name="OK", path=(("application", "app"), ("dialog", "Open"))
+    )
+    recording = Recording(
+        events=[
+            WaitForElement(element=element, timeout=7.0),
+            Click(target=Target(x=1, y=2, window=window, element=other)),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "gui.expect_window(re.compile(" in double_quoted(source), source
+    assert 'gui.expect_window("Save"' not in double_quoted(source), source
+
+
+def test_a_click_scope_is_still_bound_without_a_wait(window):
+    # The other half: a click's container is already there, so binding it
+    # must not grow a wait nobody asked for.
+    first = ElementRef(role="push button", name="OK", path=(("dialog", "Import"),))
+    second = ElementRef(role="push button", name="OK", path=(("dialog", "Export"),))
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=first)),
+        Click(target=Target(x=3, y=4, window=window, element=second)),
+    )
+    assert "gui.expect_window(" not in source
+    assert window_scope("Import") in double_quoted(source)
     assert validate(source) == []
 
 
@@ -726,6 +868,60 @@ def test_a_drifting_title_with_no_app_id_is_used_anyway_with_a_warning():
     assert "gui.expect_window(" in source
     # The comment wraps, so match a phrase that survives the break.
     assert "match is fragile" in source
+
+
+def test_two_windows_that_look_the_same_up_are_warned_about(window):
+    """Distinct bindings that both find one live window.
+
+    `_window_var` separates two windows by pid, which is right for the
+    recording and meaningless at replay, while the lookup matches on title
+    alone -- so the script bound two variables to one window and every
+    interaction with the second went to the first, looking for all the world
+    like two windows were handled.
+    """
+    first = WindowRef(title="Open File", app_id="org.x.A", pid=100)
+    second = WindowRef(title="Open File", app_id="org.x.A", pid=200)
+    recording = Recording(
+        events=[
+            WindowActivate(window=first),
+            WindowActivate(window=second),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    # The comment wraps, so match a phrase that survives the break.
+    assert "are different windows in the" in source
+    assert "replaying desktop" in source
+    assert validate(source) == []
+
+
+def test_one_window_mentioned_twice_is_not_warned_about(window):
+    # The false positive to avoid: one window, two interactions, one binding.
+    same = WindowRef(title="Open File", app_id="org.x.A", pid=100)
+    recording = Recording(
+        events=[WindowActivate(window=same), WindowActivate(window=same)]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "are different windows" not in source
+    assert validate(source) == []
+
+
+def test_a_drifting_title_beats_an_ambiguous_app_id():
+    # The combination neither branch handled: the app id is shared with
+    # another window open at the time, so matching on it picks whichever the
+    # replaying desktop answers with first, while the title is merely
+    # fragile -- and fragile is said out loud. The generator preferred the
+    # app id, because it only asked whether one was present.
+    shared = WindowRef(
+        title="Open File",
+        app_id="plasmashell",
+        app_id_ambiguous=True,
+        title_stable=False,
+    )
+    source = render(WindowActivate(window=shared))
+    assert 'gui.expect_window(app_id="plasmashell"' not in double_quoted(source)
+    assert 'gui.expect_window("Open File"' in double_quoted(source)
+    assert "match is fragile" in source
+    assert validate(source) == []
 
 
 def test_an_ambiguous_app_id_with_no_title_is_not_matched_on(save_button):
@@ -1426,6 +1622,26 @@ def test_typing_confirms_focus_first(window):
     assert "Capability.WINDOW_ACTIVATE" in source
 
 
+def test_confirming_focus_re_reads_the_window_origin_afterwards(window):
+    """`focus_window` can move a window, so the cached origin has to go.
+
+    `_emit_windowactivate` has always cleared the geometry and pointer
+    caches after emitting `focus_window`, and said why: raising a window can
+    move it. `_focus_before_typing` emits the same call and did not, so a
+    window-relative click after a focus switch reused the origin read before
+    the window moved — a click at coordinates from the window's old place.
+    """
+    anonymous = ElementRef(role="panel")
+    source = render(
+        Click(target=Target(x=420, y=315, window=window, element=anonymous)),
+        TextInput(text="Ada", target=Target(x=420, y=315, window=window)),
+        Click(target=Target(x=420, y=315, window=window, element=anonymous)),
+    )
+    assert "gui.focus_window(example)" in source
+    # Twice: once for the first click, once after the focus call.
+    assert source.count("gui.geometry(example)") == 2, source
+
+
 def test_focus_is_confirmed_once_per_window_not_once_per_run(window):
     source = render(
         TextInput(text="one", target=Target(x=10, y=10, window=window)),
@@ -1560,12 +1776,116 @@ def test_a_check_on_an_ambiguous_element_is_scoped_too(window):
         ),
         Click(target=Target(x=3, y=4, window=window, element=in_export)),
     )
-    assert 'gui.window_element("Import")' in source
+    assert window_scope("Import") in double_quoted(source)
     assert "expect_checked(" in source
     # Long enough to be reformatted onto multiple lines by ruff, so check the
     # pieces rather than one contiguous call string.
     assert "within=import_window" in source
     assert validate(source) == []
+
+
+def test_named_text_input_takes_the_window_scope_too(window):
+    # The one lookup left unscoped when clicks, checks and waits gained
+    # `within=` -- and the one where binding the wrong element *writes* to
+    # it. A second application with a field of the same name could take the
+    # recorded text.
+    field = ElementRef(
+        role="text", name="Name", path=(("application", "ed"), ("dialog", "Save As"))
+    )
+    source = render(
+        TextInput(
+            text="notes.txt", target=Target(x=1, y=2, window=window, element=field)
+        )
+    )
+    assert window_scope("Save As") in double_quoted(source)
+    assert "within=save_as" in source
+    assert validate(source) == []
+
+
+def test_an_application_ancestor_is_not_used_as_a_window_scope(window):
+    # `window_element` matches a window *title*; an application's accessible
+    # name is the program's. Scoping to it searched for a window titled after
+    # the program and found nothing, or the wrong thing by luck. Asserted on
+    # a click, which has been scoped since `within=` was introduced, so this
+    # says something on its own rather than only alongside the text-input
+    # change above.
+    button = ElementRef(
+        role="push button", name="Apply", path=(("application", "gedit"),)
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=button)))
+    assert window_scope("gedit") not in double_quoted(source)
+    assert "within=" not in source
+    assert 'gui.button("Apply").click()' in double_quoted(source)
+    assert validate(source) == []
+
+
+def test_two_containers_sharing_a_name_are_warned_about(window):
+    """A scope is found by name, so one name has to mean one container.
+
+    Two applications each with a frame named "Settings" key identically, so
+    both recordings' elements take the one cached binding and the generated
+    script searches the whole desktop for a name that does not identify
+    either of them.
+    """
+    first = ElementRef(
+        role="push button",
+        name="Apply",
+        path=(("application", "Mail"), ("frame", "Settings")),
+    )
+    second = ElementRef(
+        role="check box",
+        name="Wrap lines",
+        path=(("application", "Editor"), ("frame", "Settings")),
+    )
+    # Through `generate` rather than `render`: a warning is a header note,
+    # and `render` turns the header off.
+    recording = Recording(
+        events=[
+            Click(target=Target(x=1, y=2, window=window, element=first)),
+            Click(target=Target(x=3, y=4, window=window, element=second)),
+        ]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "more than one container is named 'Settings'" in source
+    assert validate(source) == []
+
+
+def test_one_container_reached_at_two_depths_is_not_warned_about(window):
+    # The false positive the comparison has to avoid: the same dialog, found
+    # from two elements nested at different depths, is one container.
+    shallow = ElementRef(role="push button", name="OK", path=(("dialog", "Prefs"),))
+    deep = ElementRef(
+        role="check box", name="Wrap", path=(("dialog", "Prefs"), ("panel", "General"))
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=shallow)),
+        Click(target=Target(x=3, y=4, window=window, element=deep)),
+    )
+    assert "more than one container" not in source
+    assert window_scope("Prefs") in double_quoted(source)
+    assert validate(source) == []
+
+
+def test_no_header_keeps_the_warnings_and_drops_the_rest(window):
+    """`--no-header` must not be what hides what the script could not do.
+
+    The whole notes block used to go with the header, warnings included --
+    so a script generated without one carried no sign that typed text went
+    somewhere unidentifiable, that a collision was unresolved, or that a
+    requested click route was lost. The environment's own notes are
+    commentary about where the recording came from and do go with the
+    header; a warning is not.
+    """
+    recording = Recording(
+        events=[TextInput(text="Ada", target=Target(x=10, y=10, window=window))],
+        environment=Environment(notes=["recorded over ssh"]),
+    )
+    without = generate(recording, GeneratorOptions(include_header=False))
+    assert "WARNING:" in without
+    assert "recorded over ssh" not in without
+    with_header = generate(recording, GeneratorOptions())
+    assert "WARNING:" in with_header
+    assert "recorded over ssh" in with_header
 
 
 def test_a_window_check_emits_its_title_unescaped():
@@ -1574,6 +1894,16 @@ def test_a_window_check_emits_its_title_unescaped():
     window = WindowRef(title="Document (1)", app_id="org.example.App")
     source = render(check("window", window=window))
     assert window_pattern(source) == "Document (1)"
+    assert validate(source) == []
+
+
+def test_a_window_check_waits_as_long_as_it_was_configured_to():
+    # Both window *lookups* pass the configured timeout and the check did
+    # not, so raising `default_timeout` for a slow application reached every
+    # other wait in the script and silently not this one.
+    window = WindowRef(title="Report", app_id="org.example.App")
+    source = render(check("window", window=window), default_timeout=30.0)
+    assert "timeout=30" in source
     assert validate(source) == []
 
 
@@ -1701,8 +2031,8 @@ def test_two_same_named_buttons_are_scoped_by_their_dialog(window):
         Click(target=Target(x=1, y=2, window=window, element=save_as)),
         Click(target=Target(x=3, y=4, window=window, element=preferences)),
     )
-    assert 'gui.window_element("Save As")' in source
-    assert 'gui.window_element("Preferences")' in source
+    assert window_scope("Save As") in double_quoted(source)
+    assert window_scope("Preferences") in double_quoted(source)
     # The sugar is kept, scoped: `gui.button` takes `within=` like the rest.
     assert 'gui.button("Save", within=' in source
     # No unscoped mention of the ambiguous pair -- every use of it is scoped.
@@ -1731,8 +2061,8 @@ def test_disambiguation_walks_past_a_shared_immediate_parent(window):
         Click(target=Target(x=1, y=2, window=window, element=in_import)),
         Click(target=Target(x=3, y=4, window=window, element=in_export)),
     )
-    assert 'gui.window_element("Import")' in source
-    assert 'gui.window_element("Export")' in source
+    assert window_scope("Import") in double_quoted(source)
+    assert window_scope("Export") in double_quoted(source)
     # The shared "Content" panel never gets bound -- it disambiguates nothing.
     assert 'name="Content"' not in source
     assert validate(source) == []
@@ -1808,7 +2138,7 @@ def test_the_same_element_mentioned_twice_is_not_treated_as_a_collision(window):
         Click(target=Target(x=1, y=2, window=window, element=element)),
         Click(target=Target(x=3, y=4, window=window, element=element)),
     )
-    assert source.count('gui.window_element("Sync")') == 1
+    assert double_quoted(source).count(window_scope("Sync")) == 1
     assert source.count('gui.button("Retry", within=sync).click()') == 2
     assert "could not be told apart" not in source
     assert validate(source) == []
@@ -2885,6 +3215,26 @@ def test_a_thinned_route_stays_within_the_tolerance_it_claims(window):
     )
 
 
+def test_a_route_that_doubles_back_keeps_the_excursion(window):
+    """The one case perpendicular distance to the *infinite* line gets wrong.
+
+    A pointer that swings out past its own start and comes back sits almost
+    exactly on the line through the two ends -- so `_off_line` measured the
+    far point as a pixel or two off, thinning dropped it, and `_straight`
+    then called the whole route straight and emitted no `via` at all. The
+    replayed script went straight from start to finish and never visited the
+    place the recording spent most of its travel.
+    """
+    route = moves(window, (400, 300), (100, 302), (500, 300))
+    source = render(*route, motion="recorded", locators="absolute")
+    kept = waypoints(source)
+    assert kept, "the excursion thinned away to nothing"
+    far = [ast.literal_eval(point) for point in kept]
+    assert any(x < 200 for x, _y in far), (
+        f"the route doubled back to x=100 and the script kept {kept}"
+    )
+
+
 def test_the_waypoint_cap_backstops_a_route_that_genuinely_wanders(window):
     # A zig-zag has nothing to thin -- every point is a real corner -- so the
     # cap is the only thing keeping the script to a length a person would
@@ -2937,8 +3287,11 @@ def test_an_older_pyguitest_falls_back_to_teleports(monkeypatch, window):
     # still renders, as teleports, and the caller is warned.
     monkeypatch.setattr(generator_module, "_session_methods", lambda: frozenset())
     source = render(*moves(window, (200, 200), (260, 240)), motion="natural")
-    assert "move_mouse_naturally(" not in source
+    assert "gui.move_mouse_naturally(" not in source
     assert "gui.move_mouse(" in source
+    # The warning reaches a header-less render too: `render` turns the header
+    # off, and a warning is the script saying what it could not do.
+    assert "WARNING: the installed pyguitest has no move_mouse_naturally()" in source
     assert validate(source) == []
 
 
@@ -3265,8 +3618,8 @@ def test_a_tab_bar_is_never_the_scope_anchor(window):
     # it is anchored through `window_element`, which names no role at all,
     # since `frame` is at-spi's word for a toplevel and UIA and AX both say
     # `window`. See _ancestor_lookup.
-    assert 'gui.window_element("TortureTest")' in source
-    assert 'gui.window_element("Preferences")' in source
+    assert window_scope("TortureTest") in double_quoted(source)
+    assert window_scope("Preferences") in double_quoted(source)
     assert "within=" in source
     assert validate(source) == []
 
@@ -3319,7 +3672,7 @@ def test_a_lookup_is_scoped_to_the_window_it_was_recorded_in(window):
         path=(("application", "torture_test"), ("frame", "TortureTest")),
     )
     source = render(Click(target=Target(x=1, y=2, window=window, element=element)))
-    assert 'gui.window_element("TortureTest")' in source
+    assert window_scope("TortureTest") in double_quoted(source)
     assert 'gui.menu_item("Help", within=torturetest)' in source
     # The bare, desktop-wide lookup must not appear at all.
     assert 'gui.menu_item("Help")' not in source
@@ -3360,7 +3713,7 @@ def test_a_file_dialog_and_a_message_box_scope_like_a_dialog(window):
         # Anchored by title through `window_element`, not by role: a file
         # chooser and an alert are both toplevels, and the three bridges do
         # not agree on what to call one. See _ancestor_lookup.
-        assert f'gui.window_element("{title}")' in source, role
+        assert window_scope(title) in double_quoted(source), role
         assert f'gui.button("Cancel", within={bound})' in source, role
         assert "TortureTest" not in source.split("def main")[1], role
         assert validate(source) == [], role
@@ -3389,7 +3742,7 @@ def test_a_check_is_scoped_like_the_click_on_the_same_element(window):
         WaitForElement(element=element),
     )
     # The frame is bound once and shared, not searched for three times.
-    assert source.count('gui.window_element("TortureTest")') == 1
+    assert double_quoted(source).count(window_scope("TortureTest")) == 1
     # The click, the check and the wait each carry it.
     assert source.count("within=torturetest") == 3
     assert validate(source) == []
@@ -3478,8 +3831,23 @@ def test_the_focus_rung_drops_the_pointer_capabilities(window):
 def test_the_focus_rung_says_why_it_is_not_a_coordinate(window):
     field = ElementRef(role="entry", name="Search Field", actions=())
     source = render(Click(target=Target(x=1, y=2, window=window, element=field)))
-    assert "no click or press action" in source
+    assert "a click into a text field is a focus" in source
     assert "Search Field" in source
+
+
+@pytest.mark.needs_ruff
+def test_the_focus_comment_does_not_claim_the_element_offered_nothing(window):
+    # This rung runs *before* `_click_call` and deliberately never asks
+    # whether the element is clickable, so a comment saying it "offered no
+    # click or press action" was false for every UIA recording: an entry
+    # there publishes `invoke` and `do default action`. The reason to prefer
+    # focus() is that it ports, not that there was nothing else.
+    clickable = ElementRef(
+        role="entry", name="Search Field", actions=("invoke", "do default action")
+    )
+    source = render(Click(target=Target(x=1, y=2, window=window, element=clickable)))
+    assert ".focus()" in source
+    assert "no click or press action" not in source
 
 
 @pytest.mark.needs_ruff
@@ -3594,7 +3962,7 @@ def test_a_window_scope_anchor_uses_window_element(window):
         path=(("frame", "Example"),),
     )
     source = render(Click(target=Target(x=1, y=2, window=window, element=button)))
-    assert 'gui.window_element("Example")' in source
+    assert window_scope("Example") in double_quoted(source)
     assert 'role="frame"' not in source
     assert "Role.FRAME" not in source
     assert validate(source) == []
@@ -3607,7 +3975,7 @@ def test_every_window_role_anchors_through_window_element(window, role):
         role="push button", name="Save", actions=("click",), path=((role, "Example"),)
     )
     source = render(Click(target=Target(x=1, y=2, window=window, element=button)))
-    assert 'gui.window_element("Example")' in source
+    assert window_scope("Example") in double_quoted(source)
     assert validate(source) == []
 
 

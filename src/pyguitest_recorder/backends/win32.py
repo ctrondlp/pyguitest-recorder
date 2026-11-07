@@ -1033,6 +1033,10 @@ class Win32CaptureBackend:
         self._thread_id: int | None = None
         self._ready = threading.Event()
         self._start_error: Exception | None = None
+        self._pumping = False
+        """Whether the message loop has been entered.
+
+        Decides where a failure in the pump thread is delivered; see `_run`."""
         self._queue: queue.Queue[Any] = queue.Queue()
         self._vocabulary = _KeyVocabulary()
         self._state = _KeyboardState()
@@ -1107,6 +1111,9 @@ class Win32CaptureBackend:
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
         self._start_error = None
+        # Cleared with the rest, so a second start() on this object routes a
+        # failed install to `_start_error` rather than onto the queue.
+        self._pumping = False
         # Reset rather than left from a previous start() on this same object:
         # `_watch_health` returns for good the first time it finds a gap, so a
         # stale value here would silently survive into a recording whose hooks
@@ -1136,6 +1143,46 @@ class Win32CaptureBackend:
         this method records, never gets a handle back to clean up itself.
         """
         lib = _user32()
+        try:
+            try:
+                self._install_and_pump(lib)
+            except Exception as error:
+                # A *raise* from any of these calls -- a ctypes.ArgumentError,
+                # an OSError out of SetWindowsHookExW/GetMessageW/
+                # GetCurrentThreadId -- used to end this thread silently.
+                # `_start_error` recorded only the two "the hook returned 0"
+                # outcomes, so `start()` found it unset and returned
+                # normally, the outer finally queued the sentinel, and
+                # `events()` ended at once: the caller recorded nothing and
+                # was told nothing.
+                #
+                # Which route it takes depends on how far this got. An
+                # install-phase failure has already been recorded in
+                # `_start_error` by `_install_and_pump` itself, before
+                # `_ready` was set, so `start()` raises it and there is
+                # nothing to do here. Once the pump is running, nobody reads
+                # `_start_error` again and the queue is the only way out --
+                # which is what `events()`'s own `isinstance(item,
+                # Exception)` branch was written for and never reached,
+                # because nothing ever put one there.
+                #
+                # Not re-raised: it has been delivered, and letting it out of
+                # a daemon thread only adds a traceback on the user's
+                # terminal beside the error the caller is already getting.
+                if self._pumping:
+                    self._queue.put(error)
+                elif self._start_error is None:
+                    self._start_error = error
+        finally:
+            self._queue.put(_SENTINEL)
+
+    def _install_and_pump(self, lib: Any) -> None:
+        """Install both hooks, signal `_ready`, and run the message loop.
+
+        Split from `_run` so the error handling there can be one `except`
+        around the whole body rather than per call. The `finally` that
+        signals `_ready` stays here, where the install it reports on is.
+        """
         try:
             try:
                 self._keyboard_hook = lib.SetWindowsHookExW(
@@ -1177,10 +1224,23 @@ class Win32CaptureBackend:
                     daemon=True,
                 )
                 self._health_thread.start()
+            except Exception as error:
+                # Recorded *here*, not in `_run`'s except, because the
+                # `finally` below runs as this propagates: `start()` is
+                # waiting on `_ready` and would otherwise wake, find
+                # `_start_error` still None, and return success -- the very
+                # "started fine, recorded nothing" symptom this is meant to
+                # close. Re-raised so the outer finally still unhooks.
+                if self._start_error is None:
+                    self._start_error = error
+                raise
             finally:
                 self._ready.set()
             if self._start_error is not None:
                 return
+            # Past the install, so a failure from here on travels by queue
+            # rather than through `_start_error` -- see `_run`.
+            self._pumping = True
             while True:
                 status = lib.GetMessageW(pointer, None, 0, 0)
                 if status <= 0:
@@ -1197,7 +1257,10 @@ class Win32CaptureBackend:
                 if hook:
                     lib.UnhookWindowsHookEx(hook)
             self._keyboard_hook = self._mouse_hook = None
-            self._queue.put(_SENTINEL)
+            # The sentinel is queued by `_run`'s own finally, after this has
+            # unhooked and after any error has been recorded -- so a caller
+            # draining `events()` sees the error before the end of the
+            # stream rather than the end of the stream alone.
 
     def _watch_health(self) -> None:
         """Notice a hook Windows removed without saying so, and record the gap.

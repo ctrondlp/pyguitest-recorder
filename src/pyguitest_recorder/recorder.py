@@ -861,6 +861,20 @@ class Recorder:
         macOS); `abandon_tail` is the second interrupt where they do not (X11,
         see `cooperative_interrupts`), checked between events so it can never
         land inside a request.
+
+        A capture backend that *fails mid-recording* ends the stream here
+        rather than propagating. The alternative loses everything: nothing
+        above `run()` catches it -- the command line's own handler wraps
+        `start()`, and `main()` catches only `ConfigError` and `ValueError`
+        -- so an hour of recording would be discarded as a traceback. What
+        was captured before the failure is a real recording and worth
+        keeping, and the note says why it stops where it does. The win32
+        backend is what made this reachable: a failure in its message pump
+        now arrives on its event queue instead of ending the stream
+        silently. Whatever the backend had already queued behind that
+        failure is drained the same way an interrupted run's tail is, so
+        a burst of events delivered just before the failure is not lost
+        along with it.
         """
         assert self._backend is not None
         try:
@@ -875,6 +889,12 @@ class Recorder:
                     break
         except KeyboardInterrupt:
             return True
+        except CaptureUnavailable as exc:
+            self.recording.environment.notes.append(
+                f"capture failed while recording and this recording stops "
+                f"where that happened: {exc}"
+            )
+            self._collect_the_tail()
         return False
 
     def _collect_the_tail(self) -> None:
@@ -1157,6 +1177,16 @@ class Recorder:
             mine = not self._consuming
         if self._backend is not None:
             self._backend.stop()
+            # Collected *again*, after the backend has shut down. A capture
+            # backend's most important note is the one it can only write
+            # during teardown -- `WaylandCaptureBackend.stop()` adds its
+            # reader-still-alive timeout there, which is the note that says
+            # the recording may have lost events. `run()` collects notes at
+            # its own end, and the CLI calls this afterwards, so that one
+            # note never reached the saved session or the generated script:
+            # the single warning most worth having was the one guaranteed to
+            # be missing.
+            self._collect_warnings()
         if mine:
             self._close_context()
 

@@ -376,11 +376,18 @@ accurate about what happened and not replayable as it stands.**
   reply" and UIA returned `0x80131505`, a timeout, because neither replies
   until the modal loop does. `--click-via pointer` replays the route that
   was actually recorded.
-- **Stopping a recording from a script needs the modifier held across both
-  presses**: `gui.send_keys("^({F12 2})")`. Sending `^({F12})` twice presses
-  and releases Ctrl each time, and the intervening key resets the
-  consecutive-press streak -- it logs `(1/2)` forever, at any gap. Verified
-  on both `win32` and `x11`.
+- **Stopping a recording from a script needed the modifier held across both
+  presses, before 0.9.1**: `gui.send_keys("^({F12 2})")`. Sending
+  `^({F12})` twice presses and releases Ctrl each time, and the intervening
+  release used to reset the consecutive-press streak -- it logged `(1/2)`
+  forever, at any gap. Verified on both `win32` and `x11`. 0.9.1 made the
+  chord's own modifiers transparent mid-run so that two separate chords
+  complete as well as one held one -- `StopKey._belongs`, with a test named
+  for each gesture. **That is the state machine's behaviour, asserted by
+  those tests and not yet re-measured on a box**, so the held form
+  (`^({F12 2})`) remains the one to use from a script: it is the gesture both
+  behaviours accept, and the live note above was measured rather than
+  reasoned.
 - **A recording left open keeps capturing everything.** Eight minutes of it
   here swallowed an unrelated VS Code window and the text typed into it, in
   plaintext. `--regenerate <session>.json --to <seconds>` trims the tail
