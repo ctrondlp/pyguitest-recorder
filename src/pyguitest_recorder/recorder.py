@@ -871,7 +871,10 @@ class Recorder:
         keeping, and the note says why it stops where it does. The win32
         backend is what made this reachable: a failure in its message pump
         now arrives on its event queue instead of ending the stream
-        silently.
+        silently. Whatever the backend had already queued behind that
+        failure is drained the same way an interrupted run's tail is, so
+        a burst of events delivered just before the failure is not lost
+        along with it.
         """
         assert self._backend is not None
         try:
@@ -891,6 +894,7 @@ class Recorder:
                 f"capture failed while recording and this recording stops "
                 f"where that happened: {exc}"
             )
+            self._collect_the_tail()
         return False
 
     def _collect_the_tail(self) -> None:

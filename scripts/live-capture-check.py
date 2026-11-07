@@ -171,7 +171,7 @@ def start_a11y_bus() -> list[subprocess.Popen[bytes]]:
             time.sleep(2)
     except BaseException:
         for process in started:
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 stop(process)
         raise
     return started

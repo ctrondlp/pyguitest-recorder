@@ -679,8 +679,11 @@ def _mode_note(path: Path) -> str:
         return ""
 
 
-def _write_script(target: Path, source: str, *, restrict: bool = False) -> None:
+def _write_script(target: Path, source: str, *, restrict: bool = False) -> Path:
     """Write a generated script to `target`, readable by its owner alone.
+
+    Returns the resolved path actually written, which is `target` itself
+    once a symlink is followed.
 
     `write_text` created it at 0644 under the usual umask, while the session
     file beside it has always been 0600 (`Recording.save`, via `mkstemp`) --
@@ -743,6 +746,7 @@ def _write_script(target: Path, source: str, *, restrict: bool = False) -> None:
         with contextlib.suppress(OSError):
             os.remove(tmp_name)
         raise
+    return target
 
 
 def _write_source(source: str) -> None:
@@ -831,11 +835,12 @@ def _emit(
             started_at=recording.started_at,
         ).save(settings.session_file)
         print(f"Recording saved to {settings.session_file}", file=sys.stderr)
+    written: Path | None = None
     if settings.output:
-        _write_script(
+        written = _write_script(
             Path(settings.output), source, restrict=not settings.redact_sensitive
         )
-        print(f"Script written to {settings.output}", file=sys.stderr)
+        print(f"Script written to {written}", file=sys.stderr)
     else:
         _write_source(source)
     if not settings.redact_sensitive:
@@ -854,9 +859,8 @@ def _emit(
             "WARNING: --no-redact is in effect, so password-field text goes "
             "into the script as a literal instead of os.environ. "
             + (
-                f"{settings.output}{_mode_note(Path(settings.output))}; "
-                "treat it like a password file."
-                if settings.output
+                f"{written}{_mode_note(written)}; treat it like a password file."
+                if written is not None
                 else "The script went to stdout, so it is wherever that went."
             ),
             file=sys.stderr,
