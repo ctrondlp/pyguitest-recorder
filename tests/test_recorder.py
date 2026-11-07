@@ -446,6 +446,32 @@ def test_a_capture_failure_mid_recording_keeps_what_was_captured() -> None:
     assert [n for n in recording.environment.notes if "capture failed while" in n]
 
 
+class FailingMidStreamWithQueuedTailBackend(FailingMidStreamBackend):
+    """A backend whose queue still holds a burst delivered just before it died.
+
+    The same shape `InterruptedBackend`'s tail has, but behind a capture
+    failure instead of an interrupt -- win32's queue can hold events behind
+    the one that carried the failure, and losing them with it would throw
+    away exactly what the failure note claims was kept.
+    """
+
+    def drain(self):
+        self.drained = True
+        yield RawEvent(kind="key_press", timestamp=1.1, keysym="z", text="z")
+
+
+def test_a_capture_failure_mid_recording_also_drains_what_was_queued_behind_it() -> (
+    None
+):
+    backend = FailingMidStreamWithQueuedTailBackend(
+        RawEvent(kind="key_press", timestamp=1.0, keysym="a", text="a"),
+    )
+    recording = _run(backend)
+    assert backend.drained, "the tail queued behind the failure was never collected"
+    assert [type(e).__name__ for e in recording.events] == ["TextInput"]
+    assert recording.events[0].text == "az"
+
+
 def test_a_backend_with_nothing_to_admit_to_adds_no_note() -> None:
     # Only that the collection adds nothing of its own: the environment block
     # has notes of its own to put here (an XWayland session says so), and this
