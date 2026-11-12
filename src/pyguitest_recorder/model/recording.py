@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -120,11 +121,21 @@ def _screen(entry: Any) -> tuple[int, int, int, float]:
         # `_number` and `_whole` refuse it: bool is an int subclass.
         raise ValueError(f"a 'screens' entry holds a boolean (got {entry!r})")
     try:
-        return (int(entry[0]), int(entry[1]), int(entry[2]), float(entry[3]))
+        screen = (int(entry[0]), int(entry[1]), int(entry[2]), float(entry[3]))
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"a 'screens' entry is not four numbers (got {entry!r})"
         ) from exc
+    if not math.isfinite(screen[3]):
+        # The scale is the one field kept as a float, so it is the one that
+        # can come out of `json.loads` as NaN or Infinity (both are tokens
+        # Python's decoder accepts) -- the integer conversions above refuse
+        # those on their own. Rejected for the reason an event's timestamp
+        # is: nothing downstream can do arithmetic with it.
+        raise ValueError(
+            f"a 'screens' entry's scale is not a finite number (got {entry!r})"
+        )
+    return screen
 
 
 @dataclass
@@ -357,12 +368,30 @@ class Recording:
         can be the only record of a recording that took real effort to make
         (or, per `Recording`'s own docstring, credential-bearing), so leaving
         a half-written one behind is worse than the extra temp file.
+
+        A symlinked `path` is resolved first, so the recording lands where
+        the link points: `os.replace` replaces the *link*, which saved over
+        a `latest.json` symlink by swapping it for a regular file and
+        leaving the file it named untouched -- the same silent no-op
+        `cli._write_script` fixed for the generated script beside it. A
+        target whose directory does not exist -- a dangling link into a
+        removed directory, or a plain path typed wrong -- is a `ValueError`
+        naming it, the documented failure mode for everything else about a
+        session file, rather than `mkstemp`'s raw `FileNotFoundError`.
         """
         target = Path(path)
+        with contextlib.suppress(OSError, RuntimeError):
+            target = target.resolve()
         payload = json.dumps(self.to_dict(), indent=2)
-        descriptor, tmp_name = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-        )
+        try:
+            descriptor, tmp_name = tempfile.mkstemp(
+                dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+            )
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise ValueError(
+                f"cannot save the recording to {target}: its directory "
+                f"{target.parent} does not exist"
+            ) from exc
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as tmp:
                 tmp.write(payload)

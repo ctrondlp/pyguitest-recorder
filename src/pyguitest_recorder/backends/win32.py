@@ -1114,6 +1114,13 @@ class Win32CaptureBackend:
         # Cleared with the rest, so a second start() on this object routes a
         # failed install to `_start_error` rather than onto the queue.
         self._pumping = False
+        # Fresh rather than reused, for the same second-start reason as its
+        # neighbours: `stop()` ends the previous stream by enqueueing a
+        # sentinel (and `_run`'s finally adds one of its own), so a second
+        # start() on this object handed `events()` a stale end-of-stream
+        # marker first and the new recording ended before delivering
+        # anything.
+        self._queue = queue.Queue()
         # Reset rather than left from a previous start() on this same object:
         # `_watch_health` returns for good the first time it finds a gap, so a
         # stale value here would silently survive into a recording whose hooks

@@ -5,6 +5,113 @@ was released.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-11-11
+
+A minor, because the pyguitest floor moves to 0.25.0 and `PROFILE` with it:
+a pair that installed before -- this recorder with pyguitest 0.24.x -- no
+longer does. It is a load-bearing pairing bump of the same shape as 0.20,
+not a floor-only step -- a generated script's `focus_window(window)` behaves
+differently on macOS under 0.24 than under 0.25 (see below).
+
+The rest is a review pass over 0.18.0's own changes: most of what is fixed
+here is a hole in something that release added -- the scoped-wait pathway,
+the symlink-resolving script write, the application/window role split.
+
+### Changed
+
+- **The pyguitest floor is now 0.25.0, and `PROFILE` moves with it to
+  `pyguitest-0.25`.** Load-bearing, and the 0.20 shape rather than a pairing
+  step: it reaches `gui.focus_window(...)` -- which a generated script calls
+  for every window the recording switches to -- by fixing what an older
+  install gets *wrong* rather than what it lacks, so `validate()` cannot
+  catch it. It is downstream of the macOS change 0.24 paired against: 0.24
+  made macOS `activate_window()` refuse where it used to half-succeed, but it
+  refused with `CapabilityUnsupported` -- the one exception `focus_window`
+  reads as "asking is impossible" and gives up on at once, so on macOS
+  `focus_window` had quietly lost the retry that is its whole reason for
+  being, and a single focus-stealing-prevention refusal consumed the call.
+  pyguitest 0.25.0 makes that activation refusal a plain `PyGUITestError`,
+  which falls into the retry branch so `focus_window` asks again, pausing
+  between attempts, while the "no owning process" case alone keeps the
+  `CapabilityUnsupported` fast-fail. A script generated here is checked
+  against the 0.25 behaviour and its header says so.
+
+### Fixed
+
+- **An application-role disambiguator was rendered as a window lookup.**
+  0.18.0 split `_SCOPE_ROLES` out of `_WINDOW_ROLES` precisely so an
+  `application` node would stop being treated as a window, but
+  `_ancestor_lookup` still checked the wider set -- so two same-named
+  elements told apart only by the applications owning them rendered the
+  application as `gui.window_element("AppName")`, and the generated script
+  raised `WindowNotFound` hunting for a window titled after the program.
+  An application ancestor keeps the role-and-name element form now.
+
+- **A wait scoped to an already-bound container silently skipped its
+  wait.** `_ancestor_var`'s cache answered before the new `wait` parameter
+  was consulted: a click or a check on one element in a dialog bound the
+  scope without a wait, and a `wait_for_element` on *another* element in
+  the same dialog then reused the binding and emitted no wait at all --
+  the exact "WindowNotFound on the line before the wait" failure 0.18.0's
+  scoped-wait fix was for, reopened through the cache. The binding is
+  still shared; the wait is emitted in front of it, once per container
+  (`expect_window` for a window-ish scope, a raising `expect_element` for
+  an inner pane).
+
+- **Ambiguous-scope warnings only ran under `locators = "element"`.**
+  Checks and inferred waits emit `within=` scopes whatever the locator
+  mode, so under `"absolute"`/`"relative"` an ambiguous `window_element`
+  scope went out with no warning. The warning now follows the scopes:
+  whenever any were actually bound.
+
+- **Saving a session over a symlink replaced the link, not the file it
+  names.** `Recording.save` had the same mkstemp-plus-`os.replace` pattern
+  `_write_script` was given symlink resolution for in 0.18.0; the same fix
+  is ported, so a symlinked `--save-session` target keeps its link and the
+  recording lands where it points.
+
+- **A target directory that does not exist is a refusal, not a
+  traceback.** The resolve above can follow a dangling symlink into a
+  removed directory -- and a plain `--output`/`--save-session` can name a
+  missing directory outright -- and `tempfile.mkstemp` then raised a raw
+  `FileNotFoundError` past `main()`'s handlers. Both writers raise
+  `ValueError` naming the path and its missing directory, which `main()`
+  already turns into a one-line message.
+
+- **The window-collision check could rewrite a title from inside its own
+  literal.** The regex that strips `timeout=` before comparing two window
+  lookups was unanchored over rendered source, so a window literally
+  titled `"Report, timeout=10 Draft"` had that substring removed from its
+  quoted title and collided with `"Report Draft"` -- warning about two
+  windows that are nothing alike. It is anchored to the call's closing
+  parenthesis now, and covers the scientific notation `{:g}` can emit.
+
+- **Concurrent warning collection could duplicate a note.**
+  `_collect_warnings` runs at `run()`'s tail and again from `stop()` --
+  another thread's call by design -- and its check-then-append merge was
+  not atomic, so the same note could land in the saved recording twice. It
+  takes a lock of its own now.
+
+- **win32: a second `start()` on one backend saw the first stop's
+  sentinel.** `stop()` ends the stream by enqueueing an end-of-stream
+  marker, and `start()` reset every neighbouring field except the queue --
+  so a reused backend handed `events()` a stale sentinel first and the new
+  recording ended before delivering anything. The queue is fresh per
+  start, like the fields beside it.
+
+- **A `screens` entry accepted a non-finite scale.** `float(entry[3])`
+  passed JSON's `NaN`/`Infinity` tokens straight into a field everything
+  downstream does arithmetic with, undercutting the model's own
+  reject-malformed-numbers rule; a non-finite scale is refused the way a
+  non-finite event timestamp is.
+
+### Internal
+
+- The "is this a press of the chord's own key" predicate lived in three
+  spellings across `stopkey.py` (`_presses`, `feed`, `_last_chord_press`);
+  it is one helper now, so the three places that count a run's progress
+  cannot drift apart.
+
 ## [0.18.0] — 2026-11-07
 
 A minor, because the pyguitest floor moves to 0.24.0 and `PROFILE` with it.

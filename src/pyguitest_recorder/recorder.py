@@ -659,18 +659,6 @@ class Recorder:
     _normalizer: Normalizer | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
     _consuming: bool = field(default=False, init=False)
-    _abandon_tail: bool = field(default=False, init=False)
-    """Set by `abandon_tail`: stop working through the backlog, keep what is done."""
-    _lifecycle: threading.Lock = field(default_factory=threading.Lock, init=False)
-    """Guards `_stopping`, `_consuming`, and the decision each makes about who
-    closes the context. `stop` is called from another thread by design -- a
-    watchdog, a timer, the command line's interrupt -- so "is a run consuming
-    right now?" and "then I will not close this" have to be one indivisible
-    step. Read and acted on separately, a `stop` arriving in the gap between
-    `run` starting and `run` marking itself as consuming saw `_consuming`
-    false, closed the session, and left the run to consume its backlog against
-    a dead one: the very failure `_consuming` was added to prevent, in a
-    smaller window."""
     """Whether `run` is still working through events. See `stop`.
 
     `stop` is documented as the way to end a run from another thread, and it
@@ -684,6 +672,28 @@ class Recorder:
     interaction generated `gui.button("Open").click()` when the consumer was
     allowed to catch up first and a bare coordinate when it was not.
     """
+    _abandon_tail: bool = field(default=False, init=False)
+    """Set by `abandon_tail`: stop working through the backlog, keep what is done."""
+    _lifecycle: threading.Lock = field(default_factory=threading.Lock, init=False)
+    """Guards `_stopping`, `_consuming`, and the decision each makes about who
+    closes the context. `stop` is called from another thread by design -- a
+    watchdog, a timer, the command line's interrupt -- so "is a run consuming
+    right now?" and "then I will not close this" have to be one indivisible
+    step. Read and acted on separately, a `stop` arriving in the gap between
+    `run` starting and `run` marking itself as consuming saw `_consuming`
+    false, closed the session, and left the run to consume its backlog against
+    a dead one: the very failure `_consuming` was added to prevent, in a
+    smaller window."""
+    _notes_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    """Serializes `_collect_warnings`, whose merge is read-then-append.
+
+    Called from `run()`'s tail and from `stop()` -- which is another
+    thread's call by design (the command line's interrupt handler, a
+    watchdog) -- and `extend(n for n in ... if n not in notes)` evaluates
+    its membership test before its append, so two concurrent calls could
+    both find a note missing and both add it. A lock of its own rather
+    than `_lifecycle`, which guards a different fact and is deliberately
+    never held across backend calls."""
     _stop_key: StopKey = field(init=False)
     """The stop-key recogniser, from the settings this recorder was built with.
 
@@ -1102,14 +1112,21 @@ class Recorder:
         Duck-typed, like `drain` is, because `notes` is not in the
         `CaptureBackend` protocol -- a backend with nothing to admit to says
         nothing, and must not have to carry an empty list to stay valid.
+
+        Under `_notes_lock`, because two callers can overlap: `run()`
+        collects at its own tail while `stop()` -- another thread, by
+        design -- collects after the backend shuts down, and the
+        check-then-append merge below is not atomic, so the overlap wrote
+        the same note into the saved recording twice.
         """
-        notes = self.recording.environment.notes
-        from_backend = getattr(self._backend, "notes", None)
-        if from_backend:
-            notes.extend(n for n in from_backend if n not in notes)
-        if not isinstance(self._resolver, DesktopResolver):
-            return
-        notes.extend(w for w in self._resolver.warnings if w not in notes)
+        with self._notes_lock:
+            notes = self.recording.environment.notes
+            from_backend = getattr(self._backend, "notes", None)
+            if from_backend:
+                notes.extend(n for n in from_backend if n not in notes)
+            if not isinstance(self._resolver, DesktopResolver):
+                return
+            notes.extend(w for w in self._resolver.warnings if w not in notes)
 
     def _stop_sequence(self, raw: Any) -> tuple[list[Any], bool]:
         """Sort one raw event into what to record and whether to stop.

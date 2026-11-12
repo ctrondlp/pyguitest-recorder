@@ -1269,6 +1269,30 @@ class TestStartStopEvents:
         made.stop()
         assert list(made.events()) == []
 
+    def test_a_second_start_does_not_inherit_the_first_stops_sentinel(
+        self, monkeypatch
+    ):
+        # `stop()` ends the stream by enqueueing a sentinel (and `_run`'s
+        # finally adds one of its own), and start() reset every neighbouring
+        # field except the queue -- so a second start() on the same object
+        # handed `events()` a stale end-of-stream marker first, and the new
+        # recording ended before delivering anything.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        made.stop()
+        fake.quit_event.clear()  # the next pump must block like the first did
+        made.start()
+        try:
+            proc = fake.hook_proc(WH_MOUSE_LL)
+            lparam, _info = mouse_lparam(x=10, y=20)
+            proc(HC_ACTION, WM_LBUTTONDOWN, lparam)
+        finally:
+            made.stop()
+        events = list(made.events())
+        assert [e.kind for e in events] == ["button_press"], events
+
     def test_events_never_waits_without_a_timeout(self):
         """Every wait on the queue is bounded, and an empty one waits again.
 

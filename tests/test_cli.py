@@ -1195,6 +1195,27 @@ class TestGeneratedScriptPermissions:
         assert real.is_file()
         assert "gui.click()" in real.read_text(encoding="utf-8")
 
+    def test_output_into_a_missing_directory_is_a_refusal_not_a_traceback(
+        self, tmp_path, recording
+    ):
+        # `mkstemp` raised a raw FileNotFoundError here, which `main()`
+        # (catching ConfigError and ValueError alone) let out as a
+        # traceback. A ValueError naming the path is the refusal it turns
+        # into a one-line message.
+        with pytest.raises(ValueError, match="gone"):
+            self._emit_to(tmp_path / "gone" / "out.py", recording)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_a_dangling_symlink_into_a_missing_directory_also_refuses(
+        self, tmp_path, recording
+    ):
+        # The resolve that writes through a link can follow a dangling one
+        # into a directory that no longer exists; same clean refusal.
+        link = tmp_path / "latest.py"
+        link.symlink_to(tmp_path / "gone" / "script.py")
+        with pytest.raises(ValueError, match="gone"):
+            self._emit_to(link, recording)
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
     def test_regenerating_keeps_a_mode_the_user_widened(self, tmp_path, recording):
         # Someone who chmodded a generated script to commit it, or to let a
