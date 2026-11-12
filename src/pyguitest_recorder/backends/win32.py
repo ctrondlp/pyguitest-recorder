@@ -1039,11 +1039,7 @@ class Win32CaptureBackend:
         Decides where a failure in the pump thread is delivered; see `_run`."""
         self._queue: queue.Queue[Any] = queue.Queue()
         self._vocabulary = _KeyVocabulary()
-        self._state = _KeyboardState()
-        self._surrogates = _SurrogatePairs()
-        self._wheel = _WheelAccumulator()
-        self._altgr_announced = False
-        self._altgr_down = False
+        self._reset_input_state()
         self._last_event: float = 0.0
         """When a hook callback last ran, on `time.monotonic`'s clock.
 
@@ -1077,6 +1073,23 @@ class Win32CaptureBackend:
     missing" for that reason rather than naming a cause.
     """
 
+    def _reset_input_state(self) -> None:
+        """Fresh keyboard, surrogate, wheel and AltGr state for a new run.
+
+        `stop()` removes the hooks, so a key still held when a run ends has
+        its release seen by nobody: a `_state` reused by the next `start()`
+        would carry that DOWN bit -- and `_surrogates`/`_wheel`/the AltGr
+        flags any half-finished fragment -- into the next recording,
+        shifting ordinary keys or resuming a stale gesture until the same
+        input happened to repeat. Each run begins from exactly the state the
+        constructor set, which is why both paths go through here.
+        """
+        self._state = _KeyboardState()
+        self._surrogates = _SurrogatePairs()
+        self._wheel = _WheelAccumulator()
+        self._altgr_announced = False
+        self._altgr_down = False
+
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
 
@@ -1106,6 +1119,18 @@ class Win32CaptureBackend:
         reason = _off_desktop_reason()
         if reason is not None:
             raise CaptureUnavailable(reason)
+        if self._thread is not None and self._thread.is_alive():
+            # A previous run's pump did not unwind within stop()'s join
+            # timeout, so stop() kept its reference rather than dropping it.
+            # That pump still owns the shared hook fields and `self._queue`,
+            # and its `_run` finally has yet to put its sentinel (and unhook)
+            # through them -- replacing them here would let the previous run
+            # end this one and tear down its hooks. Refuse until it exits; a
+            # later stop() retries the join.
+            raise CaptureUnavailable(
+                "the previous recording's input pump has not exited"
+            )
+        self._reset_input_state()
         self._state.seed(lib)
         self._keyboard_proc = _HOOKPROC(self._on_keyboard_event)
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
@@ -1114,6 +1139,13 @@ class Win32CaptureBackend:
         # Cleared with the rest, so a second start() on this object routes a
         # failed install to `_start_error` rather than onto the queue.
         self._pumping = False
+        # Fresh rather than reused, for the same second-start reason as its
+        # neighbours: `stop()` ends the previous stream by enqueueing a
+        # sentinel (and `_run`'s finally adds one of its own), so a second
+        # start() on this object handed `events()` a stale end-of-stream
+        # marker first and the new recording ended before delivering
+        # anything.
+        self._queue = queue.Queue()
         # Reset rather than left from a previous start() on this same object:
         # `_watch_health` returns for good the first time it finds a gap, so a
         # stale value here would silently survive into a recording whose hooks
@@ -1598,6 +1630,16 @@ class Win32CaptureBackend:
                     lib.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
         if thread is not None and thread.is_alive():
             thread.join(timeout=_JOIN_TIMEOUT)
+            if thread.is_alive():
+                # The pump did not unwind. Keep the reference (and its thread
+                # id, so a retry's stop() can re-post WM_QUIT) rather than
+                # dropping it: a still-live pump shares `self._queue` and the
+                # hook fields and has yet to put its sentinel -- and its
+                # unhook -- through them, so a start() that had already
+                # replaced them would have this finished run end and disarm
+                # the next one. `start()` refuses while this stays set.
+                self._thread = thread
+                self._thread_id = thread_id
         self._queue.put(_SENTINEL)
 
 

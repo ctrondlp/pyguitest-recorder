@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.24"
+PROFILE = "pyguitest-0.25"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -151,6 +151,26 @@ change answers a replayed script can see -- `wait_for_window` picks the last
 of several same-titled windows rather than the first, and macOS
 `activate_window()` refuses where it used to half-succeed -- so a script
 generated here is checked against those answers and says so.
+
+0.25 is the 0.16.0/0.20 shape again rather than the pairing step 0.24 was:
+it reaches a call this generator emits, and reaches it by fixing what an
+older install gets *wrong* rather than what it lacks, so `validate()` could
+not have caught it. The call is `gui.focus_window(...)` once more -- written
+for every window a recording switches to -- and the fix is downstream of the
+very macOS change 0.24 paired against. 0.24 made macOS `activate_window()`
+refuse where it used to half-succeed, but it refused with
+`CapabilityUnsupported` -- the one exception `focus_window` reads as "asking
+is impossible", so it gives up at once rather than spending its `attempts`
+budget. On macOS, then, `focus_window` had quietly lost the retry that is
+its entire reason for being: a single focus-stealing-prevention refusal, the
+transient contest the loop exists to out-wait, consumed the whole call. 0.25
+makes that activation refusal a plain `PyGUITestError`, which falls into the
+retry branch, so `focus_window` asks again -- pausing between attempts --
+and the "no owning process" case alone keeps the `CapabilityUnsupported`
+fast-fail it genuinely wants. A generated script's `focus_window(window)`
+therefore behaves differently on macOS under 0.24 than under 0.25, which is
+exactly the "an older install gets it wrong rather than lacks it" case the
+floor exists for.
 
 0.23 is a load-bearing floor rather than a pairing step, and it is the first
 one whose reason is a *platform* rather than a call. Nothing new is emitted:
@@ -729,6 +749,15 @@ class _State:
     """Ancestor (role, name) -> the variable it was bound to, so two elements
     needing the same scoping container share one lookup rather than
     searching for it twice."""
+
+    waited_scopes: set[tuple[str, str]] = field(default_factory=set)
+    """The ancestors whose *presence* the script has already waited for.
+
+    A binding in `scope_vars` is not a wait: one made for a click looked the
+    container up immediately, and a wait rendered later against the same
+    container must still emit its wait even though the variable is reused --
+    see `_ancestor_var`. Tracked separately so one wait per container is
+    emitted, however many waits are scoped to it."""
 
 
 @dataclass(frozen=True)
@@ -1331,6 +1360,16 @@ class PythonGenerator:
                 self._emit_motion_run(item, state)
             else:
                 self._emit(item, state)
+        if self.options.locators != "element" and state.scope_vars:
+            # Checks and inferred waits render `within=` scopes whatever the
+            # locator mode (see `_expect` and `_emit_waitforelement`), so
+            # the ambiguous-container warning has to follow the scopes
+            # rather than the mode: under "absolute"/"relative" an ambiguous
+            # `window_element` scope went out with no warning at all. After
+            # the loop rather than before it, because only then is it known
+            # whether any scope was actually bound -- a coordinate-only
+            # script has nothing the warning would be about.
+            state.warnings.extend(_ambiguous_scope_warnings(recording))
         source = self._assemble(recording, state)
         return _format(source) if self.options.format_output else source
 
@@ -2678,8 +2717,18 @@ class PythonGenerator:
         appear (the dialog holding the element), so an unscoped script waited
         and a scoped one raised `WindowNotFound` on the line before the wait.
         Given a timeout, the container is waited for first.
+
+        The cache does not get to skip that. A binding made for a click
+        carries no wait of its own, and a wait rendered later against the
+        same container used to return the cached variable and emit nothing
+        -- silently recreating the exact failure above for any element
+        whose dialog had already scoped a click or a check. The variable is
+        still reused; the wait is emitted in front of it, once per
+        container (`state.waited_scopes`).
         """
         if ancestor in state.scope_vars:
+            if wait is not None and ancestor not in state.waited_scopes:
+                self._emit_scope_wait(ancestor, wait, state)
             return state.scope_vars[ancestor]
         role, name = ancestor
         state.capabilities.add("ELEMENT_TREE")
@@ -2688,17 +2737,8 @@ class PythonGenerator:
         if wait is not None and role in _SCOPE_ROLES and name:
             # `window_element` does not wait -- it is `find_window`'s
             # element-returning sibling and raises the same way -- so the
-            # wait is a separate call in front of it. Both are given the
-            # *anchored* pattern, so the wait cannot be satisfied by a
-            # window the binding beneath it will then refuse: a plain string
-            # matches as a substring, so waiting for "Recorder Check" was
-            # satisfied instantly by "Recorder Check Two" while the anchored
-            # binding went on to raise.
-            state.capabilities.add("WINDOW_LIST")
-            state.needs_re = True
-            state.lines.append(
-                f"gui.expect_window({_exact_title_pattern(name)}, timeout={wait:g})"
-            )
+            # wait is a separate call in front of it: see `_emit_scope_wait`.
+            self._emit_scope_wait(ancestor, wait, state)
         elif wait is not None:
             # An ordinary container: one call both waits and hands back the
             # element, so it is the whole binding. Not used for a toplevel,
@@ -2718,10 +2758,42 @@ class PythonGenerator:
                 f"interval={_WAIT_INTERVAL:g})"
             )
             state.scope_vars[ancestor] = var_name
+            state.waited_scopes.add(ancestor)
             return var_name
         state.lines.append(f"{var_name} = {self._ancestor_lookup(role, name, state)}")
         state.scope_vars[ancestor] = var_name
         return var_name
+
+    def _emit_scope_wait(
+        self, ancestor: tuple[str, str], wait: float, state: _State
+    ) -> None:
+        """Emit the wait that makes a scope safe to look up, and record it.
+
+        Two spellings, matching the two kinds of ancestor `_ancestor_lookup`
+        distinguishes. A window-ish scope is waited for with
+        `expect_window`, given the *anchored* pattern so the wait cannot be
+        satisfied by a window the binding it precedes will then refuse: a
+        plain string matches as a substring, so waiting for "Recorder
+        Check" was satisfied instantly by "Recorder Check Two" while the
+        anchored binding went on to raise. Anything else is waited for with
+        `expect_element`, the raising sibling, for the reason the binding
+        form in `_ancestor_var` gives: `wait_for_element` answers None on
+        timeout and `within=None` means *unscoped*, not "not found".
+        """
+        role, name = ancestor
+        if role in _SCOPE_ROLES and name:
+            state.capabilities.add("WINDOW_LIST")
+            state.needs_re = True
+            state.lines.append(
+                f"gui.expect_window({_exact_title_pattern(name)}, timeout={wait:g})"
+            )
+        else:
+            args = self._role_arg(role, state)
+            state.lines.append(
+                f"gui.expect_element({args}, name={_literal(name)}, "
+                f"timeout={wait:g}, interval={_WAIT_INTERVAL:g})"
+            )
+        state.waited_scopes.add(ancestor)
 
     def _ancestor_lookup(self, role: str, name: str, state: _State) -> str:
         """How to find a scoping ancestor, by the kind of thing it is.
@@ -2755,9 +2827,17 @@ class PythonGenerator:
 
         Anything else -- a real disambiguating ancestor, a dialog's own inner
         pane -- keeps the role-and-name form, which is what tells two
-        identically named panes apart.
+        identically named panes apart. That includes an `application`
+        ancestor, which `_disambiguating_ancestor` hands back when two
+        same-named elements have nothing nearer to tell them apart than the
+        applications that own them: `_SCOPE_ROLES` here and not
+        `_WINDOW_ROLES`, for the reason `_SCOPE_ROLES`' own docstring gives
+        -- an application's accessible name is the program's, not any
+        window's title, so `window_element` went hunting for a window titled
+        after the program and raised `WindowNotFound` before the script
+        drove anything.
         """
-        if role in _WINDOW_ROLES and name:
+        if role in _SCOPE_ROLES and name:
             state.needs_re = True
             return f"gui.window_element({_exact_title_pattern(name)})"
         args = self._role_arg(role, state)
@@ -2872,7 +2952,7 @@ class PythonGenerator:
         # part of *which* window the call finds, and two windows bound with
         # different timeouts went unwarned because the rendered strings
         # differed.
-        identity = _TIMEOUT_ARG.sub("", lookup)
+        identity = _TIMEOUT_ARG.sub(")", lookup)
         first = state.window_lookups.setdefault(identity, name)
         if first != name:
             state.warnings.append(
@@ -3013,12 +3093,20 @@ class PythonGenerator:
         return "\n".join(out) + "\n"
 
 
-_TIMEOUT_ARG = re.compile(r",\s*timeout=[0-9.]+")
+_TIMEOUT_ARG = re.compile(r",\s*timeout=[0-9.]+(?:[eE][+-]?[0-9]+)?\)$")
 """The `timeout=` argument, for comparing two lookups by what they find.
 
 Two windows that render the same lookup cannot be told apart at replay --
 see `_window_var` -- and the timeout has nothing to do with which window a
-call finds, so it is removed before the comparison."""
+call finds, so it is removed before the comparison.
+
+Anchored to the call's own closing parenthesis, because the pattern runs
+over fully rendered source: unanchored, a window literally titled
+"Report, timeout=10 Draft" had that substring stripped from *inside its own
+quoted literal*, which made it identical to a window titled "Report Draft"
+and warned about a collision that does not exist. `_window_lookup` renders
+`timeout=` last, with `{:g}` -- whose scientific notation the exponent
+branch covers -- so the argument is exactly the one match this can make."""
 
 _TAP = re.compile(r'^gui\.tap_key\(("[^"]*"|\'[^\']*\')\)$')
 """A generated line that taps one named key, for the repeat pass."""

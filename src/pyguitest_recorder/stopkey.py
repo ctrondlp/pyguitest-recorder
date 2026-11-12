@@ -32,8 +32,8 @@ from .config import Settings
 __all__ = ["Outcome", "StopKey"]
 
 
-def _presses(events: list[RawEvent], key: str = "") -> int:
-    """How many of these are presses of `key` rather than releases.
+def _is_chord_press(event: RawEvent, key: str) -> bool:
+    """Whether this event is a press of the chord's own key.
 
     `key` filters because a run can hold events that are not the chord's key
     at all: the chord's own modifiers pass through `_belongs` so that
@@ -41,12 +41,21 @@ def _presses(events: list[RawEvent], key: str = "") -> int:
     counting those as presses made a two-press chord stop on the modifier.
     Empty `key` counts every press, which is what a chord with no modifiers
     always amounted to.
+
+    The one spelling of the question, asked three ways -- counting a run's
+    progress (`_presses`), registering a new press (`feed`) and timing the
+    interval between taps (`_last_chord_press`) -- so the three cannot
+    drift apart about what advances a run.
     """
-    return sum(
-        1
-        for event in events
-        if event.kind == "key_press" and (not key or event.keysym == key)
-    )
+    return event.kind == "key_press" and (not key or event.keysym == key)
+
+
+def _presses(events: list[RawEvent], key: str = "") -> int:
+    """How many of these are presses of the chord's key rather than releases.
+
+    See `_is_chord_press` for what qualifies and why `key` filters.
+    """
+    return sum(1 for event in events if _is_chord_press(event, key))
 
 
 @dataclass(frozen=True)
@@ -144,7 +153,7 @@ class StopKey:
         # A press of the chord's key, as opposed to one of its modifiers
         # passing through mid-run: only the former registers as progress.
         _, key = parse_chord(self.chord)
-        counted = raw.kind == "key_press" and (not key or raw.keysym == key)
+        counted = _is_chord_press(raw, key)
         last = self._last_chord_press(key)
         if counted and last is not None and raw.timestamp - last > self.interval:
             # Too slow to be one run, so the earlier presses were the
@@ -172,7 +181,7 @@ class StopKey:
         between them.
         """
         for event in reversed(self._held):
-            if event.kind == "key_press" and (not key or event.keysym == key):
+            if _is_chord_press(event, key):
                 return event.timestamp
         return None
 

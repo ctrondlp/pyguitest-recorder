@@ -848,6 +848,127 @@ def test_a_click_scope_is_still_bound_without_a_wait(window):
     assert validate(source) == []
 
 
+def test_a_wait_scoped_to_an_already_bound_dialog_still_waits(window):
+    """The scope cache must not swallow the wait.
+
+    A click binds its dialog scope with an immediate lookup and no wait; an
+    inferred wait on *another* element in the same dialog then found the
+    binding in `scope_vars` and returned it before the `wait` parameter was
+    ever consulted -- skipping the `expect_window` the wait pathway exists
+    to emit, which is the WindowNotFound-one-line-early failure the
+    scoped-wait fix was for.
+    """
+    button = ElementRef(role="push button", name="OK", path=(("dialog", "Import"),))
+    box = ElementRef(role="check box", name="Confirm", path=(("dialog", "Import"),))
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=button)),
+        WaitForElement(element=box, timeout=12.0),
+    )
+    lines = [line.strip() for line in source.splitlines()]
+    clicked = next(i for i, line in enumerate(lines) if ".click()" in line)
+    waited = next(
+        (i for i, line in enumerate(lines) if "gui.expect_window(" in line), None
+    )
+    used = next(i for i, line in enumerate(lines) if "gui.wait_for_element(" in line)
+    assert waited is not None, source
+    assert clicked < waited < used, source
+    # As long as the wait it is for, not pyguitest's default.
+    assert "timeout=12" in lines[waited]
+    # And still one binding: the wait reuses the variable the click bound.
+    assert sum("gui.window_element(" in line for line in lines) == 1, source
+    assert validate(source) == []
+
+
+def test_a_wait_scoped_to_an_already_bound_pane_waits_and_raises(window):
+    """The non-toplevel flavour of the same cache hole.
+
+    A fresh scoped wait binds its pane with `expect_element`; one whose
+    pane a click had already bound used to skip the wait entirely. A bare
+    `expect_element` now precedes it -- raising, for the reason the binding
+    form does: `wait_for_element` answers None on timeout and `within=None`
+    means *unscoped*, not "not found".
+    """
+    first = ElementRef(
+        role="push button", name="OK", path=(("panel", "Left"), ("group", "Shared"))
+    )
+    second = ElementRef(
+        role="push button", name="OK", path=(("panel", "Right"), ("group", "Shared"))
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=first)),
+        Click(target=Target(x=3, y=4, window=window, element=second)),
+        WaitForElement(element=first, timeout=9.0),
+    )
+    lines = [line.strip() for line in source.splitlines()]
+    bound = next(
+        i for i, line in enumerate(lines) if _re.match(r"\w+ = gui\.element\(", line)
+    )
+    waited = next(
+        (i for i, line in enumerate(lines) if line.startswith("gui.expect_element(")),
+        None,
+    )
+    used = next(i for i, line in enumerate(lines) if "gui.wait_for_element(" in line)
+    assert waited is not None, source
+    assert bound < waited < used, source
+    assert "timeout=9" in lines[waited]
+    assert validate(source) == []
+
+
+def test_an_application_ancestor_is_not_rendered_as_a_window(window):
+    """Two same-named elements told apart only by the applications owning them.
+
+    `_disambiguating_ancestor` hands back whatever ancestor is named and
+    unshared, and with nothing nearer that is the `application` node. An
+    application's accessible name is the program's own, not any window's
+    title, so rendering it as `gui.window_element("AppName")` made the
+    generated script hunt for a window titled after the program and raise
+    WindowNotFound. It keeps the role-and-name element form instead.
+    """
+    in_one = ElementRef(
+        role="push button", name="OK", path=(("application", "AppOne"),)
+    )
+    in_two = ElementRef(
+        role="push button", name="OK", path=(("application", "AppTwo"),)
+    )
+    source = render(
+        Click(target=Target(x=1, y=2, window=window, element=in_one)),
+        Click(target=Target(x=3, y=4, window=window, element=in_two)),
+    )
+    assert "gui.window_element(" not in source, source
+    assert 'name="AppOne"' in double_quoted(source), source
+    assert 'name="AppTwo"' in double_quoted(source), source
+    assert validate(source) == []
+
+
+def test_absolute_locators_still_warn_about_an_ambiguous_scope():
+    """The warning follows the scopes, not the locator mode.
+
+    `_ambiguous_scope_warnings` ran only under locators="element", but
+    checks and inferred waits compute `within=` scopes whatever the mode --
+    so under "absolute" an ambiguous `window_element` scope was emitted
+    with no warning at all.
+    """
+    in_a = ElementRef(
+        role="push button",
+        name="OK",
+        path=(("application", "A"), ("dialog", "Settings")),
+    )
+    in_b = ElementRef(
+        role="push button",
+        name="OK",
+        path=(("application", "B"), ("dialog", "Settings")),
+    )
+    recording = Recording(
+        events=[
+            WaitForElement(element=in_a, timeout=5.0),
+            WaitForElement(element=in_b, timeout=5.0),
+        ]
+    )
+    source = generate(recording, GeneratorOptions(locators="absolute"))
+    assert "within=" in source, source
+    assert "more than one container is named" in source, source
+
+
 @pytest.mark.needs_ruff
 def test_a_drifting_title_is_dropped_for_the_app_id():
     drifting = WindowRef(
@@ -903,6 +1024,24 @@ def test_one_window_mentioned_twice_is_not_warned_about(window):
     source = generate(recording, GeneratorOptions())
     assert "are different windows" not in source
     assert validate(source) == []
+
+
+def test_a_title_containing_a_timeout_argument_is_not_a_collision(window):
+    """The timeout stripped for the collision check is the *argument*.
+
+    `_TIMEOUT_ARG` ran unanchored over the rendered lookup, so a window
+    literally titled "Report, timeout=10 Draft" had that substring stripped
+    from inside its own quoted literal -- making its identity equal to a
+    window titled "Report Draft" and warning about a collision that does
+    not exist.
+    """
+    first = WindowRef(title="Report, timeout=10 Draft", app_id="org.x.E", pid=1)
+    second = WindowRef(title="Report Draft", app_id="org.x.E", pid=2)
+    recording = Recording(
+        events=[WindowActivate(window=first), WindowActivate(window=second)]
+    )
+    source = generate(recording, GeneratorOptions())
+    assert "are different windows" not in source, source
 
 
 def test_a_drifting_title_beats_an_ambiguous_app_id():

@@ -8,6 +8,8 @@ elsewhere).
 
 from __future__ import annotations
 
+import contextlib
+import threading
 import time
 from typing import Any
 from unittest import mock
@@ -478,6 +480,44 @@ def test_a_backend_with_nothing_to_admit_to_adds_no_note() -> None:
     # runs on machines that produce them.
     recording = _run(_SilentBackend())
     assert not [n for n in recording.environment.notes if "SYN_DROPPED" in n]
+
+
+def test_two_concurrent_collections_do_not_duplicate_a_note() -> None:
+    """Overlapping `_collect_warnings` calls must not write a note twice.
+
+    It is called from `run()`'s tail and from `stop()` on another thread,
+    and its merge is read-then-append: two overlapping calls could both
+    find a note missing and both add it, so the saved recording carried
+    the same warning twice.
+
+    The overlap is forced rather than raced: membership is checked through
+    `notes.__contains__`, so a list whose `__contains__` computes its answer
+    and *then* holds the caller at a barrier parks both threads between
+    their check and their append -- the exact window the merge leaves open.
+    With the lock the second caller never reaches the barrier until the
+    first has appended (the barrier times out and breaks, which is the
+    pass); without it both check an empty list and both append.
+    """
+    barrier = threading.Barrier(2, timeout=0.5)
+
+    class HoldingList(list):
+        def __contains__(self, item: object) -> bool:
+            present = super().__contains__(item)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait()
+            return present
+
+    recorder = Recorder(settings=Settings())
+    recorder._backend = NotingBackend()
+    recorder.recording.environment.notes = HoldingList()
+    first = threading.Thread(target=recorder._collect_warnings)
+    second = threading.Thread(target=recorder._collect_warnings)
+    first.start()
+    second.start()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+    notes = list(recorder.recording.environment.notes)
+    assert notes.count(NotingBackend.notes[0]) == 1, notes
 
 
 def test_a_stop_from_another_thread_keeps_the_context_until_run_has_drained() -> None:

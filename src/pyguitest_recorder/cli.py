@@ -727,15 +727,26 @@ def _write_script(target: Path, source: str, *, restrict: bool = False) -> Path:
     file's. A link whose target does not exist resolves to that path and the
     write creates it, which is what a reader of the link expects; a loop or
     an unreadable path leaves the original target to fail on its own terms.
+    A target whose *directory* does not exist -- the resolve above follows a
+    dangling link into a removed directory, and a plain `--output` can name
+    one directly -- is a `ValueError` naming the path, which `main()`
+    already turns into a one-line refusal, rather than `mkstemp`'s raw
+    `FileNotFoundError` arriving as a traceback.
     """
     with contextlib.suppress(OSError, RuntimeError):
         target = target.resolve()
     existing: int | None = None
     with contextlib.suppress(OSError):
         existing = stat.S_IMODE(target.stat().st_mode)
-    descriptor, tmp_name = tempfile.mkstemp(
-        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-    )
+    try:
+        descriptor, tmp_name = tempfile.mkstemp(
+            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ValueError(
+            f"cannot write the script to {target}: its directory "
+            f"{target.parent} does not exist"
+        ) from exc
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as tmp:
             tmp.write(source)

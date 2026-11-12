@@ -5,6 +5,9 @@ outlive the script generated from it: a field dropped in the round trip is a
 decision lost between two renders of the same session.
 """
 
+import json
+import sys
+
 import pytest
 
 from pyguitest_recorder.model import (
@@ -470,6 +473,18 @@ def test_recording_from_dict_rejects_a_malformed_environment_field():
         Recording.from_dict({"environment": {"screens": [[0, None, 1080, 1.0]]}})
 
 
+def test_a_screen_entry_with_a_non_finite_scale_is_refused():
+    # The scale is the one field kept as a float, so it is the one that can
+    # arrive from `json.loads` as NaN or Infinity (both are tokens Python's
+    # decoder accepts) -- and `float(entry[3])` passed them straight into a
+    # field everything downstream does arithmetic with, undercutting the
+    # finiteness the neighbouring validation (an event's timestamp) insists
+    # on.
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="not a finite number"):
+            Recording.from_dict({"environment": {"screens": [[0, 1920, 1080, bad]]}})
+
+
 def test_an_environment_with_screens_round_trips():
     # `screens` holds tuples in memory and lists on disk, and the scale is a
     # float where the rest are ints: this pins the coercion on the way back
@@ -571,6 +586,54 @@ def test_save_leaves_the_previous_file_untouched_if_the_write_fails(
 
     assert path.read_text(encoding="utf-8") == '{"format": 1, "events": []}'
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_save_writes_through_a_symlink_rather_than_replacing_it(tmp_path, window):
+    # `os.replace` replaces the *link*, so saving over a `latest.json`
+    # symlink swapped it for a regular file and left the file it named
+    # untouched -- the same silent no-op `cli._write_script` fixed for the
+    # generated script beside the session file.
+    real = tmp_path / "session.json"
+    real.write_text("{}", encoding="utf-8")
+    link = tmp_path / "latest.json"
+    link.symlink_to(real)
+    recording = Recording()
+    recording.add(Click(timestamp=0.0, target=Target(x=1, y=2, window=window)))
+    recording.save(link)
+    assert link.is_symlink(), "the link itself was replaced"
+    assert json.loads(real.read_text(encoding="utf-8"))["format"] == FORMAT_VERSION
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_save_through_a_symlink_to_a_missing_file_creates_what_it_names(
+    tmp_path, window
+):
+    # A reader of the link expects the recording to appear where it points.
+    real = tmp_path / "not-yet.json"
+    link = tmp_path / "latest.json"
+    link.symlink_to(real)
+    Recording().save(link)
+    assert link.is_symlink()
+    assert real.is_file()
+
+
+def test_save_into_a_missing_directory_is_a_clean_refusal(tmp_path):
+    # `mkstemp` raised a raw FileNotFoundError here, which nothing above
+    # (`main()` catches ConfigError and ValueError) turned into a message.
+    with pytest.raises(ValueError, match="gone"):
+        Recording().save(tmp_path / "gone" / "session.json")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_save_through_a_dangling_symlink_into_a_missing_directory_refuses(tmp_path):
+    # The resolve that keeps a symlinked target a symlink can also follow a
+    # dangling link into a directory that no longer exists; that must be
+    # the same clean refusal, not a traceback.
+    link = tmp_path / "latest.json"
+    link.symlink_to(tmp_path / "gone" / "session.json")
+    with pytest.raises(ValueError, match="gone"):
+        Recording().save(link)
 
 
 def test_a_boolean_expectation_survives_the_json_form():
