@@ -99,6 +99,20 @@ the symlink-resolving script write, the application/window role split.
   recording ended before delivering anything. The queue is fresh per
   start, like the fields beside it.
 
+- **win32: a restart could be ended and disarmed by the previous run's
+  wedged pump, and could inherit its held keys.** Two more gaps in the
+  same reused-backend path. If `stop()`'s join timed out, the previous
+  pump was still in its message loop, still owning `self._queue` and the
+  shared hook fields; a second `start()` replaced them, and when that pump
+  finally unwound, its `_run` finally put a sentinel (ending the new
+  recording) and unhooked (disarming its hooks) through the new ones.
+  `stop()` now keeps a pump it could not join, and `start()` refuses to
+  restart until it exits. Separately, the keyboard/surrogate/wheel/AltGr
+  state was built once in the constructor and never reset, so a key
+  released after the hooks came down left its DOWN bit set and shifted
+  ordinary keys in the next run; each `start()` now begins from the
+  constructor's state.
+
 - **A `screens` entry accepted a non-finite scale.** `float(entry[3])`
   passed JSON's `NaN`/`Infinity` tokens straight into a field everything
   downstream does arithmetic with, undercutting the model's own

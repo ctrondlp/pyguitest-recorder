@@ -1293,6 +1293,52 @@ class TestStartStopEvents:
         events = list(made.events())
         assert [e.kind for e in events] == ["button_press"], events
 
+    def test_a_stuck_pump_is_retained_and_blocks_a_restart(self, monkeypatch):
+        # If stop()'s join times out, the previous pump is still in its
+        # message loop, still owning self._queue and the hook fields; its
+        # `_run` finally has yet to put a sentinel (and unhook) through them.
+        # A restart that replaced them would let that finished run end the
+        # next one and disarm its hooks -- so stop() keeps the reference and
+        # start() refuses until it exits.
+        monkeypatch.setattr(win32_module, "_JOIN_TIMEOUT", 0.01)
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+
+        class _StuckThread:
+            """A pump thread whose join never finishes, as a wedged one's would."""
+
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):
+                return None
+
+        made._thread = _StuckThread()
+        made._thread_id = 4321
+        made.stop()
+        # Kept, not dropped on the floor: the live pump still shares the queue.
+        assert made._thread is not None and made._thread.is_alive()
+        with pytest.raises(CaptureUnavailable):
+            made.start()
+
+    def test_start_resets_input_state_held_from_a_previous_run(self, monkeypatch):
+        # A key still held when a run ends has its release seen by nobody (the
+        # hooks are already down), so a reused `_state` would carry the DOWN
+        # bit -- and the AltGr latch -- into the next recording and shift
+        # ordinary keys. Each start() begins from the constructor's state.
+        fake = FakeUser32()
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        made.start()
+        made._state.press(0x41)  # 'A' still held as the run ends
+        made._altgr_down = True
+        made.stop()
+        made.start()
+        made.stop()
+        assert not any(b & win32_module._KEYSTATE_DOWN for b in made._state.array())
+        assert made._altgr_down is False
+
     def test_events_never_waits_without_a_timeout(self):
         """Every wait on the queue is bounded, and an empty one waits again.
 
