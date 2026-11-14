@@ -192,9 +192,16 @@ class FakeQuartz:
 
 
 def install(monkeypatch: pytest.MonkeyPatch, quartz: FakeQuartz) -> None:
-    """Make `quartz` the module `macos.py` will import, on this platform."""
+    """Make `quartz` the module `macos.py` will import, on this platform.
+
+    The fake's event stamps are nanoseconds, so the mach timebase is pinned
+    to 1:1 -- a real Apple Silicon Mac answers (125, 3), which would scale
+    the fake's nanosecond stamps as if they were raw mach ticks. The timebase
+    tests below reach `_mach_timebase` directly and set their own ratio.
+    """
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setattr(macos_module.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (1, 1))
 
 
 def started(monkeypatch: pytest.MonkeyPatch, quartz: FakeQuartz, **kwargs: object):
