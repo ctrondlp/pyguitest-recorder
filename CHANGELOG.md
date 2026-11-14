@@ -5,6 +5,156 @@ was released.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-13
+
+A minor, for `--backend`: new command-line surface, settable before only
+through the configuration file. The pyguitest floor also moves to 0.26.0
+and `PROFILE` with it, purely by the pairing discipline -- nothing this
+generator emits is new surface there. The rest is a review pass that
+reached further back than 0.19.0's own changes -- a macOS timebase bug
+present since the backend's first day in 0.10.0, alongside a trim that
+could leave the recording it trimmed mutated and a native-Wayland selection
+role emitted as the wrong call.
+
+### Added
+
+- **`--backend` selects the capture backend from the command line.** It was
+  settable in the configuration file alone, and it is the one capture setting
+  a recording driven over SSH cannot do without: a bare login exports neither
+  `XDG_SESSION_TYPE` nor `WAYLAND_DISPLAY`, so `auto`'s gate cannot see a
+  Wayland session there and refuses rather than falling back to the evdev
+  backend -- deliberately, since that backend reads machine-wide input. The
+  flag takes `auto`, `xrecord`, `win32`, `macos` or `wayland`, overrides the
+  file's `backend` the way every other capture flag overrides its key, and
+  refuses an unknown name at parse time.
+
+### Changed
+
+- **The pyguitest floor is now 0.26.0, and `PROFILE` moves with it to
+  `pyguitest-0.26`.** A pairing step, not a load-bearing one: pyguitest
+  0.26.0 adds `close_window`, `maximize_window`/
+  `is_window_maximized`, `drag_element`, and `expect_enabled`/
+  `expect_disabled`/`expect_value`, none of which this generator emits, and
+  makes `focused()`/`focus_tracking_works()` answer `None`/`False` rather
+  than raise `CapabilityUnsupported` on a session with no element backend --
+  a case `DesktopResolver.focused()` already caught broadly, so nothing here
+  was relying on the old behaviour either. A script generated here is
+  checked against 0.26 and says so; nothing about what it replays changes.
+- **`--record-raw` with a trim is refused.** A privacy refusal, of the same
+  shape `settings.py` already applies to `record_raw` with `sensitive` or
+  `exclude_windows`: a trim drops events from the generated script, but the
+  raw stream is a parallel capture it does not touch -- and cannot, its
+  stamps being monotonic ticks where `--from`/`--to` are seconds since the
+  start -- so a saved session kept in the clear exactly the keystrokes the
+  trim was asked to remove, looking scrubbed and being nothing of the kind.
+  `--drop` is included, for the same reason. Reported as a one-line
+  `ConfigError` before any session is written.
+
+- **`--from`/`--to` reject a value no trim can act on.** Plain `type=float`
+  took `inf` and `nan` as readily as a number and both silently dropped every
+  event -- a window with `nan` at an end includes nothing, and `inf` is past
+  the end of any recording -- as did a negative offset, seconds into a
+  recording counting up from zero. `--from` above `--to` is refused too, once
+  both values are in hand: that window is empty and would drop everything.
+
+- **A trim that removes every event says so.** `Trimmed 7 of 7 events` was
+  the only sign that the script just written does nothing; a second line now
+  says it outright.
+
+### Fixed
+
+- **OS key autorepeat no longer reaches the normalizer on Windows or macOS.**
+  `WaylandCaptureBackend` has dropped the kernel's autorepeat since 0.12.0,
+  and everything downstream is written for a stream without it -- but the
+  win32 and macOS backends passed it straight through, so simply *holding* a
+  key recorded as several presses. Three things that broke, all of them
+  quiet: a single long press of the stop key satisfied `StopKey`'s "pressed
+  twice" and ended the recording early, discarding what the user was
+  actually doing; a held chord emitted one `HotKey` per tick, so a `Ctrl+Z`
+  held a beat too long replayed as several undos -- a script that runs
+  cleanly and does the wrong thing; and a held check key recorded one
+  duplicate `expect_*` call per tick. macOS reports a repeat in the event
+  itself (`kCGKeyboardEventAutorepeat`). A low-level Windows hook does not:
+  `KBDLLHOOKSTRUCT` carries no repeat flag -- the "previous key state" bit
+  belongs to the `WM_KEYDOWN` a window procedure receives -- so a repeat is
+  identified there as a press of a key the hook never saw come up. That also
+  keeps the shadow keyboard state honest: `press()` XORs the toggle bit, so
+  a repeating Caps Lock had been flipping the latch on every tick and
+  `ToUnicodeEx` reported the wrong case. X11 is fixed the same way, on a
+  measurement rather than an assumption: holding one key for two seconds on
+  a live Xorg session (Mint/Cinnamon) delivered **12 KeyPress events and a
+  single KeyRelease** through XRecord, so repeats arrive press-only there
+  too and the held set recognises them. The core protocol's
+  release-then-press pair -- the shape XKB's detectable-autorepeat option
+  exists to suppress, and the reason this looked like it needed timestamp
+  comparison and release-buffering -- never reached the recorded stream. A
+  server that did send pairs would simply go unfiltered, exactly as before,
+  so the guard cannot make anything worse. Both platform guards are
+  confirmed against the real capture path rather than a fake one. On
+  Windows 10, in the interactive session (a hook installed from an SSH
+  shell attaches to a desktop nobody is using, which the backend refuses),
+  one held key injected as six `WM_KEYDOWN`s and a single release recorded
+  as **one `key_press` and one `key_release`**. On macOS 15.8.1, six
+  keydowns posted through a live event tap with the window server's own
+  `kCGKeyboardEventAutorepeat` field set recorded the same. With each
+  guard removed in turn, the identical input recorded **six presses**.
+
+- **A macOS recording replayed ~42x too fast on Apple Silicon.**
+  `CGEventGetTimestamp` answers in mach *ticks*, which are nanoseconds only
+  where the timebase ratio is 1:1 -- every Intel Mac and no Apple Silicon
+  one, where it is ~125/3 -- so dividing by `1e9` alone put every interval
+  ~42x too short, and every inferred wait and pause with it. The ratio is
+  read once per process from `mach_timebase_info` and applied before the
+  division; on Intel it is 1/1 and the result is unchanged, and off a Mac the
+  honest 1:1 fallback leaves the old plain division in place.
+
+- **A trim left a spurious sleep at the head of the script, and rewrote the
+  recording it trimmed.** The surviving events kept whatever `delay` they
+  had, so the first one carried the gap to a predecessor the trim had just
+  dropped -- a leading sleep under `motion = "recorded"` or `"verbatim"` for
+  a wait that no longer has anything in front of it. Delays are recomputed
+  exactly as `Recording.from_dict` does, over copies: the recompute was
+  in-place, so `--regenerate` with a trim also mutated the source
+  recording's own events in memory.
+
+- **A native-Wayland click on a page tab, list item, tree item or table row
+  is emitted as `.select()`.** An element named from the AT-SPI effect log
+  carried no actions, which `ElementRef.clickable` reads optimistically as
+  "clickable", so the click rendered as `.click()` -- which those roles do
+  not offer -- instead of reaching `_select_click`. An element named from a
+  *selection* effect is selectable by construction, and the log now says
+  which effects those were, so the ref carries `selectable=True` and the
+  generator emits the call the control answers. A focus or press effect still
+  leaves it unknown rather than guessing.
+
+- **Generated `expect_text`/`expect_checked`/`expect_showing` calls carry
+  `timeout=`.** They fell back to pyguitest's own `expect_*` default, so
+  raising `default_timeout` for a slow application reached every window
+  lookup and silently not the element checks standing next to them -- the
+  same `timeout=` `_check_window` has always written onto `expect_window`.
+
+### Documentation
+
+- `developers/architecture.md`'s Wayland section was still titled "Why
+  Wayland has no capture backend", which `backends/wayland.py` has
+  contradicted since 0.12.0. Retitled "Wayland capture: evdev, not a
+  compositor protocol", with the distinction the section actually draws in
+  its opening lines -- there is no capture path *through* a compositor, which
+  is why this one reads below it -- and every link into the old anchor
+  (README, `getting-started.md`, `troubleshooting.md`, `developers/status.md`,
+  `CONTRIBUTING.md`) updated. `CONTRIBUTING.md`'s Wayland bullet no longer
+  tells a contributor there is no backend to work on.
+- The README's checks section said generated scripts need "0.16.2 or newer"
+  while the install section and the packaging floor both said 0.25.0. It
+  names the floor in the shape `tests/test_docs.py` actually guards, which is
+  why the stale number survived the floor bump. The README's floor narrative
+  also stops re-telling the intermediate steps: it points at the dependency
+  comment in `pyproject.toml`, which now carries 0.25.0's reason too.
+- The `expect_*` samples in the README, `getting-started.md` and `recipes.md`
+  show the `timeout=` the generator now emits.
+- `--backend` is documented where the Wayland setup is, in the README and
+  `getting-started.md`.
+
 ## [0.19.0] — 2026-11-11
 
 A minor, because the pyguitest floor moves to 0.25.0 and `PROFILE` with it:

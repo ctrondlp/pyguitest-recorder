@@ -62,12 +62,18 @@ recorder reads what is under the pointer *and what it currently says*:
 
 ```python
 # Check: 'Status' reads 'Saved'
-gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")
+gui.expect_text(role=Role.LABEL, name="Status", equals="Saved", timeout=10)
 # Check: 'Read only' is checked
-gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True)
+gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True, timeout=10)
 # Check: 'Undo' is showing
-gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo")
+gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo", timeout=10)
 ```
+
+Each carries the `timeout` the script was generated with — the `[generator]`
+section's `default_timeout`, 10 seconds unless configured otherwise — so
+raising it for a slow application reaches these checks and not only the window
+lookups. In a real script these sit inside `main()`, where the `expect_checked`
+line wraps across three; it is shown flat here.
 
 What gets checked depends on what was under the pointer, most specific first,
 because the value of a check is exactly how much it would notice:

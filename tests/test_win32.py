@@ -767,6 +767,58 @@ class TestKeyboardCallback:
         assert raw.keysym == "a"
         assert raw.text == "a"
 
+    def test_os_key_autorepeat_is_dropped(self, monkeypatch):
+        # A low-level hook sees a repeat as an ordinary second WM_KEYDOWN --
+        # KBDLLHOOKSTRUCT has no repeat flag, the "previous key state" bit
+        # belonging to the WM_KEYDOWN a window procedure gets -- so the held
+        # shadow is the only thing that can tell them apart. Everything
+        # downstream is written for a stream without autorepeat, as
+        # WaylandCaptureBackend already guarantees: left in, one long press
+        # of the stop key counted as the two taps that end a recording, and
+        # a chord held a beat too long emitted one HotKey per tick.
+        fake = FakeUser32(text="a")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0x41)
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)  # real press
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)  # repeat
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)  # repeat
+        made._on_keyboard_event(HC_ACTION, WM_KEYUP, lparam)
+        assert [raw.kind for raw in drain(made)] == ["key_press", "key_release"]
+
+    def test_a_second_press_after_a_release_is_a_real_tap(self, monkeypatch):
+        # The guard must not swallow deliberate repeated taps: the release
+        # clears the shadow, so the next press is a press again.
+        fake = FakeUser32(text="a")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0x41)
+        for wparam in (WM_KEYDOWN, WM_KEYUP, WM_KEYDOWN, WM_KEYUP):
+            made._on_keyboard_event(HC_ACTION, wparam, lparam)
+        assert [raw.kind for raw in drain(made)] == [
+            "key_press",
+            "key_release",
+            "key_press",
+            "key_release",
+        ]
+
+    def test_a_repeating_toggle_key_no_longer_flips_the_shadow_latch(self, monkeypatch):
+        # `_KeyboardState.press` XORs the toggle bit, so every autorepeat
+        # tick of a held Caps Lock used to flip the shadow's idea of the
+        # latch -- and ToUnicodeEx reads that shadow, so the recorded case
+        # started alternating while the key was simply held down.
+        fake = FakeUser32(text="a")
+        patch_windows(monkeypatch, fake_user32=fake)
+        made = Win32CaptureBackend()
+        lparam, _info = keyboard_lparam(0x14)  # VK_CAPITAL
+        made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        latched = made._state.array()[0x14]
+        # An odd number of ticks: XORing an even number of times lands back
+        # on the original value, so an even count would pass either way.
+        for _ in range(3):
+            made._on_keyboard_event(HC_ACTION, WM_KEYDOWN, lparam)
+        assert made._state.array()[0x14] == latched
+
     def test_the_layout_is_read_without_consuming_its_dead_key_state(self, monkeypatch):
         # Bit 2 of wFlags, and the reason it is not a detail: with no flags
         # ToUnicodeEx *consumes* the pending dead key, which is the layout's

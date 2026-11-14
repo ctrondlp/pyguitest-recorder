@@ -4,10 +4,17 @@ The reasoning behind the design. None of this is needed to *use* the tool —
 [getting-started.md](../getting-started.md) is that — but all of it explains
 why a recording came out the way it did.
 
-## Why Wayland has no capture backend
+## Wayland capture: evdev, not a compositor protocol
 
-Passive observation — the thing XRecord does — is a property of the platform,
-not a missing feature.
+There *is* a Wayland capture backend — `backends/wayland.py`, selected by
+`backend = "wayland"`/`--backend wayland`, and by `auto` where no X server is
+reachable. What there is not, and cannot be, is one that goes *through* a
+compositor: passive observation — the thing XRecord does — is a property of
+the platform rather than a missing feature, so the backend reads the kernel's
+input devices *below* the compositor instead. That buys physical seat input
+and nothing else, which is the shape of everything below: a human session is
+recordable, a driver-driven one is not, because a driver clicking through
+AT-SPI actions emits no input for a device node to carry.
 
 pyguitest classifies reading global keyboard or pointer state as
 `Capability.INPUT_STATE_QUERY`, tier 6 — *"deliberately prevented"* — and
@@ -77,16 +84,17 @@ another.
 
 X11's RECORD extension, Windows' low-level input hooks and macOS's
 `CGEventTap` are the exceptions — one per platform, which is why they are the
-three capture backends this tool has. Neither of the first two is subject to
-the permission model its own platform otherwise enforces for input: X11 has
-none to speak of, and Windows has no equivalent of a Wayland compositor's
-refusal or of a Mac's grant — a low-level hook simply works, silently, for any
-process on the desktop. The Mac's is the one that asks, and it is the reason
-`macos.py` asks the window server by creating a probe tap rather than a
-preflight: `CGEventTapCreate` answers with a live tap when the grant is there
-and `NULL` when it is not, and on macOS 26.7 the grant that answer composes
-from is Accessibility. Under a Wayland session
-`xrecord` reaches XWayland clients and nothing else — and says so in the
+three *display-server* capture backends this tool has (the evdev one above is
+the fourth, and goes through no display server at all). Neither of the first
+two is subject to the permission model its own platform otherwise enforces for
+input: X11 has none to speak of, and Windows has no equivalent of a Wayland
+compositor's refusal or of a Mac's grant — a low-level hook simply works,
+silently, for any process on the desktop. The Mac's is the one that asks, and
+it is the reason `macos.py` asks the window server by creating a probe tap
+rather than a preflight: `CGEventTapCreate` answers with a live tap when the
+grant is there and `NULL` when it is not, and on macOS 26.7 the grant that
+answer composes from is Accessibility. Under a Wayland session `xrecord`
+reaches XWayland clients and nothing else — and says so in the
 recording and in the generated script's header, rather than producing a file
 with silent gaps. `win32` carries its own honest limit instead: a hook that
 misses Windows' own `LowLevelHooksTimeout` is unhooked without any error

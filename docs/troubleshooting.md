@@ -125,7 +125,7 @@ Two further causes worth knowing, both of which look identical from here:
 **Are you on Wayland?** The default Linux backend is XRecord, which reaches
 XWayland clients and nothing else — recording a native Wayland application
 through it produces nothing, and
-[developers/architecture.md](developers/architecture.md#why-wayland-has-no-capture-backend)
+[developers/architecture.md](developers/architecture.md#wayland-capture-evdev-not-a-compositor-protocol)
 explains why that is a property of the platform rather than a missing feature.
 What closes it is the experimental `wayland` backend, which reads the kernel's
 input devices *below* the compositor instead; `backend = "auto"` falls back to
@@ -189,7 +189,7 @@ need to guess whether it was seen. If it is still happening with presses
 close together in time, check what has focus: under the default Linux backend
 (XRecord) a press landing on a genuinely native-Wayland surface (no XWayland
 presence at all) never reaches the recorder in the first place — see
-`docs/developers/architecture.md#why-wayland-has-no-capture-backend`. The
+`docs/developers/architecture.md#wayland-capture-evdev-not-a-compositor-protocol`. The
 `wayland` backend has no such blind spot: it reads below the compositor, so
 the stop chord is seen wherever focus happens to be.
 
@@ -406,7 +406,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.25.0 or newer is required
+older than the recording expects. **pyguitest 0.26.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),

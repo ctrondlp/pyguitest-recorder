@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.25"
+PROFILE = "pyguitest-0.26"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -171,6 +171,18 @@ fast-fail it genuinely wants. A generated script's `focus_window(window)`
 therefore behaves differently on macOS under 0.24 than under 0.25, which is
 exactly the "an older install gets it wrong rather than lacks it" case the
 floor exists for.
+
+0.26 is a pairing step again, the 0.24 shape rather than 0.25's: nothing new
+is emitted and no replay is fixed by it, but `PROFILE`'s claim has to stay
+the version `validate()` actually ran under. pyguitest 0.26.0 adds
+`close_window`, `maximize_window`/`is_window_maximized`, `drag_element`, and
+`expect_enabled`/`expect_disabled`/`expect_value` -- none of which this
+generator emits -- and makes `focused()`/`focus_tracking_works()` answer
+`None`/`False` rather than raise `CapabilityUnsupported` on a session with
+no element backend. The resolver already caught that exception broadly
+(`DesktopResolver.focused()`'s `except Exception`), so nothing here was
+relying on the old behaviour either. A script generated here is checked
+against 0.26 and says so; nothing about what it replays changes.
 
 0.23 is a load-bearing floor rather than a pairing step, and it is the first
 one whose reason is a *platform* rather than a call. Nothing new is emitted:

@@ -1391,8 +1391,10 @@ def test_wayland_click_names_a_tab_from_the_effect_log():
 def test_wayland_selection_effect_names_a_selectable_element():
     # A page tab named from a SELECTION effect is selectable by construction,
     # so the ref carries selectable=True -- which is what lets the generator
-    # emit `.select()` instead of falling to an unreliable Wayland coordinate
-    # click. Without it the ref had selectable=None and the click fell through.
+    # emit `.select()` instead of `.click()`. Without it the effect ref had
+    # actions=None, which `ElementRef.clickable` reads optimistically as
+    # clickable, so `_click_call` emitted a `.click()` a page tab does not
+    # offer and `_select_click` was never reached.
     r = _wayland_effect_resolver(
         FakeEffectLog([_effect("Choosers", "page tab", 1000.5, selectable=True)])
     )

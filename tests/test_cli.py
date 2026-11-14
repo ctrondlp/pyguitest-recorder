@@ -930,6 +930,11 @@ def test_trimming_recomputes_the_leading_delay():
     # Now first, its stale 5s gap to the dropped event becomes 0, not a sleep.
     assert trimmed.events[0].delay == 0.0
     assert trimmed.events[1].delay == 4.0
+    # The recomputation copies each event first, so the ORIGINAL recording's
+    # events keep their delays -- the survivor that became trimmed.events[0]
+    # still reads 5.0 in `recording`, not the recomputed 0.0.
+    assert recording.events[1].delay == 5.0
+    assert trimmed.events[0] is not recording.events[1]
 
 
 def test_record_raw_with_a_trim_is_refused(saved, tmp_path, capsys):

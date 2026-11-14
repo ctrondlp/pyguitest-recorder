@@ -292,6 +292,81 @@ def test_a_key_resolves_to_its_keysym_name_and_the_character_it_typed():
     assert (got.kind, got.keysym, got.text) == ("key_press", "a", "a")
 
 
+def test_os_key_autorepeat_is_dropped():
+    """A press for a key already held is a repeat, and does not reach the queue.
+
+    Measured on a live Xorg session (Mint/Cinnamon): holding one key for
+    two seconds delivered 12 KeyPress events and a single KeyRelease
+    through XRecord -- repeats arrive press-only, so the held set is enough
+    to recognise them. Everything downstream assumes autorepeat is already
+    gone: left in, a held stop key satisfied StopKey's "pressed twice" and
+    truncated a recording, and a held chord emitted one HotKey per tick.
+    """
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (38, 1): XK.XK_A})
+    made._handle(FakeReply(key(38)))  # real press
+    for _ in range(5):
+        made._handle(FakeReply(key(38)))  # autorepeat
+    made._handle(FakeReply(key(38, kind=xevent.KeyRelease)))
+    assert [event.kind for event in drain(made)] == ["key_press", "key_release"]
+
+
+def test_a_press_after_a_release_is_a_real_tap_again():
+    """The guard must not swallow deliberate repeated taps."""
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (38, 1): XK.XK_A})
+    for _ in range(3):
+        made._handle(FakeReply(key(38)))
+        made._handle(FakeReply(key(38, kind=xevent.KeyRelease)))
+    kinds = [event.kind for event in drain(made)]
+    assert kinds == ["key_press", "key_release"] * 3
+
+
+def test_a_restart_does_not_inherit_the_previous_run_held_keys(monkeypatch):
+    """A key down when a run ended must not shadow the next run's first tap.
+
+    `stop()` leaves the backend startable again -- it clears the pump
+    thread rather than ending the instance -- so the held set has to be
+    separated per run. Left alone, a recording stopped while any key was
+    down (the stop chord itself is a key) silently dropped that key's first
+    real press next time, as autorepeat for a hold that had already ended.
+
+    The restart here is made to fail at its first connection, which is
+    enough: the clear happens before anything is opened, so this pins the
+    separation without starting a second pump thread against a fake
+    server.
+    """
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (38, 1): XK.XK_A})
+    made._handle(FakeReply(key(38)))  # a press, never released
+    assert [event.kind for event in drain(made)] == ["key_press"]
+    assert made._down == {38}
+
+    made.stop()
+    monkeypatch.setattr(
+        x11_module,
+        "_connect",
+        lambda xlib, name: (_ for _ in ()).throw(CaptureUnavailable("no server")),
+    )
+    with pytest.raises(CaptureUnavailable):
+        made.start()
+    assert made._down == set()
+
+
+def test_two_different_keys_held_at_once_are_both_reported():
+    """The held set is per keycode, not a single flag."""
+    from Xlib import XK
+
+    made = backend(keymap={(38, 0): XK.XK_a, (39, 0): XK.XK_s})
+    made._handle(FakeReply(key(38)))
+    made._handle(FakeReply(key(39)))
+    made._handle(FakeReply(key(38)))  # repeat of the first
+    assert [event.keysym for event in drain(made)] == ["a", "s"]
+
+
 def test_the_shift_state_picks_the_shifted_keysym():
     from Xlib import XK
 
@@ -396,10 +471,18 @@ def test_each_press_is_decoded_by_the_mapping_in_force_when_it_was_made():
     made._keymap = _Keymap()
     made._handle(requested(change_keyboard_mapping(255, [[XK.XK_a]])))
     made._handle(FakeReply(notify(first=255, count=1), notify(first=255, count=1)))
-    made._handle(FakeReply(key(255)))
+    made._handle(FakeReply(key(255), key(255, kind=xevent.KeyRelease)))
     made._handle(requested(change_keyboard_mapping(255, [[XK.XK_b]])))
     made._handle(FakeReply(notify(first=255, count=1), key(255)))
-    assert [e.text for e in drain(made)] == ["a", "b"]
+    # The release belongs in the stream: xdotool presses and releases the
+    # spare keycode for each character, and capture now drops a press of a
+    # keycode it already holds down (that shape is autorepeat, not a key).
+    # The release is decoded through the same mapping as its press.
+    assert [(e.kind, e.text) for e in drain(made)] == [
+        ("key_press", "a"),
+        ("key_release", "a"),
+        ("key_press", "b"),
+    ]
     # Every copy of both notifies came from a request already seen, so the
     # server -- which could only answer "b" -- was never asked.
     assert made._control.queries == []
@@ -678,6 +761,27 @@ def test_start_records_the_remaps_alongside_the_input(monkeypatch):
     )
 
 
+def test_holding_the_stop_key_down_does_not_end_the_recording():
+    """The consequence the autorepeat guard exists to prevent.
+
+    StopKey ends a run on two consecutive presses of the chord. A held key
+    delivers presses only, so before the guard, leaning on Escape -- or
+    letting it repeat while a slow consumer caught up -- read as two taps
+    and truncated the recording at a moment no one asked for. One hold is
+    one press no matter how long it lasts.
+    """
+    made = escape_backend(StopKey())
+    made._handle(FakeReply(key(9)))
+    for _ in range(8):
+        made._handle(FakeReply(key(9)))
+    assert made.stop_pressed_at is None
+    assert [e.kind for e in drain(made)] == ["key_press"]
+    # Releasing and pressing again is two taps, and still stops the run.
+    made._handle(FakeReply(key(9, kind=xevent.KeyRelease)))
+    made._handle(FakeReply(key(9)))
+    assert made.stop_pressed_at is not None
+
+
 def test_the_stream_ends_where_the_stop_chord_completed():
     # The reason capture recognises the chord at all: a recording that fell
     # behind live input used to answer the stop key only once it had worked
@@ -687,17 +791,31 @@ def test_the_stream_ends_where_the_stop_chord_completed():
     made = escape_backend(StopKey())
     made._handle(FakeReply(key(9)))
     assert made.stop_pressed_at is None
+    # The release between the taps is not decoration: two *taps* is what a
+    # person does, and bare press-press is what OS autorepeat looks like --
+    # measured on a live Xorg session as 12 presses and one release for a
+    # single held key. Capture drops the repeat, so a stop chord written
+    # without releases would describe input the server cannot produce.
+    made._handle(FakeReply(key(9, kind=xevent.KeyRelease)))
     made._handle(FakeReply(key(9)))
     assert made.stop_pressed_at is not None
-    # Both presses reach the consumer first, so the recording still ends at the
+    # Both taps reach the consumer first, so the recording still ends at the
     # press the way it always did, and the presses are swallowed there.
-    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+    assert [e.kind for e in made.events()] == [
+        "key_press",
+        "key_release",
+        "key_press",
+    ]
 
 
 def test_what_followed_the_stop_chord_in_the_same_reply_is_never_parsed():
     made = escape_backend(StopKey())
-    made._handle(FakeReply(key(9), key(9), motion()))
-    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+    made._handle(FakeReply(key(9), key(9, kind=xevent.KeyRelease), key(9), motion()))
+    assert [e.kind for e in made.events()] == [
+        "key_press",
+        "key_release",
+        "key_press",
+    ]
     assert drain(made) == []
 
 
@@ -706,8 +824,12 @@ def test_a_reply_after_the_stop_chord_is_ignored_entirely():
     # recording: handing it on would grow the queue for as long as someone
     # keeps using the desktop after asking the recording to stop.
     made = escape_backend(StopKey())
-    made._handle(FakeReply(key(9), key(9)))
-    assert [e.kind for e in made.events()] == ["key_press", "key_press"]
+    made._handle(FakeReply(key(9), key(9, kind=xevent.KeyRelease), key(9)))
+    assert [e.kind for e in made.events()] == [
+        "key_press",
+        "key_release",
+        "key_press",
+    ]
     made._handle(FakeReply(press(), motion()))
     assert drain(made) == []
 
@@ -725,9 +847,13 @@ def test_without_a_recogniser_capture_never_ends_the_stream_itself():
     # A backend left to itself still hands over what it captures and waits to be
     # stopped; only the consumer's own view of the stop key ends that recording.
     made = escape_backend()
-    made._handle(FakeReply(key(9), key(9)))
+    made._handle(FakeReply(key(9), key(9, kind=xevent.KeyRelease), key(9)))
     assert made.stop_pressed_at is None
-    assert [e.kind for e in drain(made)] == ["key_press", "key_press"]
+    assert [e.kind for e in drain(made)] == [
+        "key_press",
+        "key_release",
+        "key_press",
+    ]
 
 
 def test_it_is_a_capture_backend():

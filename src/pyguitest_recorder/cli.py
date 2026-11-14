@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import math
 import os
 import signal
@@ -751,7 +752,15 @@ def _trimmed_recording(
     sort: each delay is the interval to the event now in front of it, and the
     first is zero.
     """
-    kept = _trimmed_events(recording.events, trim_from, trim_to, drop)
+    # Copy each kept event before the delays are recomputed: `_trimmed_events`
+    # hands back the *same* Event objects, and `_fill_delay(force=True)`
+    # mutates `delay` in place, so without the copy the recomputation would
+    # silently rewrite the delays on the original recording's events too. The
+    # copy mirrors `from_dict`, which builds fresh events.
+    kept = [
+        dataclasses.replace(event)
+        for event in _trimmed_events(recording.events, trim_from, trim_to, drop)
+    ]
     trimmed = Recording(
         events=kept,
         environment=recording.environment,
