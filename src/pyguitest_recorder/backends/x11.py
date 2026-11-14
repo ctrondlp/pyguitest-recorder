@@ -182,6 +182,9 @@ class X11CaptureBackend:
         # every other client follow it and must not be applied again.
         self._staged: tuple[Any, ...] | None = None
         self._applied: tuple[int, int, int] | None = None
+        # Keycodes the server has reported down and not yet released, so a
+        # press for one already in it can be recognised as OS autorepeat.
+        self._down: set[int] = set()
 
     def start(self) -> None:
         """Open both connections, create the record context and begin pumping.
@@ -195,6 +198,13 @@ class X11CaptureBackend:
         failing to start) leaked whatever had already been opened.
         """
         xlib = _import_xlib()
+        # Per-run state, cleared here rather than in stop(): a key held when
+        # the previous run ended stays in the held set otherwise, and the
+        # next run's first real press of it would be read as autorepeat and
+        # dropped. stop() does not end the backend's life -- it leaves the
+        # instance startable again, having cleared the pump thread -- so
+        # this is the only place the two runs are separated.
+        self._down.clear()
         try:
             self._control = _connect(xlib, self.display_name)
             self._pump = _connect(xlib, self.display_name)
@@ -347,8 +357,25 @@ class X11CaptureBackend:
             button=event.detail,
         )
 
-    def _key(self, event: Any, kind: int, now: float) -> RawEvent:
-        """Convert a key event, resolving the keysym under the shift state."""
+    def _key(self, event: Any, kind: int, now: float) -> RawEvent | None:
+        """Convert a key event, resolving the keysym under the shift state.
+
+        Drops OS key autorepeat: a press for a keycode already held is a
+        repeat, not a keystroke. Measured on a live Xorg session, holding
+        one key for two seconds delivers twelve KeyPress events and a
+        single KeyRelease -- repeats come through press-only, with no
+        synthetic release in front of each one, so the held set recognises
+        them on its own and no timestamp heuristic is needed. Nothing
+        downstream expects them: they made a held stop key read as the
+        chord's two presses and cut a recording short, and a held chord
+        emit one HotKey per repeat tick.
+        """
+        if kind == _KEY_PRESS:
+            if event.detail in self._down:
+                return None
+            self._down.add(event.detail)
+        else:
+            self._down.discard(event.detail)
         keysym = self._resolve_keysym(event.detail, event.state)
         return RawEvent(
             kind="key_press" if kind == _KEY_PRESS else "key_release",

@@ -290,7 +290,34 @@ dependencies = [
     # derived from PROFILE, so a floor left behind at 0.21.0 would have
     # the generator emitting a guard the package itself did not promise.
     # The binding *functional* floor remains the 0.21.0 reasons above.
-    "pyguitest>=0.25.0",
+    #
+    # 0.25.0 is load-bearing again, and the 0.20.0 shape rather than the
+    # 0.22.0 one: it reaches `gui.focus_window(...)` -- which a generated
+    # script calls for every window the recording switches to -- by fixing
+    # what an older install gets *wrong* rather than what it lacks, so
+    # `validate()` cannot catch it. It is downstream of the macOS change
+    # 0.24.0 paired against: that release made macOS `activate_window()`
+    # refuse a focus-stealing-prevention block where it used to half-succeed,
+    # but it refused with `CapabilityUnsupported` -- the one exception
+    # `focus_window` reads as "asking is impossible" and gives up on at once,
+    # so on macOS `focus_window` had quietly lost the retry that is its whole
+    # reason for being, and a single such block consumed the call. 0.25.0
+    # makes that activation refusal a plain `PyGUITestError`, which falls
+    # into the retry branch so `focus_window` asks again, pausing between
+    # attempts, while the "no owning process" case alone keeps the
+    # `CapabilityUnsupported` fast-fail. PROFILE moves with it, by the
+    # pairing discipline above.
+    #
+    # 0.26.0 moves it again purely by that same discipline, the 0.22.0 shape
+    # rather than 0.25.0's: `close_window`, `maximize_window`/
+    # `is_window_maximized`, `drag_element`, and `expect_enabled`/
+    # `expect_disabled`/`expect_value` are new surface this generator emits
+    # none of, and `focused()`/`focus_tracking_works()` answering
+    # `None`/`False` instead of raising on a no-element-backend session
+    # changes nothing the resolver depended on -- it already caught that
+    # exception broadly. The binding functional floor stays the 0.25.0
+    # reasons above; PROFILE and this pin move together regardless.
+    "pyguitest>=0.26.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

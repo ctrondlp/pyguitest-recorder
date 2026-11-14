@@ -1873,7 +1873,10 @@ def check(kind, role=None, name="", expected=None, window=None, sensitive=False)
 @pytest.mark.needs_ruff
 def test_a_text_check_names_the_element_and_what_it_read():
     source = render(check("text", "label", "Status", expected="Saved"))
-    assert 'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")' in source
+    assert (
+        'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved", timeout=10)'
+        in source
+    )
     assert "# Check: 'Status' reads 'Saved'" in source
     assert validate(source) == []
 
@@ -1881,18 +1884,36 @@ def test_a_text_check_names_the_element_and_what_it_read():
 @pytest.mark.needs_ruff
 def test_a_checked_check_renders_the_recorded_state():
     source = render(check("checked", "check box", "Read only", expected=True))
-    assert (
-        'gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True)'
-        in source
-    )
+    # The added timeout pushes this one past ruff's line length, so it wraps --
+    # assert on the call and its wrap-stable argument line rather than one line.
+    assert "gui.expect_checked(" in source
+    assert 'role=Role.CHECK_BOX, name="Read only", checked=True, timeout=10' in source
     assert validate(source) == []
 
 
 @pytest.mark.needs_ruff
 def test_a_showing_check_is_the_floor_for_a_button():
     source = render(check("showing", "push button", "Undo"))
-    assert 'gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo")' in source
+    assert (
+        'gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo", timeout=10)' in source
+    )
     assert validate(source) == []
+
+
+@pytest.mark.needs_ruff
+def test_element_expects_carry_the_configured_timeout():
+    # `_expect` emitted no timeout=, so raising default_timeout for a slow
+    # application reached every window lookup and silently not these element
+    # checks -- which took pyguitest's own expect_* default instead. It now
+    # carries the configured timeout exactly as `_check_window` does.
+    source = render(check("showing", "push button", "Undo"), default_timeout=25.0)
+    assert (
+        'gui.expect_showing(role=Role.PUSH_BUTTON, name="Undo", timeout=25)' in source
+    )
+    text = render(
+        check("text", "label", "Status", expected="Saved"), default_timeout=25.0
+    )
+    assert 'equals="Saved", timeout=25)' in text
 
 
 @pytest.mark.needs_ruff

@@ -860,6 +860,19 @@ class _KeyboardState:
         if not self._state[other] & _KEYSTATE_DOWN:
             self._state[generic] &= ~_KEYSTATE_DOWN
 
+    def is_down(self, vk_code: int) -> bool:
+        """Whether this shadow has `vk_code` held.
+
+        What makes OS key autorepeat identifiable at all here: a low-level
+        hook's `KBDLLHOOKSTRUCT` has no repeat flag -- the "previous key
+        state" bit belongs to the `WM_KEYDOWN` a window procedure receives,
+        not to this structure -- so a repeat is only knowable as a press of
+        a key that never came up.
+        """
+        if not 0 <= vk_code < 256:
+            return False
+        return bool(self._state[vk_code] & _KEYSTATE_DOWN)
+
     def array(self) -> ctypes.Array[ctypes.c_ubyte]:
         """The current state as a fresh `ctypes` byte array `ToUnicodeEx` can read."""
         return (ctypes.c_ubyte * 256)(*self._state)
@@ -1390,6 +1403,30 @@ class Win32CaptureBackend:
                 self._record_key(lib, wparam, lparam)
         return int(lib.CallNextHookEx(None, code, wparam, lparam))
 
+    def _altgr_named(self, keysym: str, vk_code: int, pressed: bool) -> str:
+        """`keysym`, renamed to AltGr when this right Alt is the real half of one.
+
+        The real half, against the fake Control `_ALTGR_FAKE_CONTROL_SCAN`
+        describes. It is AltGr when Windows just announced one, and the
+        release is named to match whichever the press was -- the fake
+        Control may already be up by then, so the release cannot be told
+        apart by looking for it again.
+
+        Split out of `_record_key` to keep that method inside the
+        complexity limit when the autorepeat guard joined it; the flag
+        updates happen in the same order they did inline.
+        """
+        if vk_code != _VK_RMENU:
+            return keysym
+        if pressed:
+            self._altgr_down = self._altgr_down or self._altgr_announced
+            self._altgr_announced = False
+        if self._altgr_down:
+            keysym = _ALTGR_KEYSYM
+        if not pressed:
+            self._altgr_down = False
+        return keysym
+
     def _record_key(self, lib: Any, wparam: int, lparam: int) -> None:
         """Read one `KBDLLHOOKSTRUCT` and enqueue the event it describes.
 
@@ -1423,6 +1460,21 @@ class Win32CaptureBackend:
                     # whole character.
                     return
         else:
+            if pressed and self._state.is_down(vk_code):
+                # OS key autorepeat. A low-level hook sees it as an ordinary
+                # second `WM_KEYDOWN` with no release in between and no flag
+                # to mark it, so the held shadow is the only thing that can
+                # tell them apart. Dropped here for the reason
+                # `WaylandCaptureBackend` drops the kernel's: everything
+                # downstream is written for a stream without it. Left in, a
+                # single long press of the stop key counted as the two taps
+                # that end a recording, and a chord held a beat too long
+                # emitted one `HotKey` per tick -- a held Ctrl+Z replaying as
+                # several undos. It also kept `_state` honest: a repeating
+                # Caps Lock re-entered `press()`, whose toggle bit is an XOR,
+                # so every tick flipped the shadow's idea of the latch and
+                # `ToUnicodeEx` started reporting the wrong case.
+                return
             if vk_code == _VK_LCONTROL and info.scanCode == _ALTGR_FAKE_CONTROL_SCAN:
                 # Half of AltGr, not a key anyone pressed -- see
                 # `_ALTGR_FAKE_CONTROL_SCAN`. Tracked for `ToUnicodeEx` but
@@ -1433,19 +1485,9 @@ class Win32CaptureBackend:
                 else:
                     self._state.release(vk_code)
                 return
-            keysym = self._vocabulary.name(vk_code, extended)
-            if vk_code == _VK_RMENU:
-                # The real half. It is AltGr when Windows just announced one,
-                # and the release is named to match whichever the press was
-                # -- the fake Control may already be up by then, so the
-                # release cannot be told apart by looking for it again.
-                if pressed:
-                    self._altgr_down = self._altgr_down or self._altgr_announced
-                    self._altgr_announced = False
-                if self._altgr_down:
-                    keysym = _ALTGR_KEYSYM
-                if not pressed:
-                    self._altgr_down = False
+            keysym = self._altgr_named(
+                self._vocabulary.name(vk_code, extended), vk_code, pressed
+            )
             if pressed:
                 # A high half still waiting for its pair was never going to be
                 # paired by this key.

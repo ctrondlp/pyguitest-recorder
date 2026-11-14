@@ -62,11 +62,12 @@ something is missing.
 
 - **Linux / X11** — the whole path: XRecord capture, element and window
   context, and record → generate → replay on a private Xvfb.
-- **Linux / Wayland** — there is no capture backend and there cannot be one:
-  it is a property of the platform rather than a missing feature, so the
-  contribution here is an XWayland report rather than a patch. See
-  [why Wayland has no capture
-  backend](docs/developers/architecture.md#why-wayland-has-no-capture-backend).
+- **Linux / Wayland** — the experimental `wayland` backend, which reads
+  `/dev/input` *below* the compositor because no capture path *through* one
+  can exist. Reports from a compositor it has not been run on are as useful
+  here as patches, and an XWayland report still is. See
+  [Wayland capture: evdev, not a compositor
+  protocol](docs/developers/architecture.md#wayland-capture-evdev-not-a-compositor-protocol).
 - **Windows** — one desktop so far: the low-level input hook, its keysyms
   through `ToUnicodeEx`, and the hook Windows removes silently.
 - **macOS** — one machine so far: the event tap, its keycodes, and the window

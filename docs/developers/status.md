@@ -846,7 +846,7 @@ private headless GNOME session: the RECORD context comes up and disables
 cleanly, but neither XTEST nor kernel-level `uinput` can inject into it —
 the compositor owns the pointer — so there is no input to record. It is the
 same wall described in
-[architecture.md](architecture.md#why-wayland-has-no-capture-backend),
+[architecture.md](architecture.md#wayland-capture-evdev-not-a-compositor-protocol),
 met from the other side.
 
 ## Run live on a private Xvfb, agent session (2026-09-23)
@@ -1261,7 +1261,7 @@ below.
   throughout. `--doctor` said `xwayland` about the same session in the same
   minute, because it detects against the ambient environment — two paths
   disagreeing, with the wrong one going into the file. It contradicted
-  [architecture.md](architecture.md#why-wayland-has-no-capture-backend)'s own
+  [architecture.md](architecture.md#wayland-capture-evdev-not-a-compositor-protocol)'s own
   claim that this "says so in the recording and in the generated script's
   header". Now asked of the server being recorded: XWayland advertises an
   `XWAYLAND` X extension, which is the only thing that can tell a session's
@@ -1320,6 +1320,24 @@ clicks there degrade to coordinates rather than to wrong elements.
 
 ## Known gaps
 
+- ~~**X11 still passes OS key autorepeat through to the normalizer.**~~
+  **Closed 2026-11-13, by measuring it.** The question was whether a held
+  key reaches XRecord as repeated KeyPress events or as the core protocol's
+  synthetic KeyRelease-then-KeyPress pair -- the latter would have needed
+  `event.time` comparison and a one-event release buffer in the capture hot
+  path. Measured on a live Xorg session (Mint/Cinnamon, python-xlib 0.33),
+  holding one key for 2.0s through XTEST while recording:
+
+      events recorded for that keycode: 13
+      presses=12 releases=1
+      VERDICT: repeats arrive as PRESS ONLY
+
+  Two things fell out of that. XTEST-synthesised keys *do* autorepeat on
+  this server, so no real device was needed after all -- the earlier note
+  here assumed otherwise and was wrong. And because repeats are press-only,
+  the fix is the same held-keycode guard win32 uses, with no timestamps and
+  no buffering. An X server that does send pairs stays unfiltered, as it
+  was before, so the guard can only help.
 - ~~**`scripts/live-capture-check.py` itself records and regenerates but still
   never replays**, where the Windows one replays by default. Every replay in
   this file, including the private-Xvfb round trips above, was run by hand

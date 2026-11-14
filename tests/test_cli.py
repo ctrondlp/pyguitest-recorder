@@ -916,6 +916,130 @@ def test_a_malformed_drop_list_is_rejected_by_the_parser(capsys):
         build_parser().parse_args(["--drop", "not-a-number"])
 
 
+def test_trimming_recomputes_the_leading_delay():
+    # The survivors keep whatever delay they had, so the first one carried the
+    # gap to a predecessor the trim dropped -- a spurious leading sleep under
+    # recorded/verbatim motion. Recomputed as `Recording.from_dict` does.
+    from pyguitest_recorder.cli import _trimmed_recording
+
+    recording = _clicks(((0, 0), 0.0), ((1, 1), 5.0), ((2, 2), 9.0))
+    # The second click's delay is the 5s gap back to the first.
+    assert recording.events[1].delay == 5.0
+    trimmed = _trimmed_recording(recording, trim_from=5.0, trim_to=None, drop=None)
+    assert [e.timestamp for e in trimmed.events] == [5.0, 9.0]
+    # Now first, its stale 5s gap to the dropped event becomes 0, not a sleep.
+    assert trimmed.events[0].delay == 0.0
+    assert trimmed.events[1].delay == 4.0
+    # The recomputation copies each event first, so the ORIGINAL recording's
+    # events keep their delays -- the survivor that became trimmed.events[0]
+    # still reads 5.0 in `recording`, not the recomputed 0.0.
+    assert recording.events[1].delay == 5.0
+    assert trimmed.events[0] is not recording.events[1]
+
+
+def test_record_raw_with_a_trim_is_refused(saved, tmp_path, capsys):
+    # The raw stream is a parallel capture a trim cannot touch, so a saved
+    # session would keep in the clear exactly the keystrokes the trim removed --
+    # refused the way settings.py refuses record_raw with sensitive/exclude.
+    code = main(
+        [
+            "--regenerate",
+            str(saved),
+            "--from",
+            "5",
+            "--record-raw",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "record_raw" in err and "trim" in err
+
+
+def test_record_raw_with_a_drop_is_refused_too(saved, tmp_path, capsys):
+    # --drop leaves the raw stream just as whole as --from/--to do.
+    code = main(
+        [
+            "--regenerate",
+            str(saved),
+            "--drop",
+            "0",
+            "--record-raw",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert code == 2
+    assert "record_raw" in capsys.readouterr().err
+
+
+def test_from_after_to_is_refused(saved, tmp_path, capsys):
+    # An empty window silently dropped every event; refused with both bounds
+    # in hand, which the per-value parse check cannot see.
+    code = main(
+        [
+            "--regenerate",
+            str(saved),
+            "--from",
+            "10",
+            "--to",
+            "5",
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert code == 2
+    assert "empty" in capsys.readouterr().err
+
+
+def test_a_non_finite_trim_bound_is_rejected_by_the_parser():
+    # Plain type=float took inf/nan, both of which silently drop every event.
+    for arg in ("--from", "--to"):
+        for value in ("inf", "nan", "-1"):
+            with pytest.raises(SystemExit):
+                build_parser().parse_args([arg, value])
+
+
+def test_a_trim_that_drops_every_event_says_so(multi_saved, tmp_path, capsys):
+    # --to 0 keeps nothing (every timestamp is >= 0); the notice is the
+    # _trimmed_events docstring's "notice, don't trim quietly" stance.
+    main(
+        [
+            "--regenerate",
+            str(multi_saved),
+            "--to",
+            "0",
+            "--absolute-coordinates",
+            "-o",
+            str(tmp_path / "s.py"),
+            "--config",
+            str(_empty(tmp_path)),
+        ]
+    )
+    assert "removed every event" in capsys.readouterr().err
+
+
+def test_backend_flag_reaches_the_resolved_settings(tmp_path):
+    # `backend` was settable only via the TOML config, yet it is central to the
+    # SSH/Wayland recording workflow. The flag overrides it like every other
+    # capture setting.
+    from pyguitest_recorder.cli import _overrides
+    from pyguitest_recorder.config import load_settings
+
+    args = build_parser().parse_args(["--backend", "wayland"])
+    assert _overrides(args)["backend"] == "wayland"
+    settings, _ = load_settings(str(_empty(tmp_path)))
+    assert settings.merged(**_overrides(args)).backend == "wayland"
+    # Unset overrides nothing, so a config file's choice survives.
+    assert _overrides(build_parser().parse_args([]))["backend"] is None
+
+
+def test_backend_flag_refuses_an_unknown_name():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--backend", "nonsense"])
+
+
 class TestTheDoctorVerdict:
     """The one line `--doctor` exists to print, so it must not overstate."""
 

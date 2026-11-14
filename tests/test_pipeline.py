@@ -156,7 +156,10 @@ def test_a_recorded_check_becomes_an_assertion_in_the_script():
     compile(source, "<pipeline>", "exec")
 
     assert 'gui.button("Save").click()' in source
-    assert 'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved")' in source
+    assert (
+        'gui.expect_text(role=Role.LABEL, name="Status", equals="Saved", timeout=10)'
+        in source
+    )
     # The check key itself is not part of the interaction being replayed.
     assert "send_keys" not in source
 
@@ -182,10 +185,10 @@ def test_a_check_survives_being_saved_and_re_rendered(tmp_path):
     path = tmp_path / "rec.json"
     recording.save(path)
     source = generate(Recording.load(path))
-    assert (
-        'gui.expect_checked(role=Role.CHECK_BOX, name="Read only", checked=True)'
-        in source
-    )
+    # Wraps under ruff with the timeout argument, so assert on the call and its
+    # wrap-stable argument line rather than the whole thing on one line.
+    assert "gui.expect_checked(" in source
+    assert 'role=Role.CHECK_BOX, name="Read only", checked=True, timeout=10' in source
 
 
 class RenamingEditor:

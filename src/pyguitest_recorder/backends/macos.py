@@ -99,6 +99,7 @@ _QUARTZ_NEEDED = (
     "kCGEventKeyUp",
     "kCGEventFlagsChanged",
     "kCGKeyboardEventKeycode",
+    "kCGKeyboardEventAutorepeat",
     "kCGScrollWheelEventDeltaAxis1",
     "kCGScrollWheelEventDeltaAxis2",
 )
@@ -452,11 +453,55 @@ def _typed(text: str) -> str:
 def _now() -> float:
     """The recorder's clock, as `x11` reads it.
 
-    `time.monotonic` and `CGEventGetTimestamp` are the same clock on a Mac -- both
-    mach absolute time -- so a raw event's timestamp and one from here are directly
-    comparable, which is what the normalizer's interval arithmetic needs.
+    `time.monotonic` and `CGEventGetTimestamp` read the same underlying clock on a
+    Mac -- mach absolute time -- but not in the same units: this answers seconds,
+    while `CGEventGetTimestamp` answers raw mach *ticks*, which are nanoseconds
+    only where the timebase is 1:1. A raw event's stamp is comparable with one
+    from here once `_timestamp` has scaled it by `_mach_timebase()` (see there),
+    which is what the normalizer's interval arithmetic needs.
     """
     return time.monotonic()
+
+
+_timebase: tuple[int, int] | None = None
+"""Process-wide cache of `mach_timebase_info`, which never changes once read."""
+
+
+def _query_mach_timebase() -> tuple[int, int]:
+    """`(numer, denom)` of this process's mach timebase, or `(1, 1)` if unknown.
+
+    `mach_timebase_info` lives in libSystem, which `ctypes.CDLL(None)` reaches on
+    a Mac; anywhere else the symbol is simply absent and the honest answer is the
+    1:1 ratio, which leaves `_timestamp` doing the plain nanosecond division it
+    always did. The same fallback covers a loader that refuses the handle outright
+    -- `CDLL(None)` raises `TypeError` on Windows, which has no "every symbol in
+    this process" library to open -- a binding that will not answer, and a
+    degenerate `0/0` ratio: a mistimed replay is better than a crash in a
+    diagnostic conversion.
+    """
+    try:
+        import ctypes  # noqa: PLC0415 - only macOS needs this, and only once
+
+        class _MachTimebaseInfo(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        info = _MachTimebaseInfo()
+        if ctypes.CDLL(None).mach_timebase_info(ctypes.byref(info)) != 0:
+            return (1, 1)
+        numer, denom = int(info.numer), int(info.denom)
+    except (OSError, AttributeError, TypeError, ValueError):  # no symbol, no loader
+        return (1, 1)
+    if numer <= 0 or denom <= 0:
+        return (1, 1)
+    return (numer, denom)
+
+
+def _mach_timebase() -> tuple[int, int]:
+    """The cached mach timebase ratio, queried once per process."""
+    global _timebase
+    if _timebase is None:
+        _timebase = _query_mach_timebase()
+    return _timebase
 
 
 class MacosCaptureBackend:
@@ -657,13 +702,26 @@ class MacosCaptureBackend:
             return self._key(event, now, x, y, down=name == "kCGEventKeyDown")
         return self._flags_changed(event, now, x, y)
 
-    def _key(self, event: Any, now: float, x: int, y: int, *, down: bool) -> RawEvent:
+    def _key(
+        self, event: Any, now: float, x: int, y: int, *, down: bool
+    ) -> RawEvent | None:
         """A key press or release, named by its keysym where the key is known.
 
         `keysym` is empty for a virtual keycode this table does not name -- a media key,
         a key only a JIS layout has -- rather than invented: nothing observed is dropped
         here, and what an unnamed key means is the normalizer's call.
+
+        The one thing that *is* dropped is OS key autorepeat, which the window
+        server reports in the event itself. The rest of this recorder is written
+        for a stream without it, the way `WaylandCaptureBackend` already drops the
+        kernel's: a held key arriving as several presses made `StopKey` count one
+        long press of the stop key as the two taps that end a recording, and made
+        the normalizer emit one `HotKey` per repeat tick -- so a held Ctrl+Z
+        replayed as several undos, a script that runs cleanly and does the wrong
+        thing.
         """
+        if down and self._field(event, "kCGKeyboardEventAutorepeat"):
+            return None
         code = int(self._field(event, "kCGKeyboardEventKeycode"))
         return RawEvent(
             kind="key_press" if down else "key_release",
@@ -711,11 +769,18 @@ class MacosCaptureBackend:
     def _timestamp(self, event: Any) -> float:
         """When the window server stamped this event, in seconds.
 
-        `CGEventGetTimestamp` is mach absolute time in nanoseconds, and
-        `time.monotonic()` reads that same clock on a Mac, so dividing by `1e9` puts the
-        two on one timeline with no offset to guess at.
+        `CGEventGetTimestamp` is mach absolute time, and `time.monotonic()`
+        reads that same clock on a Mac -- but a mach tick is a nanosecond only
+        where the timebase is 1:1, which is every Intel Mac and no Apple
+        Silicon one. There the ratio is ~125/3, so a tick is ~42x a nanosecond
+        and dividing by `1e9` alone put every interval ~42x too short, replaying
+        the recording far too fast. `mach_timebase_info` gives the ratio that
+        turns ticks into nanoseconds; on Intel it is 1/1 and the result is
+        unchanged.
         """
-        return float(self._q.CGEventGetTimestamp(event)) / 1e9
+        numer, denom = _mach_timebase()
+        ticks = float(self._q.CGEventGetTimestamp(event))
+        return ticks * numer / denom / 1e9
 
     def _location(self, event: Any) -> tuple[int, int]:
         """The pointer's position when the event was stamped, as two ints.

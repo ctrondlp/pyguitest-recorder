@@ -14,7 +14,9 @@ names are only useful if the library that replays them can press them.
 
 from __future__ import annotations
 
+import ctypes
 import sys
+import time
 import types
 
 import pytest
@@ -190,9 +192,16 @@ class FakeQuartz:
 
 
 def install(monkeypatch: pytest.MonkeyPatch, quartz: FakeQuartz) -> None:
-    """Make `quartz` the module `macos.py` will import, on this platform."""
+    """Make `quartz` the module `macos.py` will import, on this platform.
+
+    The fake's event stamps are nanoseconds, so the mach timebase is pinned
+    to 1:1 -- a real Apple Silicon Mac answers (125, 3), which would scale
+    the fake's nanosecond stamps as if they were raw mach ticks. The timebase
+    tests below reach `_mach_timebase` directly and set their own ratio.
+    """
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setattr(macos_module.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (1, 1))
 
 
 def started(monkeypatch: pytest.MonkeyPatch, quartz: FakeQuartz, **kwargs: object):
@@ -344,15 +353,69 @@ class TestTranslation:
         assert raw.button == 3
         assert (raw.x, raw.y) == (300, 400)
 
-    def test_the_timestamp_is_the_events_own_nanoseconds_in_seconds(self, monkeypatch):
-        # `CGEventGetTimestamp` is mach absolute time in nanoseconds, and
-        # `time.monotonic` is that same clock, so the division is the whole conversion.
-        backend = started(monkeypatch, FakeQuartz())
-        raw = backend._translate(
-            event_type(backend, "kCGEventMouseMoved"),
-            FakeEvent(stamp=123_456_789_000.0),
-        )
-        assert raw.timestamp == pytest.approx(123.456789)
+    def test_the_mach_timebase_query_answers_sanely_everywhere(self):
+        # Off a Mac, mach_timebase_info is absent from ctypes.CDLL(None) (it
+        # is libc there) and the honest answer is the 1:1 fallback, which
+        # leaves _timestamp doing the plain nanosecond division -- that is
+        # the branch the CI/dev boxes exercise. ON a Mac this drives the real
+        # binding against libSystem -- the struct layout, the byref call, and
+        # the `!= 0` check on the kern_return_t it answers with, which ctypes
+        # reads as its implicit `c_int` restype and is why nothing there sets
+        # one. The ratio is then cross-checked rather than merely inspected:
+        # asserting (1, 1) unconditionally would rebuild the exact
+        # Apple-Silicon-fragile test this one replaced, and asserting both
+        # halves are positive asserts nothing at all -- every failure path
+        # returns (1, 1), which clears that bar too. time.monotonic() on a
+        # Mac *is* mach_absolute_time scaled by this same timebase, so
+        # converting the raw tick count with the queried ratio has to land on
+        # it: a wrong ratio is off by the timebase itself, ~42x on Apple
+        # Silicon, which on a machine up for more than a second or two misses
+        # by far more than the bound below. The bound only has to cover the
+        # two reads not being simultaneous.
+        got = macos_module._query_mach_timebase()
+        if sys.platform != "darwin":
+            assert got == (1, 1)
+            return
+        numer, denom = got
+        mach_absolute_time = ctypes.CDLL(None).mach_absolute_time
+        mach_absolute_time.restype = ctypes.c_uint64  # uint64_t, not c_int
+        mach_absolute_time.argtypes = []
+        seconds = mach_absolute_time() * numer / denom / 1e9
+        assert abs(seconds - time.monotonic()) < 1.0
+
+    def test_the_mach_timebase_is_queried_once_and_cached(self, monkeypatch):
+        # The ratio never changes within a process, so it is read once.
+        monkeypatch.setattr(macos_module, "_timebase", None)
+        calls = []
+
+        def fake_query():
+            calls.append(1)
+            return (7, 3)
+
+        monkeypatch.setattr(macos_module, "_query_mach_timebase", fake_query)
+        assert macos_module._mach_timebase() == (7, 3)
+        assert macos_module._mach_timebase() == (7, 3)
+        assert len(calls) == 1
+
+    def test_the_timestamp_scales_mach_ticks_by_the_timebase(self, monkeypatch):
+        # Apple Silicon: a mach tick is ~125/3 nanoseconds, not one, so a raw
+        # tick count read as nanoseconds (the old `/1e9`) came out ~42x too
+        # short and the recording replayed far too fast. The timebase turns
+        # ticks into nanoseconds first. 24e6 ticks * 125/3 = 1e9 ns = 1.0s,
+        # where `/1e9` alone would give 0.024s.
+        backend = MacosCaptureBackend()
+        backend._q = FakeQuartz()
+        monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (125, 3))
+        assert backend._timestamp(FakeEvent(stamp=24_000_000.0)) == pytest.approx(1.0)
+
+    def test_the_timestamp_is_unchanged_on_a_one_to_one_timebase(self, monkeypatch):
+        # Every Intel Mac has numer == denom == 1, where the conversion is
+        # identical to the old plain nanosecond division.
+        backend = MacosCaptureBackend()
+        backend._q = FakeQuartz()
+        monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (1, 1))
+        got = backend._timestamp(FakeEvent(stamp=123_456_789_000.0))
+        assert got == pytest.approx(123.456789)
 
     def test_a_key_press_is_named_by_keysym_and_carries_its_text(self, monkeypatch):
         backend = started(monkeypatch, FakeQuartz())
@@ -362,6 +425,45 @@ class TestTranslation:
         assert raw.kind == "key_press"
         assert raw.keysym == "a"
         assert raw.text == "a"
+
+    def test_os_key_autorepeat_is_dropped(self, monkeypatch):
+        # The window server marks a repeat in the event itself. Everything
+        # downstream is written for a stream without autorepeat -- the way
+        # WaylandCaptureBackend already drops the kernel's -- so a held key
+        # arriving as several presses made StopKey count one long press of
+        # the stop key as the two taps that end a recording, and made the
+        # normalizer emit one HotKey per tick: a held Ctrl+Z replaying as
+        # several undos.
+        backend = started(monkeypatch, FakeQuartz())
+        repeat = FakeEvent(
+            keycode=0, text="a", fields={"kCGKeyboardEventAutorepeat": 1}
+        )
+        assert (
+            backend._translate(event_type(backend, "kCGEventKeyDown"), repeat) is None
+        )
+
+    def test_a_real_press_and_the_release_of_a_held_key_still_arrive(self, monkeypatch):
+        # Only the repeats are dropped: the press that began the hold has
+        # autorepeat 0, and a KeyUp is never a repeat at all -- dropping
+        # either would lose the hold the normalizer reconstructs from them.
+        backend = started(monkeypatch, FakeQuartz())
+        first = FakeEvent(keycode=0, text="a", fields={"kCGKeyboardEventAutorepeat": 0})
+        assert (
+            backend._translate(event_type(backend, "kCGEventKeyDown"), first).kind
+            == "key_press"
+        )
+        up = FakeEvent(keycode=0, fields={"kCGKeyboardEventAutorepeat": 1})
+        assert (
+            backend._translate(event_type(backend, "kCGEventKeyUp"), up).kind
+            == "key_release"
+        )
+
+    def test_the_autorepeat_field_name_is_one_pyobjc_publishes(self):
+        # The backend checks the Quartz names it calls rather than assuming
+        # them -- an invented name was a real bug here once -- so the new
+        # field has to be in that list for `unavailable_reason` to be able
+        # to tell "PyObjC too old" from "PyObjC missing".
+        assert "kCGKeyboardEventAutorepeat" in macos_module._QUARTZ_NEEDED
 
     def test_a_special_key_carries_no_text(self, monkeypatch):
         """The keysym names it; the code macOS answers with is not a character typed.

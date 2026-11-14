@@ -72,6 +72,15 @@ class AtspiEffect:
     window a click landed in -- the one match available when the window
     backend (kdotool, COSMIC) publishes no pid to match on."""
 
+    selectable: bool = False
+    """Whether this effect was a *selection* state change rather than a focus
+    or press one. A selection effect's source is selectable by construction --
+    it was just selected -- so the resolver carries this onto the `ElementRef`
+    it builds, which is what lets the generator emit `.select()` for a native
+    Wayland page tab, list item, tree item or table row named from the log.
+    False for the focus and press effects in `_EVENTS`, which say nothing about
+    selectability; the default keeps older constructors (the tests') working."""
+
 
 class AtspiEffectLog:
     """Collect AT-SPI effects on a private event loop; query by time + window."""
@@ -207,8 +216,25 @@ class AtspiEffectLog:
                     role=role,
                     pid=pid,
                     toplevel=toplevel,
+                    selectable=self._is_selection(getattr(event, "type", "")),
                 )
             )
+
+    @staticmethod
+    def _is_selection(etype: str) -> bool:
+        """Whether `etype` is a selection state change, not a focus or press one.
+
+        The three selection events in `_EVENTS`, matched the way `_widget_of`
+        already branches on them. A source named from one of these was just
+        selected, so the element is selectable by construction; `focus:`,
+        `state-changed:focused` and `state-changed:pressed` say nothing about
+        selectability and are left to the `selectable=False` default.
+        """
+        return (
+            "selection-changed" in etype
+            or "active-descendant" in etype
+            or "state-changed:selected" in etype
+        )
 
     @staticmethod
     def _widget_of(event: Any) -> Any:
