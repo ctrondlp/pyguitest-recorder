@@ -113,6 +113,55 @@ def test_nearest_skips_a_nameless_source():
     assert log.nearest(after=1000.0, within=0.6, toplevel="Target") is None
 
 
+class _FakeAccessible:
+    """The slice of `Atspi.Accessible` `_on_event` reads off a reacted widget."""
+
+    def __init__(self, name, role, pid=77):
+        self._name, self._role, self._pid = name, role, pid
+
+    def get_name(self):
+        return self._name
+
+    def get_role_name(self):
+        return self._role
+
+    def get_process_id(self):
+        return self._pid
+
+    def get_parent(self):
+        return None
+
+
+class _FakeAtspiEvent:
+    """A `Atspi.Event` stand-in with the fields `_widget_of` branches on."""
+
+    def __init__(self, etype, source, any_data=None, detail1=1):
+        self.type = etype
+        self.source = source
+        self.any_data = any_data
+        self.detail1 = detail1
+
+
+def test_on_event_marks_a_selection_effect_selectable():
+    # A source named from a selection state change was just selected, so the
+    # effect is flagged selectable -- which the resolver carries onto the ref.
+    log = AtspiEffectLog()
+    tab = _FakeAccessible("Choosers", "page tab")
+    log._on_event(_FakeAtspiEvent("object:state-changed:selected", tab, detail1=1))
+    assert len(log._effects) == 1
+    assert log._effects[0].selectable is True
+
+
+def test_on_event_leaves_a_focus_effect_not_selectable():
+    # A focus (or press) effect says nothing about selectability, so it keeps
+    # the selectable=False default rather than claiming the element selects.
+    log = AtspiEffectLog()
+    field = _FakeAccessible("Name", "entry")
+    log._on_event(_FakeAtspiEvent("object:state-changed:focused", field))
+    assert len(log._effects) == 1
+    assert log._effects[0].selectable is False
+
+
 def test_start_degrades_to_false_when_atspi_cannot_initialise(monkeypatch):
     """A dead accessibility bus must leave clicks on coordinates, not raise.
 

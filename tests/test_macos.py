@@ -354,6 +354,26 @@ class TestTranslation:
         )
         assert raw.timestamp == pytest.approx(123.456789)
 
+    def test_the_timestamp_scales_mach_ticks_by_the_timebase(self, monkeypatch):
+        # Apple Silicon: a mach tick is ~125/3 nanoseconds, not one, so a raw
+        # tick count read as nanoseconds (the old `/1e9`) came out ~42x too
+        # short and the recording replayed far too fast. The timebase turns
+        # ticks into nanoseconds first. 24e6 ticks * 125/3 = 1e9 ns = 1.0s,
+        # where `/1e9` alone would give 0.024s.
+        backend = MacosCaptureBackend()
+        backend._q = FakeQuartz()
+        monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (125, 3))
+        assert backend._timestamp(FakeEvent(stamp=24_000_000.0)) == pytest.approx(1.0)
+
+    def test_the_timestamp_is_unchanged_on_a_one_to_one_timebase(self, monkeypatch):
+        # Every Intel Mac has numer == denom == 1, where the conversion is
+        # identical to the old plain nanosecond division.
+        backend = MacosCaptureBackend()
+        backend._q = FakeQuartz()
+        monkeypatch.setattr(macos_module, "_mach_timebase", lambda: (1, 1))
+        got = backend._timestamp(FakeEvent(stamp=123_456_789_000.0))
+        assert got == pytest.approx(123.456789)
+
     def test_a_key_press_is_named_by_keysym_and_carries_its_text(self, monkeypatch):
         backend = started(monkeypatch, FakeQuartz())
         raw = backend._translate(

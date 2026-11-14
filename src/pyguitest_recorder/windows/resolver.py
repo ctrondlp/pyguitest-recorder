@@ -992,7 +992,22 @@ class DesktopResolver:
                 after=when, within=self._EFFECT_WINDOW, toplevel=title
             )
             if effect is not None:
-                return ElementRef(role=effect.role, name=effect.name, pid=effect.pid)
+                # An element named from a *selection* effect is selectable by
+                # construction -- it was just selected -- so carry that onto the
+                # ref, which is what lets the generator emit `.select()` for a
+                # native-Wayland page tab/list/tree/table row instead of falling
+                # to an unreliable coordinate click (its `_select_click` declines
+                # when `selectable` is unset). A focus or press effect leaves it
+                # None, the honest "not known to be selectable". The effect path
+                # leaves `path=()`, so the ref is not `within=`-scoped -- the
+                # effect log records no ancestry to scope by, only the toplevel
+                # title it was already matched on.
+                return ElementRef(
+                    role=effect.role,
+                    name=effect.name,
+                    pid=effect.pid,
+                    selectable=True if effect.selectable else None,
+                )
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.03)

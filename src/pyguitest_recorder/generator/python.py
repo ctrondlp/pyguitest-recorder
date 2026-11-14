@@ -2235,7 +2235,15 @@ class PythonGenerator:
         if scope is not None:
             within = self._ancestor_var(scope, state)
             tail += f", within={within}"
-        state.lines.append(f"gui.{helper}({args}, name={_literal(element.name)}{tail})")
+        # With the configured timeout, exactly as `_check_window`'s
+        # `expect_window` is: raising `default_timeout` for a slow application
+        # reached every window lookup and silently not these element checks,
+        # which took pyguitest's own `expect_*` default instead.
+        wait = self.options.default_timeout
+        state.lines.append(
+            f"gui.{helper}({args}, name={_literal(element.name)}{tail}, "
+            f"timeout={wait:g})"
+        )
 
     def _check_comment(self, what: str, state: _State) -> None:
         """Label a check in the words of the person who will read it."""

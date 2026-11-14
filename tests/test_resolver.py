@@ -1352,10 +1352,12 @@ class FakeEffectLog:
         return None
 
 
-def _effect(name, role, at, toplevel="Target"):
+def _effect(name, role, at, toplevel="Target", selectable=False):
     from pyguitest_recorder.windows.atspi_effects import AtspiEffect
 
-    return AtspiEffect(at=at, name=name, role=role, pid=77, toplevel=toplevel)
+    return AtspiEffect(
+        at=at, name=name, role=role, pid=77, toplevel=toplevel, selectable=selectable
+    )
 
 
 def _wayland_effect_resolver(log):
@@ -1384,6 +1386,48 @@ def test_wayland_click_names_a_tab_from_the_effect_log():
     assert target.element is not None
     assert (target.element.name, target.element.role) == ("Choosers", "page tab")
     assert (target.x, target.y) == (640, 400)
+
+
+def test_wayland_selection_effect_names_a_selectable_element():
+    # A page tab named from a SELECTION effect is selectable by construction,
+    # so the ref carries selectable=True -- which is what lets the generator
+    # emit `.select()` instead of falling to an unreliable Wayland coordinate
+    # click. Without it the ref had selectable=None and the click fell through.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Choosers", "page tab", 1000.5, selectable=True)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None
+    assert target.element.selectable is True
+
+
+def test_wayland_focus_effect_is_not_marked_selectable():
+    # A focus or press effect says nothing about selectability, so the ref
+    # keeps the honest "unknown" (None), not a guessed True.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Save", "push button", 1000.5, selectable=False)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None
+    assert target.element.selectable is None
+
+
+def test_wayland_selection_effect_renders_as_a_select_not_a_click():
+    # End to end: the selectable ref the effect produces makes the generator
+    # emit `.select()` for the page tab, where before it fell to `.click()`.
+    from pyguitest_recorder.generator import GeneratorOptions, generate
+    from pyguitest_recorder.model import Click, Recording
+
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Choosers", "page tab", 1000.5, selectable=True)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    source = generate(
+        Recording(events=[Click(target=target)]),
+        GeneratorOptions(include_header=False),
+    )
+    assert ".select()" in source
+    assert ".click()" not in source
 
 
 def test_wayland_effect_log_is_scoped_to_the_clicked_window():

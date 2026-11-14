@@ -459,6 +459,45 @@ def _now() -> float:
     return time.monotonic()
 
 
+_timebase: tuple[int, int] | None = None
+"""Process-wide cache of `mach_timebase_info`, which never changes once read."""
+
+
+def _query_mach_timebase() -> tuple[int, int]:
+    """`(numer, denom)` of this process's mach timebase, or `(1, 1)` if unknown.
+
+    `mach_timebase_info` lives in libSystem, which `ctypes.CDLL(None)` reaches on
+    a Mac; anywhere else the symbol is simply absent and the honest answer is the
+    1:1 ratio, which leaves `_timestamp` doing the plain nanosecond division it
+    always did. The same fallback covers a binding that will not answer or a
+    degenerate `0/0` ratio: a mistimed replay is better than a crash in a
+    diagnostic conversion.
+    """
+    try:
+        import ctypes  # noqa: PLC0415 - only macOS needs this, and only once
+
+        class _MachTimebaseInfo(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        info = _MachTimebaseInfo()
+        if ctypes.CDLL(None).mach_timebase_info(ctypes.byref(info)) != 0:
+            return (1, 1)
+        numer, denom = int(info.numer), int(info.denom)
+    except (OSError, AttributeError, ValueError):  # no libSystem, no symbol
+        return (1, 1)
+    if numer <= 0 or denom <= 0:
+        return (1, 1)
+    return (numer, denom)
+
+
+def _mach_timebase() -> tuple[int, int]:
+    """The cached mach timebase ratio, queried once per process."""
+    global _timebase
+    if _timebase is None:
+        _timebase = _query_mach_timebase()
+    return _timebase
+
+
 class MacosCaptureBackend:
     """Capture keyboard and pointer input through a `CGEventTap`.
 
@@ -711,11 +750,18 @@ class MacosCaptureBackend:
     def _timestamp(self, event: Any) -> float:
         """When the window server stamped this event, in seconds.
 
-        `CGEventGetTimestamp` is mach absolute time in nanoseconds, and
-        `time.monotonic()` reads that same clock on a Mac, so dividing by `1e9` puts the
-        two on one timeline with no offset to guess at.
+        `CGEventGetTimestamp` is mach absolute time, and `time.monotonic()`
+        reads that same clock on a Mac -- but a mach tick is a nanosecond only
+        where the timebase is 1:1, which is every Intel Mac and no Apple
+        Silicon one. There the ratio is ~125/3, so a tick is ~42x a nanosecond
+        and dividing by `1e9` alone put every interval ~42x too short, replaying
+        the recording far too fast. `mach_timebase_info` gives the ratio that
+        turns ticks into nanoseconds; on Intel it is 1/1 and the result is
+        unchanged.
         """
-        return float(self._q.CGEventGetTimestamp(event)) / 1e9
+        numer, denom = _mach_timebase()
+        ticks = float(self._q.CGEventGetTimestamp(event))
+        return ticks * numer / denom / 1e9
 
     def _location(self, event: Any) -> tuple[int, int]:
         """The pointer's position when the event was stamped, as two ints.

@@ -284,14 +284,14 @@ the floor required until 0.14.0 raised it again: that is the release whose
 `macos` backend a macOS recording resolves windows and elements through, and
 whose `macquartz` vocabulary its key names are translated through, so a
 recording made on a Mac has nothing older to replay or regenerate against.
-0.15.0 was the step nothing here strictly needed -- the pyguitest this output
-was last verified against, and no more. 0.15.1 was the first floor step in a
+0.15.0 was the step nothing here strictly needed, and no more. 0.15.1 was the
+first floor step in a
 while an older install can genuinely get wrong rather than merely lack: a
 generated script under `locators = "element"` (the default) scopes an element
 search with `gui.window_element(title)`, and an older pyguitest there could
 resolve that call to a shell-owned decoration proxy instead of the real window
-on a real GNOME/Mutter desktop, found live. 0.16.0 is the release this output
-is verified against now, and it is not a quiet step either -- five calls in a
+on a real GNOME/Mutter desktop, found live. 0.16.0 is not a quiet step either
+-- five calls in a
 generated script behave differently there. `gui.tap_key(...)` on Windows now
 carries the scan code and extended bit the layout gives the key, where `Home`,
 an arrow or Right Ctrl went out as a key no keyboard sends; `expect_checked`
@@ -307,6 +307,18 @@ missed by one. 0.16.2 is a patch step with the same character again: on macOS
 what a field held before the recording's own write reached it, and on Linux
 `windows()` listed the override-redirect popups a window manager never manages,
 so a click could resolve to a drop-down instead of the application's window.
+0.25.0 is the release this output is verified against now, the floor the first
+paragraph names, and a load-bearing step of the same kind rather than a quiet
+one. A generated script calls `gui.focus_window(...)` for every window the
+recording switches to, and on macOS under 0.24 that call had quietly lost the
+retry that is its whole reason for being: 0.24 made macOS `activate_window()`
+refuse a focus-stealing-prevention block with `CapabilityUnsupported` -- the one
+refusal `focus_window` reads as "asking is impossible" and gives up on at once,
+so a single such block consumed the call. 0.25.0 makes that activation refusal a
+plain `PyGUITestError`, which falls into the retry branch so `focus_window` asks
+again, pausing between attempts, while the "no owning process" case alone keeps
+the `CapabilityUnsupported` fast-fail -- a behavioural change `validate()` cannot
+catch, since the method is present on either side of it.
 `validate()` checks
 `gui.*` calls against the installed `Session` and what is called on an element
 against the installed `Element`, so a script naming a method this pyguitest does

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import os
 import signal
 import stat
@@ -51,6 +52,29 @@ def _parse_indices(value: str) -> frozenset[int]:
         ) from exc
 
 
+def _trim_seconds(value: str) -> float:
+    """Parse `--from`/`--to`, refusing a value no trim can act on.
+
+    Plain `type=float` took `inf` and `nan` as readily as a number, and both
+    silently dropped every event -- a trim window with `nan` at an end includes
+    nothing, and `inf` is past the end of any recording. A negative offset is
+    meaningless too: seconds-into-the-recording counts up from zero. The
+    `from <= to` ordering needs both values and is checked once they are known,
+    in `_validate_trim`.
+    """
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--from/--to want a number of seconds (got {value!r})"
+        ) from exc
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(
+            f"--from/--to want a finite, non-negative number of seconds (got {value!r})"
+        )
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
@@ -70,6 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=_version_string())
 
     capture = parser.add_argument_group("capture")
+    capture.add_argument(
+        "--backend",
+        choices=("auto", "xrecord", "win32", "macos", "wayland"),
+        default=None,
+        help="capture backend to use (default: auto, which picks the "
+        "platform's own); central to the SSH/Wayland workflow, where "
+        '"wayland" selects the evdev backend against a native Wayland session',
+    )
     capture.add_argument(
         "--display",
         help="X display to record (default: $DISPLAY); xrecord only, ignored "
@@ -152,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument(
         "--from",
         dest="trim_from",
-        type=float,
+        type=_trim_seconds,
         metavar="SECONDS",
         help="drop every event before this many seconds into the recording"
         " -- works with --regenerate, or right after recording",
@@ -160,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument(
         "--to",
         dest="trim_to",
-        type=float,
+        type=_trim_seconds,
         metavar="SECONDS",
         help="drop every event at or after this many seconds into the recording",
     )
@@ -365,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings, source = load_settings(args.config)
         settings = settings.merged(**_overrides(args))
+        _validate_trim(settings, args.trim_from, args.trim_to, args.drop)
     except ConfigError as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 2
@@ -386,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
 def _overrides(args: argparse.Namespace) -> dict[str, object]:
     """The settings the command line actually set, ignoring the rest."""
     names = (
+        "backend",
         "display",
         "screen",
         "stop_key",
@@ -420,6 +454,48 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
     values = {name: getattr(args, name, None) for name in names}
     values["session_file"] = args.save_session
     return values
+
+
+def _validate_trim(
+    settings: Settings,
+    trim_from: float | None,
+    trim_to: float | None,
+    drop: frozenset[int] | None,
+) -> None:
+    """Refuse a trim request this recorder cannot honour, before anything runs.
+
+    Two refusals, raised as `ConfigError` so `main()` reports them the way it
+    reports a bad setting -- a one-line refusal before any session is written,
+    not a traceback part-way through.
+
+    `record_raw` with a trim is refused for the same reason `exclude_windows`
+    and `sensitive` are refused with it in `settings.py`: a trim drops events
+    from the script, but the raw stream is a parallel capture that a trim does
+    not touch (its stamps are monotonic ticks while `--from`/`--to` are
+    seconds-since-start, so they cannot even be lined up), so a saved session
+    would keep in the clear exactly the keystrokes the trim was meant to
+    remove -- scrubbed-looking and nothing of the kind. `--drop` is included:
+    it drops events too and leaves raw just as whole.
+
+    `--from` above `--to` is an empty window that silently drops every event;
+    refused here with both values in hand (the per-value `_trim_seconds` check
+    cannot see the pair). `from == to` is left to the drop-everything notice in
+    `_emit`, since a one-instant window is a degenerate request rather than a
+    contradictory one.
+    """
+    trimming = trim_from is not None or trim_to is not None or bool(drop)
+    if settings.record_raw and trimming:
+        raise ConfigError(
+            "record_raw cannot be combined with a trim (--from/--to/--drop): a "
+            "trim drops events from the script but not from the raw stream, "
+            "which cannot be trimmed to match, so a saved session would keep in "
+            "the clear exactly what the trim removed -- drop one of the two"
+        )
+    if trim_from is not None and trim_to is not None and trim_from > trim_to:
+        raise ConfigError(
+            f"--from ({trim_from:g}) is after --to ({trim_to:g}); that window "
+            "is empty and would drop every event"
+        )
 
 
 def _sync_options(settings: Settings) -> SyncOptions:
@@ -660,6 +736,33 @@ def _trimmed_events(
     return kept
 
 
+def _trimmed_recording(
+    recording: Recording,
+    trim_from: float | None,
+    trim_to: float | None,
+    drop: frozenset[int] | None,
+) -> Recording:
+    """A copy of `recording` with the trim applied and its delays recomputed.
+
+    The events kept by `_trimmed_events` carry whatever `delay` they had in the
+    original list, which for the first survivor is the gap to a predecessor the
+    trim just dropped -- a spurious leading sleep under `motion = "recorded"` or
+    `"verbatim"`. Recomputed exactly as `Recording.from_dict` does after its own
+    sort: each delay is the interval to the event now in front of it, and the
+    first is zero.
+    """
+    kept = _trimmed_events(recording.events, trim_from, trim_to, drop)
+    trimmed = Recording(
+        events=kept,
+        environment=recording.environment,
+        raw=recording.raw,
+        started_at=recording.started_at,
+    )
+    for index in range(len(trimmed.events)):
+        trimmed._fill_delay(index, force=True)
+    return trimmed
+
+
 def _mode_note(path: Path) -> str:
     """The mode clause a warning can append, or empty where it is not a fact.
 
@@ -823,18 +926,19 @@ def _emit(
     the same --from/--drop on every future --regenerate.
     """
     if trim_from is not None or trim_to is not None or drop:
-        kept = _trimmed_events(recording.events, trim_from, trim_to, drop)
-        print(
-            f"Trimmed {len(recording.events) - len(kept)} of "
-            f"{len(recording.events)} events",
-            file=sys.stderr,
-        )
-        recording = Recording(
-            events=kept,
-            environment=recording.environment,
-            raw=recording.raw,
-            started_at=recording.started_at,
-        )
+        before = len(recording.events)
+        recording = _trimmed_recording(recording, trim_from, trim_to, drop)
+        kept = len(recording.events)
+        print(f"Trimmed {before - kept} of {before} events", file=sys.stderr)
+        if before and not kept:
+            # The `_trimmed_events` docstring's stance is to notice, not trim
+            # quietly: a window or a drop list that removed every event leaves a
+            # script that does nothing, which is worth saying out loud.
+            print(
+                "note: the trim removed every event; the generated script will "
+                "do nothing",
+                file=sys.stderr,
+            )
     analyzed = _analyze(recording, settings)
     source = generate(analyzed, _generator_options(settings))
     problems = validate(source)
