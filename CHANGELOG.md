@@ -104,6 +104,31 @@ was released.
   and could still answer OK. A run that ended any other way is now named
   and fails as a capture problem.
 
+- **A button press bounds the clicks already queued, not just the ones
+  still held.** A press was recorded on every *held* button, which is what
+  an overlapping release needs — but a click that had already been queued
+  at its own release was left to the next key or the next release to bound.
+  Click, press a second button, then press a key while that button is still
+  down, and the first click's span ran past the second button's press: a
+  row that second button selected could be handed to the first click. A
+  press now closes the queue as well, except for the second press of a
+  double click, which merges into the first and bounds nothing — predicted
+  at the press from the same button, interval and distance the release
+  reads.
+- **A new click keeps its own typing fallback.** The last-clicked text
+  field is what names a run of typing where no per-widget focus is
+  published, and the new click claimed it *before* the previous click was
+  settled — so a correction written into the fallback by that settlement
+  overwrote the new click's own target, and the typing that followed went
+  to the pointer, or to the previous click's element, instead of the field
+  just clicked. The fallback and its owner are assigned together after the
+  settle.
+- **A revoked name still consumes its selection record.** The resolver
+  keeps one record per named press for each of the two settle questions,
+  and a question never asked is a record never consumed: a click whose name
+  the bound revoked short-circuited the selection check, leaving that
+  press's selection stamp in the resolver's map for the rest of the
+  recording. Both questions are asked now, whatever the first answers.
 - **A click's effect span is bounded in press order, even with two buttons
   held at once.** The bound comes from the next click's press, read at its
   release, which assumes releases arrive in the order the presses did.

@@ -481,6 +481,94 @@ def test_two_overlapping_buttons_are_bounded_in_press_order(press, release, wind
     ]
 
 
+def test_a_press_between_a_click_and_a_key_bounds_that_click(
+    press, release, key, window
+):
+    # Click, then press another button, then a key while that button is
+    # still down. The bound came from the key, so the first click's span ran
+    # past the second button's press -- and a row the second button selected
+    # could be handed to the first click. A press bounds what is already
+    # queued, not only what is still held.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.5, x=500, y=500, button=3),
+        key(1.8, "Down"),
+        release(1.9, x=500, y=500, button=3),
+    ]
+    drain(normalizer, raws)
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [
+        (1.0, 1.5),
+        (1.5, 1.8),
+    ]
+
+
+def test_the_second_press_of_a_double_click_still_bounds_nothing(
+    press, release, window
+):
+    # The exemption the rule above needs: the two presses are one click, so
+    # the second must not close the first's span -- its effect is the merged
+    # click's own. A third, distant click is what finally bounds it.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.1),
+        release(1.12),
+        press(3.0, x=500, y=500),
+        release(3.02, x=500, y=500),
+    ]
+    drain(normalizer, raws)
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 3.0)]
+
+
+def test_a_new_click_keeps_its_own_typing_fallback(press, release, key, window):
+    # Settling the previous click can correct its target, and that
+    # correction is written into the typing fallback -- which the new click
+    # had already claimed, so the correction overwrote the new click's own
+    # target and the typing that followed went to the pointer instead of the
+    # field just clicked. The fallback and its owner move together now.
+    entry = ElementRef(role="text", name="Filename", selectable=None)
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+
+    class _NoFocus(_RevokingResolver):
+        """Both clicks are named live; the first one's name is disproved.
+
+        The first click has to *have* a name for settlement to correct, and
+        the second has to be the entry -- otherwise the fallback the typing
+        reads is empty either way and the ordering this test is about makes
+        no difference.
+        """
+
+        def focused(self):
+            return None
+
+        def resolve(self, x, y, screen=0, when=None):
+            here = entry if (x, y) == (500, 500) else row
+            return Target(x=x, y=y, screen=screen, window=self.window, element=here)
+
+    resolver = _NoFocus(window, ref=None, live=entry, disowned={1.0})
+    normalizer = Normalizer(resolver=resolver)
+    events = drain(
+        normalizer,
+        [
+            press(1.0),
+            release(1.02),
+            press(1.5, x=500, y=500),
+            release(1.52, x=500, y=500),
+            key(1.8, "a", text="a"),
+        ],
+    )
+    events += normalizer.flush()
+    (typed,) = [e for e in events if isinstance(e, TextInput)]
+    assert typed.target.element is not None
+    assert typed.target.element.name == "Filename"
+
+
 class _UnprovenSelectionResolver(_DeferringResolver):
     """A resolver whose live name is selectable on evidence the bound rejects.
 
@@ -518,6 +606,41 @@ def test_a_selection_the_bound_disproves_leaves_the_widget_a_plain_click(
     )
     assert click.target.element.selectable is None
     assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.3)]
+
+
+class _CountingResolver(_DeferringResolver):
+    """Records which of the two settle questions it was asked, per press."""
+
+    def __init__(self, window, ref=None, live=None, stands=True):
+        super().__init__(window, ref=ref, live=live)
+        self.stands = stands
+        self.asked_name = []
+        self.asked_selection = []
+
+    def effect_attribution_stands(self, when, until):
+        self.asked_name.append(when)
+        return self.stands
+
+    def effect_selection_stands(self, when, until):
+        self.asked_selection.append(when)
+        return True
+
+
+def test_a_revoked_name_still_consumes_its_selection_record(press, release, window):
+    # The resolver keeps one record per named press for each question, and
+    # a question never asked is a record never consumed: a click whose name
+    # the bound revoked short-circuited the selection check, so its
+    # selection stamp stayed in the resolver's map for the rest of the
+    # recording -- one entry per revocation, growing all session. Both
+    # questions are asked now, whatever the first one answers.
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+    resolver = _CountingResolver(window, ref=None, live=row, stands=False)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0), release(1.02), press(1.5, x=500, y=500)]
+    raws += [release(1.52, x=500, y=500)]
+    drain(normalizer, raws)
+    assert resolver.asked_name == [1.0]
+    assert resolver.asked_selection == [1.0], "the selection record was left behind"
 
 
 def test_a_revoked_click_name_is_dropped_from_the_typing_fallback(

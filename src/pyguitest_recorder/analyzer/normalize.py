@@ -553,17 +553,35 @@ class Normalizer:
     def _on_button_press(self, raw: RawEvent) -> list[Event]:
         """Remember the press; a click is only known at release."""
         out: list[Event] = self._flush_text()
-        # A button going down bounds any button already held, the way a key
-        # press does: whatever it selects is its own doing. Recorded on the
-        # pending press rather than closing the queue, because the click
-        # this one will become is not queued until its release -- and with
-        # overlapping buttons that release can come after this one's.
+        target = self._target(raw)
+        # A button going down bounds what came before it, the way a key
+        # press does: whatever it selects is its own doing, not the earlier
+        # action's. Both halves of "before" need saying, because a click
+        # lives in two places:
+        #
+        # - a button still *held* is not queued yet (its click is only
+        #   known at its release, which with overlapping buttons can come
+        #   after this press), so the bound is remembered on the press and
+        #   applied when it is queued;
+        # - a click already *queued* is bounded here and now. Left to the
+        #   next key or the next release, a press between the two was
+        #   skipped: click, press another button, then a key while it is
+        #   still down, and the first click's span ran past the second
+        #   button's press -- so a row that second button selected could be
+        #   handed to the first click.
+        #
+        # Except for the second press of a double click, which merges into
+        # the first and bounds nothing: its effect is the merged click's
+        # own. Predicted here from the same three things `_mergeable` reads
+        # at the release -- button, interval and distance.
         for pending in self._held.values():
             if pending.keyed is None:
                 pending.keyed = raw.timestamp
+        if not self._mergeable(raw, target):
+            self._close_pending_effects(raw.timestamp)
         self._held[raw.button] = _Pending(
             button=raw.button,
-            target=self._target(raw),
+            target=target,
             timestamp=raw.timestamp,
             last=(raw.x, raw.y),
         )
@@ -612,15 +630,23 @@ class Normalizer:
         so the click waits there and is flushed by whatever comes next.
         """
         target = pending.target
-        self._clicked = target
         if self._mergeable(raw, target):
             assert self._click is not None
             self._click.count += 1
             self._click_at = raw.timestamp
+            self._clicked = target
             self._clicked_by = self._click
             return []
         # A new click, not the second press of a double: that one merges above
         # and bounds nothing, since its effect is the merged click's own.
+        #
+        # The typing fallback is handed to this click *after* the settle
+        # below, not before: settling the previous click can correct its
+        # target, and `_rename` writes that correction into the fallback
+        # while the fallback is still the previous click's. Claimed up
+        # front, this click's own target was overwritten by its
+        # predecessor's correction and a run of typing that followed went
+        # to the pointer instead of the field just clicked.
         self._close_pending_effects(pending.timestamp)
         out = self._flush_click()
         self._click = Click(
@@ -630,6 +656,10 @@ class Normalizer:
             note=note,
         )
         self._click_at = raw.timestamp
+        # Together, and before the deferral: a click whose bound is already
+        # known is settled inside `_defer_effect`, and that settle has to be
+        # able to correct this click's own fallback.
+        self._clicked = target
         self._clicked_by = self._click
         self._defer_effect(self._click, pending.timestamp, until=pending.keyed)
         return out
@@ -783,12 +813,16 @@ class Normalizer:
                 ),
             )
         selection = getattr(self.resolver, "effect_selection_stands", None)
-        if (
-            target.element is not None
-            and target.element.selectable
-            and selection is not None
-            and not selection(deferred.when, deferred.until)
-        ):
+        # Asked whatever the first answer was, so the resolver's record of
+        # this press is consumed either way: a name the bound revoked above
+        # leaves nothing for the selection check to act on, and skipping the
+        # question left the resolver holding that press's selection stamp
+        # for the rest of the recording -- one entry per revoked click, none
+        # of them ever asked about again.
+        selected = (
+            True if selection is None else selection(deferred.when, deferred.until)
+        )
+        if target.element is not None and target.element.selectable and not selected:
             # The widget stands, its selection does not. Dropping the flag
             # rather than the name puts the click back in the state a
             # focus-only live name leaves it in, so the lookup below can

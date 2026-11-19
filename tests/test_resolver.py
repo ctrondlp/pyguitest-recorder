@@ -8,7 +8,7 @@ window never being the answer.
 
 import os
 import sys
-import time
+from unittest import mock
 
 import pytest
 
@@ -1475,9 +1475,26 @@ def test_wayland_effect_arriving_late_but_within_the_window_is_caught():
     # selection fired 0.02s past the old deadline and came out a coordinate
     # click. With `_EFFECT_WAIT` at 0 a fixed-offset deadline expires at once,
     # so this would fail on the pre-fix resolver -- the non-vacuous part.
-    import time
+    #
+    # Driven on a clock of the test's own, which each poll advances: the
+    # real one made this the suite's one load-sensitive test -- a stall
+    # longer than the window between two polls expires the deadline and
+    # the effect is missed, which is a failure about the machine rather
+    # than about the resolver.
+    class Clock:
+        """`time`, as `_effect_element_in` uses it."""
 
-    now = time.monotonic()
+        def __init__(self):
+            self.now = 1000.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    now = clock.now
     when = now - 0.1  # the press is already 0.1s old by the time it resolves
     eff = _effect("Cherry", "list item", now + 0.15, selectable=True)
 
@@ -1495,7 +1512,8 @@ def test_wayland_effect_arriving_late_but_within_the_window_is_caught():
 
     r = _wayland_effect_resolver(LateLog())
     r._EFFECT_WAIT = 0.0  # a fixed-offset deadline would give up immediately
-    target = r.resolve(640, 400, when=when)
+    with mock.patch.object(resolver_module, "time", clock):
+        target = r.resolve(640, 400, when=when)
     assert target.element is not None
     assert (target.element.name, target.element.role) == ("Cherry", "list item")
 
@@ -1668,11 +1686,36 @@ def test_a_press_stamped_in_another_clock_domain_does_not_hold_the_consumer():
     # difference (minutes on a freshly booted machine, where `monotonic` is
     # still small and a wall-clock stamp is not). Capped at one window from
     # now, the press simply finds no effect and keeps its coordinates.
+    #
+    # Driven on a clock of the test's own, which each poll advances: an
+    # uncapped wait would poll an hour of that clock away in no real time
+    # at all, so the budget below fails the run *promptly* rather than
+    # after the elapsed-time assertion a real clock would make us wait for.
+    class Clock:
+        """`time`, as `_effect_element_in` uses it."""
+
+        def __init__(self):
+            self.now = 1000.0
+            self.polls = 0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.polls += 1
+            assert self.polls <= 20, (
+                "the live wait is polling on and on: it is not capped at a "
+                "window from now"
+            )
+            self.now += seconds
+
+    clock = Clock()
     r = _wayland_effect_resolver(FakeEffectLog([]))
     r._EFFECT_WINDOW = 0.05
-    started = time.monotonic()
-    assert r.resolve(640, 400, when=time.monotonic() + 5_000).element is None
-    assert time.monotonic() - started < 2
+    with mock.patch.object(resolver_module, "time", clock):
+        target = r.resolve(640, 400, when=clock.now + 5_000)
+    assert target.element is None
+    assert clock.polls <= 3, f"waited {clock.polls} polls for a stamp it cannot use"
 
 
 def test_a_folded_selection_past_the_bound_falls_while_the_focus_name_stands():
