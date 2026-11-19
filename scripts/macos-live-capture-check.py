@@ -251,15 +251,24 @@ def _check_the_script_names_its_controls(source: str) -> list[str]:
     A check that looked for `name="X"` across the board would miss the
     helper forms and report a clean recording as broken, which is exactly
     what the first version of this did.
+
+    The quote style is not the generator's to promise either: it renders
+    strings through `ast.unparse`, which writes single quotes, and only a
+    `ruff format` pass -- run when ruff happens to be installed, and ruff is a
+    dev dependency -- turns them into double ones. A box without ruff produces
+    `gui.button('Click Me')`, a correct script this check used to report as
+    missing every control. The needles are matched against the source with
+    its quotes folded to one style; none of the names has a quote in it.
     """
     wanted = (
         '"Click Me"',  # gui.button("Click Me", ...)
         '"Enable feature"',  # gui.checkbox("Enable feature", ...)
         'name="Two"',  # gui.element(role=Role.RADIO_BUTTON, name="Two", ...)
     )
+    folded = source.replace("'", '"')
     problems = []
     for needle in wanted:
-        if needle not in source:
+        if needle not in folded:
             problems.append(f"the generated script does not name {needle}")
     # And no control may have fallen through to a bare coordinate click: a
     # `.click()` with no element before it is the locator that breaks when
@@ -343,6 +352,50 @@ def replay(source: str, title: str) -> list[str]:
         stop_probe(process)
 
 
+def _capture(recorder: Recorder, title: str) -> tuple[Recording, bool]:
+    """Run the recorder while the probe window is driven.
+
+    Returns the recording and whether the *watchdog* ended the run. The run
+    is meant to end on the stop chord the sender taps last; the watchdog is
+    what ends it when the recorder does not see the chord -- and that is a
+    capture failure in its own right, not a convenience. A backend that
+    caught the clicks and missed both Escapes would otherwise render,
+    validate and replay a clean-looking script, and the check would answer
+    OK about a recorder that cannot be stopped from the keyboard. So the
+    expiry is handed back for `check` to report as a problem.
+    """
+    sender_error: BaseException | None = None
+
+    def run_sender() -> None:
+        nonlocal sender_error
+        try:
+            drive_probe_window(title)
+        except BaseException as exc:  # noqa: BLE001 - reported below, not swallowed
+            sender_error = exc
+
+    watchdog_fired = threading.Event()
+
+    def give_up() -> None:
+        watchdog_fired.set()
+        recorder.stop()
+
+    sender = threading.Thread(target=run_sender, daemon=True)
+    watchdog = threading.Timer(90.0, give_up)
+    sender.start()
+    watchdog.start()
+    try:
+        recording = recorder.run()
+    finally:
+        watchdog.cancel()
+        recorder.stop()
+        sender.join(timeout=5)
+
+    if sender_error is not None:
+        where = "".join(traceback.format_exception(sender_error)).rstrip()
+        raise Failure(f"driving the probe window failed -- {where}")
+    return recording, watchdog_fired.is_set()
+
+
 def check(*, do_replay: bool) -> int:
     """Capture, render, and (optionally) replay. Returns the exit status."""
     reason = unavailable_reason()
@@ -364,38 +417,23 @@ def check(*, do_replay: bool) -> int:
     process = start_probe(title)
     try:
         recorder.start()
-    except BaseException:
-        stop_probe(process)
-        raise
-    print(f"capturing macOS input while driving {title!r}")
-    print("resolver:", type(recorder._resolver).__name__)
-    for note in recorder.recording.environment.notes:
-        print("    note:", note)
-
-    sender_error: BaseException | None = None
-
-    def run_sender() -> None:
-        nonlocal sender_error
-        try:
-            drive_probe_window(title)
-        except BaseException as exc:  # noqa: BLE001 - reported below, not swallowed
-            sender_error = exc
-
-    sender = threading.Thread(target=run_sender, daemon=True)
-    watchdog = threading.Timer(90.0, recorder.stop)
-    sender.start()
-    watchdog.start()
-    try:
-        recording = recorder.run()
+        print(f"capturing macOS input while driving {title!r}")
+        print("resolver:", type(recorder._resolver).__name__)
+        for note in recorder.recording.environment.notes:
+            print("    note:", note)
+        recording, timed_out = _capture(recorder, title)
     finally:
-        watchdog.cancel()
-        recorder.stop()
-        sender.join(timeout=5)
         stop_probe(process)
 
-    if sender_error is not None:
-        where = "".join(traceback.format_exception(sender_error)).rstrip()
-        raise Failure(f"driving the probe window failed -- {where}")
+    problems: list[str] = []
+    if timed_out:
+        print("stop chord: FAILED, the watchdog stopped the recorder after 90 s")
+        problems.append(
+            "the recorder did not stop on the Escape-Escape chord the sender "
+            "tapped; the watchdog stopped it"
+        )
+    else:
+        print("stop chord: the recorder stopped on the two Escapes")
 
     report(recording)
     recording.events = infer_synchronization(recording.events)
@@ -404,8 +442,9 @@ def check(*, do_replay: bool) -> int:
 
     source = generate(recording)
     print("\n" + source)
-    problems = validate(source)
-    print("validate:", problems or "clean")
+    invalid = validate(source)
+    print("validate:", invalid or "clean")
+    problems += invalid
     problems += round_trip(recording, source)
     problems += _check_the_script_names_its_controls(source)
 

@@ -86,7 +86,17 @@ class AtspiEffectLog:
     """Collect AT-SPI effects on a private event loop; query by time + window."""
 
     def __init__(self, maxlen: int = 256) -> None:
-        """Keep the last `maxlen` effects; nothing runs until `start`."""
+        """Keep the last `maxlen` effects; nothing runs until `start`.
+
+        The ring is a memory bound, not an attribution window. Every reader
+        asks about a span that is already closed -- the live resolver about
+        the moments after a press, the normalizer about a click the next input
+        action has just bounded -- and consumes the evidence then, so what the
+        ring has to hold is the effects of the interaction in flight, not the
+        session's. The one span still open at the end of a recording is the
+        trailing click's; a burst of more effects than this inside its span
+        would evict the earliest, and that is the residual the bound accepts.
+        """
         self._effects: deque[AtspiEffect] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None

@@ -597,6 +597,15 @@ class DesktopResolver:
     """Whether the session's `element_at` accepts a `pid` scope -- pyguitest
     from the release that added it. Decided once, since the session does not
     change under a resolver."""
+    _effect_named: dict[float, float] = field(default_factory=dict, init=False)
+    """Press stamp -> stamp of the effect `_effect_element_in` named it from.
+
+    The live path names a press from the earliest effect after it, and at
+    that moment nothing says whether the user's *next* press came first: the
+    effect may be the next press's reaction, read because the live wait
+    outlasted the gap between the two. Kept so `effect_attribution_stands`
+    can answer once the next press is known; an entry is consumed by that
+    question, so this holds only the presses still awaiting their bound."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -1069,6 +1078,7 @@ class DesktopResolver:
                 # leaves `path=()`, so the ref is not `within=`-scoped -- the
                 # effect log records no ancestry to scope by, only the toplevel
                 # title it was already matched on.
+                self._effect_named[when] = effect.at
                 return ElementRef(
                     role=effect.role,
                     name=effect.name,
@@ -1078,6 +1088,34 @@ class DesktopResolver:
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.03)
+
+    def effect_attribution_stands(self, when: float, until: float | None) -> bool:
+        """Whether the live effect name for the press at `when` survives its bound.
+
+        `_effect_element_in` names a press from the earliest effect after it,
+        and waits for one for up to `_EFFECT_WINDOW` -- long enough for the
+        user to press again. A plain button pressed at t that fires nothing,
+        and a row pressed at t+0.3 whose selection lands at t+0.35, left the
+        button named *as the row*, selectable, since the row's selection was
+        the earliest effect after t; and a click already marked selectable
+        was one the post-capture pass declined to revisit, so nothing ever
+        undid it. The same race names a button after the row's *focus* effect
+        when the row's selection is slower still.
+
+        The bound that settles it is the next input action's press, `until`,
+        which the normalizer learns only when that press is consumed -- so it
+        asks here, once, and the answer is whether the effect the name came
+        from fired before that press. One that fired at or after it is that
+        press's reaction, however near the two are, and the caller drops the
+        name; it may then ask `attribute_effect_final` for the span that
+        remains. A press this did not name from an effect -- a coordinate
+        hit-test, the focus fallback -- stands as a matter of course, and so
+        does the last press of a recording, which has no bound.
+        """
+        at = self._effect_named.pop(when, None)
+        if at is None or until is None:
+            return True
+        return at < until
 
     def attribute_effect_final(
         self,

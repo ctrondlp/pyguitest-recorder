@@ -1611,6 +1611,57 @@ def test_attribute_effect_final_never_renames_a_named_ref():
     assert r.attribute_effect_final(when=1000.0, title="Target", element=button) is None
 
 
+def test_effect_attribution_falls_when_the_effect_fired_after_the_next_input():
+    # The live resolver named the press at 1000.4 from a selection that fired at
+    # 1000.75 -- inside the effect window, so it looked like this click's. The
+    # normalizer later learns the next input landed at 1000.7, BEFORE that
+    # effect: the row selected because of the second action, not this one, and
+    # the live name was a guess the bound now disproves. Measured on COSMIC: a
+    # button click followed 0.3 s later by a Down key came out as a click on the
+    # row the key had selected.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.name == "Cherry"
+    assert r.effect_attribution_stands(1000.4, until=1000.7) is False
+
+
+def test_effect_attribution_stands_when_the_effect_precedes_the_next_input():
+    # Same press, but the next input came at 1000.8: the effect fired inside
+    # this click's span and the name stays.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.8) is True
+
+
+def test_effect_attribution_question_is_answered_once_per_press():
+    # The record is consumed by the question: a second ask about the same
+    # press has nothing to revoke and answers "stands" -- so a normalizer that
+    # settles a click twice cannot strip a name it already kept.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.8) is True
+    assert r.effect_attribution_stands(1000.4, until=1000.5) is True
+
+
+def test_effect_attribution_stands_for_a_press_not_named_from_an_effect():
+    # A press the focus path named (or nothing named) has no effect record to
+    # disprove; an unbounded one (the last click of the recording) neither.
+    r = _wayland_effect_resolver(FakeEffectLog([]))
+    assert r.resolve(640, 400, when=1000.4).element is None
+    assert r.effect_attribution_stands(1000.4, until=1000.5) is True
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=None) is True
+
+
 def _stale_focus_resolver(effects):
     # A field focused BEFORE this press is still reported focused after a click
     # elsewhere; it belongs to the window, so `_belongs` alone cannot reject it.

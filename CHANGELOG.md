@@ -60,6 +60,44 @@ was released.
   which may only mark it selectable when the selection is that same
   widget's (name and role), never rename it.
 
+- **The bound above holds through a held button, and a live effect name it
+  disproves is withdrawn.** Three more holes in the attribution pass, found
+  in review. A key pressed *while the button was still down* bounded
+  nothing: the click is only known at its release, after the key has gone
+  by, so a press-Down-Down-release sequence on a list left the button
+  click's span open to the next action and the rows the keys selected were
+  read as the click's. The first non-modifier key during the hold is now
+  kept on the press and becomes the click's bound when it is queued. The
+  *live* path had the same blind spot from the other side: it names a press
+  from an effect that fires within its window, which it reads before the
+  next input is known, so a button clicked and a row selected by a key 0.3s
+  later came out as `.select()` on the row — the effect had fired after the
+  next input, and belonged to it. The resolver now remembers which effect
+  it named each press from, and when the normalizer learns the bound it asks
+  whether that name stands; one that fired at or after the bound is
+  withdrawn, the click is offered to the pass over its own span instead,
+  and if nothing there is its it goes back to a coordinate with the reason
+  written beside it. And every deferred click was held to the *end* of the
+  recording before attribution, while the effect log is a ring that keeps
+  only the most recent effects: a long session evicted the evidence for its
+  early clicks before anyone looked, and the clicks that should have been
+  named came out coordinates. A click is now attributed the moment the
+  next action closes its span, when its evidence is in hand; only the
+  trailing click waits for the final pass, so the ring is a memory bound,
+  not an attribution window.
+
+- **`scripts/macos-live-capture-check.py` judges the generated script by
+  its content, not its quoting, and a run the watchdog had to end is a
+  failure.** The generator renders strings through `ast.unparse` (single
+  quotes) and only re-formats with `ruff` when it is installed, so on a Mac
+  without the dev dependency the check searched for `name="..."` in a
+  script that spelled `name='...'` and reported "not named" for controls it
+  had named. Quotes are folded before the search. And when the recorder did
+  not stop on the two-Escape chord, the 90-second watchdog stopped it and
+  the run then passed on the recording it had — hiding exactly the
+  stop-chord failure a live check exists to catch; it is now reported and
+  fails the run.
+
 ### Changed
 
 - **The pyguitest floor is now 0.26.1, and the `require_version(...)` a

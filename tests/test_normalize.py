@@ -392,6 +392,40 @@ def test_a_key_press_bounds_a_deferred_click_but_a_modifier_or_scroll_does_not(
     assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.9)]
 
 
+def test_a_key_pressed_while_the_button_is_held_bounds_that_click(
+    press, release, key, window
+):
+    # The click is only queued at release, after the key has been handled, so
+    # `_close_pending_effects` at the key press finds nothing to bound. Without
+    # the bound a selection the key caused -- Down at 1.3 moving a list's
+    # selection -- would be read as the click's, and a plain button press would
+    # come out `.select()`ed. The span must end at the key, not at the release
+    # or the next click.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0), key(1.3, "Down"), key(1.4, "Down"), release(1.5)]
+    raws += [press(3.0, x=500, y=500), release(3.02, x=500, y=500)]
+    assert len(_clicks(drain(normalizer, raws))) == 2
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [
+        (1.0, 1.3),
+        (3.0, None),
+    ]
+
+
+def test_a_modifier_pressed_while_the_button_is_held_bounds_nothing(
+    press, release, key, window
+):
+    # Shift-click: the modifier goes down during the hold and selects nothing on
+    # its own, so the click keeps its full span to the next action.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0), key(1.1, "Shift_L"), release(1.2)]
+    drain(normalizer, raws)
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, None)]
+
+
 def test_a_drag_bounds_the_deferred_click_before_it(press, release, window):
     resolver = _DeferringResolver(window, ref=None)
     normalizer = Normalizer(resolver=resolver)
@@ -438,6 +472,122 @@ def test_a_click_already_known_selectable_or_not_is_not_deferred(
         drain(normalizer, [press(1.0), release(1.02)])
         normalizer.attribute_pending_effects()
         assert resolver.calls == []
+
+
+def test_a_click_is_settled_as_soon_as_the_next_action_bounds_it(
+    press, release, key, window
+):
+    # The effect log is a bounded ring. A click whose span is closed by the
+    # next action has all its evidence in hand at that moment, so it is
+    # attributed right then -- not held to the end of the recording, by which
+    # time a long session has pushed its effects out of the ring. Only the
+    # trailing click, whose span nothing has closed yet, waits for the final
+    # pass.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.6, x=500, y=500),
+        release(1.62, x=500, y=500),
+    ]
+    drain(normalizer, raws)
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.6)]
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [
+        (1.0, 1.6),
+        (1.6, None),
+    ]
+    # A key bounds and settles just the same.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    drain(normalizer, [press(1.0), release(1.02), key(1.9, "Down")])
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.9)]
+
+
+class _RevokingResolver(_DeferringResolver):
+    """A `_DeferringResolver` that can also disown a live effect name.
+
+    `effect_attribution_stands` answers False for the presses in `disowned`,
+    standing in for a resolver whose live effect fired at or after the bound
+    the normalizer later learned, and records every ask.
+    """
+
+    def __init__(self, window, ref=None, live=None, disowned=()):
+        super().__init__(window, ref=ref, live=live)
+        self.disowned = set(disowned)
+        self.asked = []
+
+    def effect_attribution_stands(self, when, until):
+        self.asked.append((when, until))
+        return when not in self.disowned
+
+
+def test_a_live_effect_name_the_bound_disproves_is_revoked(press, release, window):
+    # The live pass named the first click from a selection effect that fired
+    # 0.35 s after the press -- but the next press came at 0.3 s, so the row
+    # selected because of the SECOND action, and the first click, a button,
+    # would have been rendered as `.select()` on that row. Once the bound is
+    # known the resolver disowns the name and the click goes back to its honest
+    # coordinates, saying why. The second click's own live name stands.
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+    resolver = _RevokingResolver(window, ref=None, live=row, disowned={1.0})
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.3, x=500, y=500),
+        release(1.32, x=500, y=500),
+    ]
+    first, second = _clicks(drain(normalizer, raws))
+    assert first.target.element is None
+    assert "reacted only after the next input" in first.target.reason
+    assert second.target.element == row
+    normalizer.attribute_pending_effects()
+    assert second.target.element == row
+    assert resolver.asked == [(1.0, 1.3), (1.3, None)]
+    # Stripped of its live name, the first click was still offered to the
+    # effect pass over its own span, in case another effect inside it is its.
+    assert resolver.calls[0] == (1.0, 1.3, None)
+
+
+def test_a_revoked_click_takes_the_effect_the_pass_finds_inside_its_span(
+    press, release, window
+):
+    # Disowning the live name is not the end of it: the pass is asked again over
+    # the bounded span and may find the effect that really was this click's.
+    wrong = ElementRef(role="list item", name="Cherry", selectable=True)
+    right = ElementRef(role="list item", name="Apple", selectable=True)
+    resolver = _RevokingResolver(window, ref=right, live=wrong, disowned={1.0})
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.3, x=500, y=500),
+        release(1.32, x=500, y=500),
+    ]
+    first, _ = _clicks(drain(normalizer, raws))
+    assert first.target.element == right
+    assert first.target.reason is None
+
+
+def test_a_live_name_the_resolver_stands_by_is_kept(press, release, window):
+    # The ordinary case: the effect fired before the next input, the resolver
+    # stands by the name, and the click is exactly what the live pass made it.
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+    resolver = _RevokingResolver(window, ref=None, live=row)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        press(1.3, x=500, y=500),
+        release(1.32, x=500, y=500),
+    ]
+    first, _ = _clicks(drain(normalizer, raws))
+    assert first.target.element == row
+    assert first.target.reason is None
+    assert resolver.asked == [(1.0, 1.3)]
+    assert resolver.calls == []  # known selectable: nothing left to ask the pass
 
 
 def test_pause_is_emitted_after_the_click_that_preceded_it(press, release):
