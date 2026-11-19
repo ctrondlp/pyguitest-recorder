@@ -274,6 +274,172 @@ def test_click_carries_the_element_under_it(press, release, save_button):
     assert events[0].target.element == save_button
 
 
+class _DeferringResolver:
+    """A native-Wayland resolver stand-in.
+
+    Names no click by coordinate (or names every click `live`, the ref the
+    live effect path would have produced), and answers the post-capture effect
+    pass with a fixed ref for one window -- recording each call's bounds, so a
+    test can see what span the normalizer asked about.
+    """
+
+    def __init__(self, window, ref=None, live=None):
+        self.window = window
+        self.ref = ref
+        self.live = live
+        self.calls = []
+
+    def resolve(self, x, y, screen=0, when=None):
+        return Target(x=x, y=y, screen=screen, window=self.window, element=self.live)
+
+    def resolve_window(self, x, y, screen=0):
+        return Target(x=x, y=y, screen=screen, window=self.window)
+
+    def attribute_effect_final(self, when, title, *, until=None, element=None):
+        self.calls.append((when, until, element))
+        return self.ref if (self.ref and title == self.window.title) else None
+
+    def close(self):
+        pass
+
+
+def test_a_deferred_wayland_click_is_named_by_the_post_capture_pass(
+    press, release, window
+):
+    # The live pass could not name the click (Wayland has no coordinate->element),
+    # so it was deferred; after capture the effect log names it, and the click
+    # becomes the selectable element -- which is what emits `.select()`.
+    ref = ElementRef(role="list item", name="Cherry", selectable=True)
+    normalizer = Normalizer(resolver=_DeferringResolver(window, ref))
+    (click,) = [
+        e
+        for e in drain(normalizer, [press(1.0), release(1.02)])
+        if isinstance(e, Click)
+    ]
+    assert click.target.element is None  # live pass left it a coordinate
+    normalizer.attribute_pending_effects()
+    assert click.target.element is not None
+    assert (click.target.element.name, click.target.element.selectable) == (
+        "Cherry",
+        True,
+    )
+
+
+def test_a_deferred_wayland_click_with_no_selection_stays_a_coordinate(
+    press, release, window
+):
+    # A push-button click fires no selection effect; the post-capture pass finds
+    # nothing and leaves the click exactly as the live pass produced it.
+    normalizer = Normalizer(resolver=_DeferringResolver(window, ref=None))
+    (click,) = [
+        e
+        for e in drain(normalizer, [press(1.0), release(1.02)])
+        if isinstance(e, Click)
+    ]
+    normalizer.attribute_pending_effects()
+    assert click.target.element is None
+
+
+def _clicks(events):
+    return [e for e in events if isinstance(e, Click)]
+
+
+def test_a_deferred_click_is_bounded_by_the_next_click(press, release, window):
+    # A button clicked at 1.0 and a row clicked at 1.6: the row's selection
+    # lands after 1.6, and the post-capture span is 2.5s wide, so without a
+    # boundary the button click would reach the row's selection and be named
+    # a row. The first click's span must end at the second press; the last
+    # click of the recording keeps the full span.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0, x=200, y=200), release(1.02, x=200, y=200)]
+    raws += [press(1.6, x=500, y=500), release(1.62, x=500, y=500)]
+    assert len(_clicks(drain(normalizer, raws))) == 2
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [
+        (1.0, 1.6),
+        (1.6, None),
+    ]
+
+
+def test_a_second_press_of_a_double_click_bounds_nothing(press, release, window):
+    # The second press merges into the first click, so it is not a next action
+    # and must not close the span: the double click's own effect may land after
+    # its second press.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0), release(1.02), press(1.1), release(1.12)]
+    (click,) = _clicks(drain(normalizer, raws))
+    assert click.count == 2
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, None)]
+
+
+def test_a_key_press_bounds_a_deferred_click_but_a_modifier_or_scroll_does_not(
+    press, release, key, window
+):
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0),
+        release(1.02),
+        RawEvent(kind="scroll", timestamp=1.3, x=200, y=200, dy=1),
+        key(1.5, "Control_L"),
+        key(1.9, "Down"),
+    ]
+    drain(normalizer, raws)
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.9)]
+
+
+def test_a_drag_bounds_the_deferred_click_before_it(press, release, window):
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0, x=200, y=200),
+        release(1.02, x=200, y=200),
+        press(2.0, x=300, y=300),
+        release(2.5, x=600, y=600),
+    ]
+    kinds = [type(e).__name__ for e in drain(normalizer, raws)]
+    assert kinds == ["Click", "Drag"]
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 2.0)]
+
+
+def test_a_focus_named_click_is_offered_to_the_pass_for_upgrade(press, release, window):
+    # The live path named the row from its focus effect, a few milliseconds
+    # before its selection effect was logged, so it does not know the row was
+    # selected (`selectable` None) and the generator would emit `.click()`.
+    # The pass is handed that element and may upgrade it.
+    focused = ElementRef(role="list item", name="Cherry", selectable=None)
+    upgraded = ElementRef(role="list item", name="Cherry", selectable=True)
+    resolver = _DeferringResolver(window, ref=upgraded, live=focused)
+    normalizer = Normalizer(resolver=resolver)
+    (click,) = _clicks(drain(normalizer, [press(1.0), release(1.02)]))
+    assert click.target.element.selectable is None
+    normalizer.attribute_pending_effects()
+    assert resolver.calls == [(1.0, None, focused)]
+    assert click.target.element.selectable is True
+
+
+def test_a_click_already_known_selectable_or_not_is_not_deferred(
+    press, release, window
+):
+    # The live path settled both: a selection effect named a selectable row,
+    # and a hit-tested push button is known not selectable. Neither needs a
+    # second look.
+    for live in (
+        ElementRef(role="list item", name="Cherry", selectable=True),
+        ElementRef(role="push button", name="Save", selectable=False),
+    ):
+        resolver = _DeferringResolver(window, ref=None, live=live)
+        normalizer = Normalizer(resolver=resolver)
+        drain(normalizer, [press(1.0), release(1.02)])
+        normalizer.attribute_pending_effects()
+        assert resolver.calls == []
+
+
 def test_pause_is_emitted_after_the_click_that_preceded_it(press, release):
     options = NormalizerOptions(pause_threshold=1.0)
     events = drain(

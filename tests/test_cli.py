@@ -957,6 +957,48 @@ def test_record_raw_with_a_trim_is_refused(saved, tmp_path, capsys):
     assert "record_raw" in err and "trim" in err
 
 
+def test_saving_a_recording_says_what_the_file_holds(tmp_path, window, capsys):
+    """A saved recording is sensitive whether or not --record-raw was given.
+
+    Redaction is applied by the generator, so the events in the file carry
+    the text that was typed even when the script withheld it -- and the
+    only thing said at the moment the file appeared was "Recording saved
+    to X". `_emit` directly, not `--regenerate`: that path passes
+    `save_session=False` and writes no session file at all.
+    """
+    from pyguitest_recorder import cli
+
+    recording = Recording()
+    recording.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
+    session_path = tmp_path / "session.json"
+    settings = Settings(
+        session_file=str(session_path), output=str(tmp_path / "script.py")
+    )
+    assert cli._emit(recording, settings) == 0
+    err = capsys.readouterr().err
+    assert "password file" in err
+    assert "script redaction does not cover" in err
+    # Not claimed unless it is true: no raw stream was asked for here.
+    assert "raw event stream" not in err
+
+
+def test_a_raw_recording_says_so_as_well(tmp_path, window, capsys):
+    from pyguitest_recorder import cli
+
+    recording = Recording(raw=[{"kind": "key_press", "keysym": "a", "text": "a"}])
+    recording.add(Click(timestamp=0.0, target=Target(x=10, y=20, window=window)))
+    session_path = tmp_path / "raw.json"
+    settings = Settings(
+        session_file=str(session_path),
+        output=str(tmp_path / "script.py"),
+        record_raw=True,
+    )
+    assert cli._emit(recording, settings) == 0
+    err = capsys.readouterr().err
+    assert "raw event stream" in err
+    assert "password file" in err
+
+
 def test_record_raw_with_a_drop_is_refused_too(saved, tmp_path, capsys):
     # --drop leaves the raw stream just as whole as --from/--to do.
     code = main(

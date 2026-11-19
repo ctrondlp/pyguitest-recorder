@@ -6,6 +6,52 @@ Working conventions for this repo, learned from the maintainer (Dennis K.
 Paulsden) over prior sessions. This is about *how* to work here, not *what
 the code does* — read the source and `docs/` for that.
 
+## Resolve the issue; a note about it is not a resolution
+
+**The default response to a defect is to fix its cause.** Not to describe
+it, not to route around it, not to pin it as a known gap. If you find
+yourself reaching for prose where a fix belongs, that is the signal to stop
+and go fix it.
+
+None of these count as resolving anything, and none should be the end state
+of a task: a paragraph in `CHANGELOG.md` or a docstring saying the thing is
+broken; a comment explaining the symptom, however well written; a retry
+loop, a widened timeout, a `sleep`, a second attempt "in case the first
+misses"; an `except` that turns a failure into a pass; a skipped or
+loosened test, or an assertion weakened to match what the code does today.
+
+**The shape this takes here, specifically: a generated script must never
+work around a `pyguitest` gap.** If replaying a recording needs something
+the library does not expose, the fix is in `pyguitest` — a new `Session`
+call, a new `Element` property — not a private helper emitted into the
+user's script. A helper in generated output is the workaround par
+excellence: it ships the gap to every reader of that file, and the next
+recording has to invent it again. Same for the capture backends: a backend
+that cannot see an event is a backend to fix, not an event to filter out.
+
+**Phrases to treat as alarms in your own output.** "Left open and
+characterised", "reported rather than changed", "recorded here rather than
+fixed", "awaits a future round", "out of scope for this change",
+"pre-existing, so not mine". When one appears, either fix the thing or ask.
+
+**Diagnose to the cause, not the symptom.** A measurement that says *what*
+fails is the start of the work, not the end: keep going until you can say
+*why*, then fix that. Two routes differing in one variable is usually the
+cheapest way there. A nondeterministic result is a race to find, not a
+flake to retry around — this repo's capture-clock epoch bug and its
+dead-zone regressions both looked like flakes first.
+
+**The only acceptable reasons to leave something unfixed**, and both end in
+asking rather than writing: the fix is the maintainer's call, because it
+changes a public contract, a recorded-script format, or something
+`pyguitest` owns; or you are genuinely blocked, because the platform is
+unreachable this session or the cause lives somewhere you do not control.
+Say which, and say what you established before you ran out of road.
+
+**Documentation's job is to record a resolved thing** — the measurement
+that proves the fix. A docs change whose subject is an *unfixed* defect
+needs the maintainer to have agreed to leave it unfixed first.
+
 ## Git workflow
 
 - **AI will never commit.** Never run `git commit` (or `git add` in
@@ -104,13 +150,18 @@ touches window/element resolution, title matching, or anything the resolver
 (`src/pyguitest_recorder/windows/resolver.py`) depends on may need a matching
 fix or floor bump here too — check before considering that side's work done.
 
-**`PROFILE` and the `pyproject.toml` floor move together.** The generator
-stamps a `PROFILE` constant (`generator/python.py`) naming the pyguitest it
-was checked against, and the `require_version(...)` the generator emits
-derives from it — so `PROFILE` and the floor are one value by design, bumped
-as a pair. Raising them is a four-file change, and all four are enforced:
-`test_generator.py` ties `PROFILE` to the installed pyguitest, and
-`test_docs.py` checks the `Profile: pyguitest-X.Y` sample-header lines and the
-floor string in `README.md`/`docs/` against the code. The `pyguitest-floor`
-CI job then installs that floor from PyPI, so recorder CI stays red until the
+**`PROFILE`, `FLOOR` and the `pyproject.toml` floor move together.** The
+generator stamps a `PROFILE` constant (`generator/python.py`) naming the
+pyguitest *minor line* it was checked against, and a `FLOOR` constant beside
+it naming the full release a generated script needs — the
+`require_version(...)` the generator emits derives from `FLOOR`, and `FLOOR`
+is the `pyproject.toml` pin. The two constants differ only when a *patch*
+release fixed something an emitted call gets wrong (0.26.1: macOS refused the
+emitted `Prior`/`Next` before it); `FLOOR` always lies on `PROFILE`'s line.
+Raising them is a five-file change, and all five are enforced:
+`test_generator.py` ties `PROFILE` to the installed pyguitest and `FLOOR` to
+`PROFILE`'s line, and `test_docs.py` holds `FLOOR` equal to the pyproject pin
+and checks the `Profile: pyguitest-X.Y` sample-header lines and the floor
+string in `README.md`/`docs/` against the code. The `pyguitest-floor` CI job
+then installs that floor from PyPI, so recorder CI stays red until the
 matching pyguitest release is published — release pyguitest first.

@@ -317,7 +317,16 @@ dependencies = [
     # changes nothing the resolver depended on -- it already caught that
     # exception broadly. The binding functional floor stays the 0.25.0
     # reasons above; PROFILE and this pin move together regardless.
-    "pyguitest>=0.26.0",
+    # 0.26.1 rather than 0.26.0 because this generator *emits* key names
+    # that older pyguitest refuses on one platform: `Prior` and `Next` for
+    # Page Up/Down, from both the evdev and win32 keysym tables. Those are
+    # fine on X11, uinput and Windows and were refused on macOS until
+    # 0.26.1 taught `macquartz` the X11 spellings -- so a script recorded
+    # on Linux and replayed on a Mac raised there and nowhere else, which
+    # is exactly the cross-platform trap this floor exists to prevent.
+    # PROFILE stays `pyguitest-0.26`: it names the minor line, and a patch
+    # floor does not move it.
+    "pyguitest>=0.26.1",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

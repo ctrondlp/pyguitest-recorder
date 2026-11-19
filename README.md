@@ -215,7 +215,7 @@ What comes out depends on what was under the pointer — a checkbox gives
 `expect_checked`, a label with something to say gives `expect_text`, anything
 else named gives `expect_showing`. These are pyguitest `Session` methods, so
 a generated script depends on nothing but the library it replays against:
-pyguitest 0.26.0 or newer, as the install section explains. They name what
+pyguitest 0.26.1 or newer, as the install section explains. They name what
 was wrong instead of raising a bare `AssertionError`, and each retries until
 the timeout it carries so a check cannot race a redraw. Full table in
 [docs/recipes.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/recipes.md#checks-what-makes-it-a-test).
@@ -274,7 +274,7 @@ On Fedora `python3-gobject python3-pyatspi at-spi2-core`; on Debian and Ubuntu
 [install guide](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md)
 carries the full table, including Arch, openSUSE and FreeBSD.
 
-**pyguitest 0.26.0 or newer is required outright** — the floor the generated
+**pyguitest 0.26.1 or newer is required outright** — the floor the generated
 code is verified against. Generated scripts call the `expect_` family as
 pyguitest `Session` methods, which do not exist before 0.9.0; double-click a
 named element with `Element.double_click`, which 0.10.0 added; once `motion`
@@ -311,7 +311,7 @@ resolve to a drop-down instead of the application's window.
 
 Every floor step between that and 0.25.0 is one of those same two kinds, and
 each is reasoned out where it was decided rather than retold here: the comment
-above `pyguitest>=0.26.0` in
+above `pyguitest>=0.26.1` in
 [pyproject.toml](https://github.com/ctrondlp/pyguitest-recorder/blob/main/pyproject.toml)
 gives the reason for each one, and
 [CHANGELOG.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/CHANGELOG.md)
@@ -330,7 +330,11 @@ process" case alone keeps the `CapabilityUnsupported` fast-fail -- a
 behavioural change `validate()` cannot catch, since the method is present on
 either side of it.
 
-0.26.0 is the release this output is verified against now, and a quiet step
+0.26.1 is the release this output is verified against now. The step to it
+is a small one with a specific reason: this generator emits `Prior` and
+`Next` for Page Up/Down, and pyguitest refused those two names on macOS
+until 0.26.1 while accepting them everywhere else, so a script recorded on
+Linux raised on a Mac and nowhere else. 0.26.0 before it was a quiet step
 rather than a load-bearing one: `close_window`, `maximize_window`/
 `is_window_maximized`, `drag_element`, and `expect_enabled`/
 `expect_disabled`/`expect_value` are new, and nothing generated here calls
@@ -401,7 +405,10 @@ came back, with windows and elements resolving for both halves of a click.
 What no live run has shown yet is a person's own keyboard — the tap skips the
 installing process's own events, so every check so far posted them from a
 separate process, and no real hardware key has been through it.
-`scripts/` has no macOS counterpart of the two live-check scripts above.
+`scripts/macos-live-capture-check.py` is the macOS counterpart of the two
+live-check scripts above — a real event tap over a real probe window, the
+whole pipeline run on what it captured, and the generated script replayed
+against a fresh window — and has passed that cycle live on macOS 15.
 
 The per-part verification table, and the known gaps — no UI yet, two
 recordings of a real desktop application (one on GhostBSD, one of Windows 11

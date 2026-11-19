@@ -15,7 +15,7 @@ held until something forces them out.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..backends.base import RawEvent
 from ..model import (
@@ -222,6 +222,24 @@ class _Pending:
 
 
 @dataclass
+class _Deferred:
+    """A click waiting for the post-capture effect pass, and its bounds.
+
+    `when` is the press's own monotonic stamp and `title` the window it landed
+    in -- the two keys the effect log is matched on. `until` is the press of
+    the *next* input action the recording holds, filled in when that action
+    arrives and left None for the last click of a recording: an effect that
+    fired after the user's next press is that press's reaction, not this
+    one's, however near the two are in time -- see `attribute_pending_effects`.
+    """
+
+    click: Click
+    when: float
+    title: str
+    until: float | None = None
+
+
+@dataclass
 class _Typed:
     """A run of printable characters not yet flushed."""
 
@@ -297,6 +315,13 @@ class Normalizer:
     _mods: set[str] = field(default_factory=set, init=False)
     _click: Click | None = field(default=None, init=False)
     _click_at: float = field(default=0.0, init=False)
+    _pending_effects: list[_Deferred] = field(default_factory=list, init=False)
+    """Clicks the post-capture `attribute_pending_effects` pass may still name
+    or upgrade: those the live effect path left on a coordinate, and those it
+    named from a focus effect without learning whether the widget was selected.
+    Each carries the press's own `monotonic` stamp, its window title, and --
+    once the next input action arrives -- the stamp that bounds its span. Only
+    populated on a resolver with the pass; inert without an effect log."""
     _clicked: Target | None = field(default=None, init=False)
     _last_input: float | None = field(default=None, init=False)
     _rest: _Rest | None = field(default=None, init=False)
@@ -525,6 +550,7 @@ class Normalizer:
         held = raw.timestamp - pending.timestamp
         travelled = _distance((pending.target.x, pending.target.y), (raw.x, raw.y))
         if travelled >= self.options.motion_threshold:
+            self._close_pending_effects(pending.timestamp)
             return [
                 *self._flush_click(),
                 Drag(
@@ -565,6 +591,9 @@ class Normalizer:
             self._click.count += 1
             self._click_at = raw.timestamp
             return []
+        # A new click, not the second press of a double: that one merges above
+        # and bounds nothing, since its effect is the merged click's own.
+        self._close_pending_effects(pending.timestamp)
         out = self._flush_click()
         self._click = Click(
             timestamp=self._at(raw),
@@ -573,7 +602,89 @@ class Normalizer:
             note=note,
         )
         self._click_at = raw.timestamp
+        self._defer_effect(self._click, pending.timestamp)
         return out
+
+    def _defer_effect(self, click: Click, when: float) -> None:
+        """Queue a click for post-capture effect naming, if it needs one.
+
+        Native Wayland cannot name a click by coordinate, so a selectable
+        control clicked there is named from the AT-SPI effect it fired -- but
+        that effect can arrive long after the press on a loaded session, too
+        late for the live resolver's bounded wait (see
+        `DesktopResolver.attribute_effect_final`). A click the live path left on
+        a coordinate *inside a known window* is exactly such a candidate; queue
+        it, with the press's own stamp and the window title to match on.
+
+        A click the live path *did* name, but from a focus effect alone
+        (`selectable` None), is queued as well. A row publishes its focus a
+        few milliseconds ahead of its selection, and the live path polls the
+        log every thirty, so a read that lands in that gap names the row
+        without learning it was selected -- and a named click that was never
+        revisited kept the `.click()` the generator falls back to where a
+        `.select()` belonged. The pass may only *upgrade* such a click, never
+        rename it. Skipped for a click already known selectable, for one in
+        no window, and for a resolver without the pass at all; a resolver that
+        has it but keeps no effect log (every session off native Wayland)
+        answers None for each queued click, so the pass is inert there and
+        the queue is only ever a list of references to clicks the recording
+        already holds.
+        """
+        if getattr(self.resolver, "attribute_effect_final", None) is None:
+            return
+        target = click.target
+        if target.window is None:
+            return
+        if target.element is not None and target.element.selectable is not None:
+            return
+        title = target.window.title
+        if title:
+            self._pending_effects.append(_Deferred(click, when, title))
+
+    def _close_pending_effects(self, at: float) -> None:
+        """Bound every open deferred click at the press of the next action.
+
+        An effect that fires after the user's next press is that press's
+        reaction, however near the two are: a plain button clicked at t and a
+        row clicked at t+0.6 whose selection lands at t+0.9 must leave the
+        button a button. Called for the press of a new click or drag and for
+        a non-modifier key -- the inputs that can select something -- and not
+        for a scroll, a lone modifier or the check chord, which cannot, so a
+        slow selection is not forfeited to an input that could not have been
+        its cause. The last click of a recording keeps the full span.
+        """
+        for deferred in self._pending_effects:
+            if deferred.until is None:
+                deferred.until = at
+
+    def attribute_pending_effects(self) -> None:
+        """Name the deferred Wayland clicks from the finished effect log.
+
+        Called once after capture ends, when every effect a click could have
+        caused is already logged. For each queued click, ask the resolver for
+        a selection effect in its window, inside the span that ends at the
+        next input action (`_close_pending_effects`); where one is found, a
+        coordinate click becomes the named, selectable element and a
+        focus-named click is upgraded to selectable, so the generator emits
+        `.select()` for either. A click with no matching selection is left
+        exactly as the live pass left it.
+        """
+        attribute = getattr(self.resolver, "attribute_effect_final", None)
+        if attribute is None:
+            self._pending_effects.clear()
+            return
+        for deferred in self._pending_effects:
+            element = deferred.click.target.element
+            if element is not None and element.selectable is not None:
+                continue
+            ref = attribute(
+                deferred.when, deferred.title, until=deferred.until, element=element
+            )
+            if ref is not None:
+                deferred.click.target = replace(
+                    deferred.click.target, element=ref, reason=None
+                )
+        self._pending_effects.clear()
 
     def _mergeable(self, raw: RawEvent, target: Target) -> bool:
         """Whether this click continues the buffered one."""
@@ -607,6 +718,9 @@ class Normalizer:
         if modifier is not None:
             self._mods.add(modifier)
             return []
+        # A key that does something -- text, a hotkey, an arrow -- can select a
+        # row as surely as a click; a lone modifier (above) cannot.
+        self._close_pending_effects(raw.timestamp)
         active = self._mods - _TEXT_SAFE
         # Shift and AltGr make text, so with a key that *has* text they are not
         # a command. With one that has none -- Left, Home, Tab, Return, F-keys --

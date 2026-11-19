@@ -586,6 +586,17 @@ class DesktopResolver:
     popup. Carried the same way, and for the same reason, as `_spending`; read
     by `_other_toplevel_of`, which must not treat a popup item as belonging to
     the wrong window."""
+    _click_pid: int | None = field(default=None, init=False)
+    """The process of the window the resolve in progress landed in, carried the
+    same way as `_spending` so `_live_at` can scope a native-Wayland
+    coordinate lookup to it. `element_at` is refused on pure Wayland unscoped,
+    but answers when scoped to one already-placed window's process -- the one
+    thing that makes a click nameable by coordinate there. None off Wayland and
+    where the window backend publishes no pid."""
+    _element_at_scopes: bool = field(default=False, init=False)
+    """Whether the session's `element_at` accepts a `pid` scope -- pyguitest
+    from the release that added it. Decided once, since the session does not
+    change under a resolver."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -594,6 +605,26 @@ class DesktopResolver:
         self._scaled = self._any_screen_scaled()
         self._bridge_disabled = False
         self._resolves_elements = self.elements and self._can_resolve_elements()
+        self._element_at_scopes = self._element_at_takes_pid()
+
+    def _element_at_takes_pid(self) -> bool:
+        """Whether `session.element_at` accepts the `pid` scope.
+
+        Older pyguitest has only the two-argument form, which refuses a pure
+        Wayland coordinate lookup outright -- so there the click falls to the
+        effect log exactly as before, no worse than it was. A probe, not a
+        version compare, because the signature is the thing actually depended
+        on. No session (a bare resolver, a test double) scopes nothing.
+        """
+        session = getattr(self, "session", None)
+        if session is None:
+            return False
+        try:
+            import inspect as _inspect
+
+            return "pid" in _inspect.signature(session.element_at).parameters
+        except Exception:  # noqa: BLE001 - an unintrospectable seam scopes nothing
+            return False
 
     def _on_windows(self) -> bool:
         """Whether this recording is of a native Windows desktop."""
@@ -925,6 +956,10 @@ class DesktopResolver:
         self._spending = spend
         self._from_popup = False
         window = self._window(x, y, screen)
+        # The window's process scopes a native-Wayland coordinate lookup (see
+        # `_live_at`); carried as state because `_element` is a replaceable,
+        # two-argument seam. None where the window backend publishes no pid.
+        self._click_pid = getattr(window, "pid", None) if window is not None else None
         element, reason = self._coordinate_element(x, y, window)
         if element is not None:
             return Target(x=x, y=y, screen=screen, window=window, element=element)
@@ -951,10 +986,28 @@ class DesktopResolver:
         return Target(x=x, y=y, screen=screen, window=window, reason=reason)
 
     _EFFECT_WINDOW = 0.6
-    """How long after a press an AT-SPI effect may fire and still be its effect."""
+    """How long after a press an AT-SPI effect may fire and still be its effect,
+    for the *live* fast path. Deliberately modest: `_effect_element_in` blocks
+    the capture consumer for up to this long on every click that fires no quick
+    effect (a push button), so it cannot be widened to chase a slow toolkit
+    without stalling recording. The slow case is caught after capture instead --
+    see `_EFFECT_WINDOW_FINAL` and `attribute_effect_final`."""
     _EFFECT_WAIT = 0.25
     """How long `_effect_element_in` waits for that effect, since resolution is
     live and the application may not have reacted to the press yet."""
+    _EFFECT_WINDOW_FINAL = 2.5
+    """How late a *selection* effect may fire and still be a click's, for the
+    post-capture pass (`attribute_effect_final`). Far wider than the live
+    window because by then the whole log is in hand and there is no consumer to
+    block, and it must cover a slow session: the press-to-selection latency on a
+    loaded native-Wayland KWin/Qt box was measured at 0.40s, 0.67s and 1.29s
+    across three runs -- variable and large enough that no bounded live wait
+    could catch it without stalling every button. Scoped to selection effects
+    only (see the method) so a late, unrelated focus does not become a wrong
+    attribution, and clipped at the user's next input action so a selection
+    the *next* click made is never handed back to this one; what remains is a
+    selection some agent other than the user's input made in the same window
+    inside the span, the residual risk the window length trades against."""
 
     def _effect_element_in(
         self, window: WindowRef | None, when: float | None
@@ -986,7 +1039,21 @@ class DesktopResolver:
         # `time.monotonic()` directly, not the module `_now` seam the tests
         # freeze for popup timing: this is a real-wall-clock wait for an effect
         # to arrive, and a frozen clock would spin it forever.
-        deadline = time.monotonic() + self._EFFECT_WAIT
+        #
+        # Wait until the later of a minimum settle and the end of the match
+        # window itself. `nearest` accepts an effect up to `when + _EFFECT_
+        # WINDOW`, so an effect that fires late *within* that window is still
+        # this press's -- and on a session where capture runs behind live
+        # input, resolution starts well after the press, so a fixed `now +
+        # _EFFECT_WAIT` can expire before the window does and drop a valid
+        # effect inside it. Aligning the wait to the window the match already
+        # honours fixes that; a responsive effect still exits the loop the
+        # instant it lands, so only a press that fires no quick effect waits the
+        # full span. An effect slower than this live window (a loaded Wayland
+        # session can take over a second) is not chased here -- that would stall
+        # every button click -- but caught after capture by
+        # `attribute_effect_final`.
+        deadline = max(time.monotonic() + self._EFFECT_WAIT, when + self._EFFECT_WINDOW)
         while True:
             effect = self.effects.nearest(
                 after=when, within=self._EFFECT_WINDOW, toplevel=title
@@ -1011,6 +1078,70 @@ class DesktopResolver:
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.03)
+
+    def attribute_effect_final(
+        self,
+        when: float,
+        title: str,
+        *,
+        until: float | None = None,
+        element: ElementRef | None = None,
+    ) -> ElementRef | None:
+        """Name a click from the *complete* effect log, after capture.
+
+        The post-capture counterpart of `_effect_element_in`. Called once per
+        click the live fast path left on a coordinate, or named from a focus
+        effect without learning whether it was selected, when the whole
+        recording -- and so the whole effect log -- is in hand, which removes
+        the two constraints the live path labours under. There is no consumer
+        thread to block, so the match window is `_EFFECT_WINDOW_FINAL` rather
+        than the modest live one, wide enough for a selection effect a loaded
+        Wayland toolkit published a second or more after the press. And there
+        is nothing to wait for: every effect the press could have caused was
+        captured before the recording ended, so this reads the log as it
+        stands.
+
+        `until` is the press of the user's next input action, where the
+        recording holds one; the window is clipped to it, since an effect
+        that fired after the next press is that press's reaction and a span
+        as wide as this one would otherwise reach the selection a *later*
+        click made and hand it to an earlier click on a plain button. None
+        -- the last click of a recording -- keeps the full span.
+
+        Scoped to *selection* effects on purpose. A click that only ever took
+        focus (a push button) must stay a coordinate, not borrow some later,
+        unrelated focus in the same window that a window this wide would reach;
+        so only a `selectable` match -- the select-role target this exists for
+        -- is returned, and a non-selection effect leaves the click as it was.
+        `nearest` already folds a widget's selection onto its earlier focus
+        effect, so a list-item click whose focus led its selection resolves
+        selectable here too.
+
+        With `element` -- the ref the live path named from a focus effect
+        alone -- the pass may only *upgrade*, never rename: the selection has
+        to belong to that same widget (name and role, the identity `nearest`
+        folds on) for the ref to come back marked selectable, and anything
+        else leaves the click as the live path named it. The live path read
+        the log in the few milliseconds between a row's focus effect and its
+        selection effect; this is the second look that gap denied it.
+        """
+        if self.effects is None or not title:
+            return None
+        within = self._EFFECT_WINDOW_FINAL
+        if until is not None:
+            within = min(within, until - when)
+            if within < 0:
+                return None
+        effect = self.effects.nearest(after=when, within=within, toplevel=title)
+        if effect is None or not effect.selectable:
+            return None
+        if element is not None:
+            if effect.name != element.name or effect.role != element.role:
+                return None
+            return replace(element, selectable=True)
+        return ElementRef(
+            role=effect.role, name=effect.name, pid=effect.pid, selectable=True
+        )
 
     def _coordinate_element(
         self, x: int, y: int, window: WindowRef | None
@@ -2142,7 +2273,19 @@ class DesktopResolver:
         popup = self._popup_at(x, y, spend=spend)
         if not isinstance(popup, _NoPopup):
             return popup
-        element = self.session.element_at(x, y)
+        # On native Wayland, name the coordinate by scoping `element_at` to the
+        # clicked window's process: the unscoped call is refused there (a client
+        # is never told its screen position), but a scoped one answers through
+        # the window backend that placed the window -- the GNOME Shell
+        # extension's geometry on Mutter. A window backend that publishes no pid
+        # (COSMIC's toplevel protocol, kdotool on KWin) leaves `_click_pid`
+        # None, and the click falls to the effect log as before. Off Wayland,
+        # or with no pid or no scope support, the ordinary unscoped call,
+        # unchanged.
+        if self.wayland and self._element_at_scopes and self._click_pid is not None:
+            element = self.session.element_at(x, y, pid=self._click_pid)
+        else:
+            element = self.session.element_at(x, y)
         if element is None:
             return None
         if self._on_windows():

@@ -26,7 +26,7 @@ import contextlib
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 __all__ = ["AtspiEffect", "AtspiEffectLog"]
@@ -182,7 +182,26 @@ class AtspiEffectLog:
                 and e.toplevel == toplevel
                 and e.role not in _WINDOW_ROLES
             ]
-        return min(candidates, key=lambda e: e.at) if candidates else None
+        if not candidates:
+            return None
+        earliest = min(candidates, key=lambda e: e.at)
+        # A click on a selectable row publishes two near-simultaneous effects
+        # on the *same* widget: it takes focus (`selectable=False`) and it
+        # becomes selected (`selectable=True`), in that order -- measured on
+        # KWin/Qt, a list item's focus effect led its selection effect by a few
+        # milliseconds. Earliest-wins alone would name the row from the focus
+        # effect and lose that it was *selected*, so the generator would emit a
+        # `.click()` where a `.select()` belongs. So keep earliest for identity
+        # but, when that same widget also produced a selection effect inside the
+        # window, carry the selection: same source, and selection is the
+        # meaningful half of the reaction. A press that only ever took focus
+        # (a push button) keeps `selectable=False` and stays a click.
+        if not earliest.selectable and any(
+            e.selectable and e.name == earliest.name and e.role == earliest.role
+            for e in candidates
+        ):
+            return replace(earliest, selectable=True)
+        return earliest
 
     # -- listener thread ----------------------------------------------------
     def _run(self) -> None:
@@ -269,20 +288,38 @@ class AtspiEffectLog:
 
     @staticmethod
     def _toplevel_name(src: Any) -> str:
-        """The name of the nearest window-role ancestor, or ''.
+        """The name of the window this accessible belongs to, or ''.
+
+        Two shapes of tree, because one bridge does not label its toplevel a
+        window. The usual one -- `frame`/`window`/`dialog` (etc.) ancestor --
+        is matched directly. The other was measured on the Qt AT-SPI bridge
+        under KWin/Wayland: the toplevel that carries the window title is
+        published as a **`filler`**, not a `frame`, so the window-role check
+        never fires and the title sits one level below `application`
+        (desktop frame -> application -> **toplevel** -> widgets). Keying on
+        the tree's *shape* -- the accessible whose parent is the
+        `application` -- finds the title whatever role the bridge gave it,
+        and is the same node a normal `frame` would be, so a window-role tree
+        still resolves identically.
 
         Bounded: a cycle or a pathological tree must not hang the listener.
         """
         node = src
+        prev = None
         for _ in range(24):
             try:
                 role = node.get_role_name()
                 if role in _WINDOW_ROLES:
                     return node.get_name() or ""
+                # The toplevel is the application's direct child; return it
+                # even when the bridge did not give it a window role.
+                if role == "application" and prev is not None:
+                    return prev.get_name() or ""
                 parent = node.get_parent()
             except Exception:  # noqa: BLE001
                 return ""
             if parent is None:
                 return ""
+            prev = node
             node = parent
         return ""

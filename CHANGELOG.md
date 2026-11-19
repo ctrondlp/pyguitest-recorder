@@ -3,7 +3,108 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
-## [Unreleased]
+## [0.20.1] — 2026-11-17
+
+### Fixed
+
+- **A native-Wayland click on GNOME is named by its element, not left on a
+  coordinate.** Two faults kept the extension's help off the table. The
+  compositor window tier was asked for as `windows`, pyguitest's socket/CLI
+  group, which does not cover Mutter — whose tier is the GNOME Shell
+  extension, a backend named in its own right — so on GNOME the context
+  session fell back to one half or the other and lost the window geometry that
+  places AT-SPI's window-relative rectangles; the recorder now names
+  `gnomeshell` directly there. And even with that geometry wired, the
+  coordinate→element lookup was refused on Wayland; it is now scoped to the
+  clicked window's process (pyguitest's new `element_at(pid=…)`), which is what
+  lets it answer. A GNOME recording now generates `gui.button("Add").click()`,
+  `.select()` for a list row or tab, and a named `set_text` — the same script
+  an X11 recording of the same session produces, where before every line was a
+  bare coordinate. Compositors whose window backend publishes no pid (KWin's
+  kdotool, COSMIC's toplevel-info) keep naming selections through the effect
+  log as before.
+
+- **A native-Wayland selection is attributed to its click again, through the
+  whole pipeline.** 0.20.0 fixed the *generator* to emit `.select()` for a
+  selectable control, but a live KWin/Qt recording never reached it: three
+  faults in the AT-SPI effect fusion. The window-title walk returned `''`
+  because KWin publishes the title-bearing toplevel as `filler`, not `frame`,
+  so every effect carried an empty toplevel and matched no click; `nearest`
+  returned the *earliest* effect, which is the focus one (not selectable), so
+  a matched row still came out a `.click()`; and the live fuse waits for the
+  effect during capture, but the press-to-selection-effect latency on a loaded
+  Wayland session is large and variable (measured 0.4-1.3s) -- too long for any
+  bounded wait that must not stall every button click. Resolved by keeping the
+  live wait modest and adding a **post-capture attribution pass**
+  (`attribute_effect_final`, run once from `Recorder.run` when the whole effect
+  log is in hand), scoped to selection effects so a late unrelated focus is not
+  borrowed. Live-validated on KDE Plasma 6 / KWin: a recorded list-item click
+  now generates `gui.element(role=Role.LIST_ITEM, name=...).select()`.
+
+- **The post-capture attribution pass stops at the next input action, and
+  can upgrade a click the live path named from a focus effect.** Two holes
+  in the pass above, found in review. Its match window is wide on purpose
+  (2.5s, to cover a slow session), but it had no other bound: a plain button
+  clicked at *t* and a row clicked at *t*+0.6 whose selection landed at
+  *t*+0.9 handed the row's selection to the *button* click, which came out
+  a `.select()` on the row -- a wrong line that validates clean. Each
+  deferred click now closes at the press of the next click, drag or
+  non-modifier key (a scroll, a lone modifier or the check chord cannot
+  select anything, so they do not close it; the second press of a double
+  click merges into the first and does not either), and the last click of
+  a recording keeps the full span. And a click the live path *had* named
+  -- from a row's focus effect, read in the few milliseconds before its
+  selection effect was logged -- was skipped by the pass because it already
+  had an element, so it kept the `.click()` the generator falls back to
+  where `.select()` belonged; such a click is now offered to the pass too,
+  which may only mark it selectable when the selection is that same
+  widget's (name and role), never rename it.
+
+### Changed
+
+- **The pyguitest floor is now 0.26.1, and the `require_version(...)` a
+  generated script opens with names it.** This generator emits `Prior` and
+  `Next` for Page Up/Down -- from both the evdev and win32 keysym tables --
+  and pyguitest refused those two names on macOS until 0.26.1, while
+  accepting them on X11, uinput and Windows. So a script recorded on Linux
+  or Windows that contained a Page Up raised on a Mac and nowhere else.
+  Nothing in the generator's output changes but the opener: it derived its
+  version from `PROFILE`, which names the *minor line* the output was
+  checked against, so `--require-version` wrote `"0.26"` -- a floor that a
+  0.26.0 install on a Mac passed, and then refused the first page key, the
+  very failure the opener exists to catch at the first line. A new `FLOOR`
+  constant beside `PROFILE` carries the full release; the opener derives
+  from it, and the test suite holds it equal to the `pyproject.toml` pin
+  and on `PROFILE`'s line. The floor is what makes the emitted script's own
+  vocabulary portable, which is what this pin is for.
+- **Saving a recording now says what the file holds.** The only thing said
+  at the moment the artefact appeared was `Recording saved to X`, and a
+  saved recording is sensitive whether or not `--record-raw` was given:
+  redaction is applied by the *generator*, so the events in the file carry
+  the text that was typed even when the script withheld it. `--record-raw`
+  adds the raw stream on top -- the keystrokes as captured, before
+  anything looked at them -- and is now named in the notice when it was
+  used, and not when it was not. Worded as what the file holds rather than
+  as "wrote a password", for the same reason `--no-redact`'s warning is:
+  the case that matters most is a password field the accessibility tree
+  never published as one, and nothing here knows that happened. Said at
+  write time, with the file's mode where the platform has one, matching
+  the shape `--no-redact` already used.
+
+### Added
+
+- **`scripts/macos-live-capture-check.py`, the macOS counterpart of the
+  X11 and Win32 live-capture checks.** Linux and Windows each had a script
+  that records real input through the real capture backend and runs the
+  whole pipeline over what came back; macOS had only a *settings* check.
+  This one drives `macos_probe_window.py` through a real `CGEventTap` --
+  typed text, a click, a toggle, a radio selection -- then generates,
+  validates, round-trips and replays the result against a fresh window and
+  reads the controls back. Run live on a Sequoia Mac: every one of the four
+  effects landed on replay, the recorder's first record-and-replay
+  demonstration on macOS. It touches the desktop you are at and needs a
+  logged-in Aqua session with the Accessibility grant, like the Win32 one
+  needs an interactive session.
 
 ## [0.20.0] — 2026-11-13
 
