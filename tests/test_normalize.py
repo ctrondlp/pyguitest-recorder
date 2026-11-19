@@ -457,6 +457,106 @@ def test_a_focus_named_click_is_offered_to_the_pass_for_upgrade(press, release, 
     assert click.target.element.selectable is True
 
 
+def test_two_overlapping_buttons_are_bounded_in_press_order(press, release, window):
+    # Left down at 1.0, right down at 1.2, right released first. The right
+    # click is queued first, and the left one's release then bounded it at
+    # 1.0 -- an empty span, which cost it the selection it really caused --
+    # while the left click, bounded by nothing, kept a span wide enough to
+    # take that selection for itself. Each press bounds the button already
+    # held, and a bound before a click's own press leaves it waiting.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [
+        press(1.0, button=1),
+        press(1.2, x=500, y=500, button=3),
+        release(1.3, x=500, y=500, button=3),
+        release(1.5, button=1),
+    ]
+    drain(normalizer, raws)
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.2)]
+    normalizer.attribute_pending_effects()
+    assert [(when, until) for when, until, _ in resolver.calls] == [
+        (1.0, 1.2),
+        (1.2, None),
+    ]
+
+
+class _UnprovenSelectionResolver(_DeferringResolver):
+    """A resolver whose live name is selectable on evidence the bound rejects.
+
+    `effect_attribution_stands` keeps the name -- the widget's own focus
+    effect fired inside the span -- while `effect_selection_stands` rejects
+    the selection that marked it selectable, which is what a row focused by
+    a click and selected by the *next* key looks like.
+    """
+
+    def effect_attribution_stands(self, when, until):
+        return True
+
+    def effect_selection_stands(self, when, until):
+        return False
+
+
+def test_a_selection_the_bound_disproves_leaves_the_widget_a_plain_click(
+    press, release, key, window
+):
+    # The click focused the row; the Down key that followed selected it. The
+    # fold that carries a widget's selection onto its own earlier focus
+    # effect marked the live name selectable, and a name already selectable
+    # is one the pass skips -- so the click came out `.select()`ed on the
+    # strength of the key's reaction. The widget is still the one this press
+    # reached, so it keeps it; only the claim that it was selected goes, and
+    # the bounded lookup is then free to prove it inside the span.
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+    resolver = _UnprovenSelectionResolver(window, ref=None, live=row)
+    normalizer = Normalizer(resolver=resolver)
+    (click,) = _clicks(drain(normalizer, [press(1.0), release(1.02), key(1.3, "Down")]))
+    assert click.target.element is not None
+    assert (click.target.element.name, click.target.element.role) == (
+        "Cherry",
+        "list item",
+    )
+    assert click.target.element.selectable is None
+    assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 1.3)]
+
+
+def test_a_revoked_click_name_is_dropped_from_the_typing_fallback(
+    press, release, key, window
+):
+    # The last clicked text field is what names a run of typing on a desktop
+    # that publishes no per-widget focus. The live pass named this click as
+    # an entry; the bound then disproved that name -- and the fallback still
+    # held the old target, so the typing that started in the very same event
+    # was attributed to the field the settle had just rejected. Corrected
+    # with the click, the run falls back to the pointer instead.
+    entry = ElementRef(role="text", name="Filename", selectable=None)
+
+    class _NoFocus(_RevokingResolver):
+        """A desktop that publishes no per-widget focus -- GNOME Shell's.
+
+        The live name is the click's own point only, so the pointer question
+        a corrected fallback falls through to answers with no element, the
+        way a native-Wayland hit test does.
+        """
+
+        def focused(self):
+            return None
+
+        def resolve(self, x, y, screen=0, when=None):
+            here = self.live if (x, y) == (200, 200) else None
+            return Target(x=x, y=y, screen=screen, window=self.window, element=here)
+
+    resolver = _NoFocus(window, ref=None, live=entry, disowned={1.0})
+    normalizer = Normalizer(resolver=resolver)
+    events = drain(normalizer, [press(1.0), release(1.02), key(1.3, "a", text="a")])
+    events += normalizer.flush()
+    (click,) = _clicks(events)
+    assert click.target.element is None
+    (typed,) = [e for e in events if isinstance(e, TextInput)]
+    assert typed.target.element is None
+    assert (typed.target.x, typed.target.y) == (0, 0)
+
+
 def test_a_click_already_known_selectable_or_not_is_not_deferred(
     press, release, window
 ):

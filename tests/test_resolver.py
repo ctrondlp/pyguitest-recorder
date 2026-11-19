@@ -8,6 +8,7 @@ window never being the answer.
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -1408,16 +1409,25 @@ def test_wayland_pidless_title_match_needs_a_stable_title():
 
 
 class FakeEffectLog:
-    """Stands in for AtspiEffectLog: answers `nearest` from a fixed list."""
+    """Stands in for AtspiEffectLog over a fixed list of effects.
+
+    `nearest` is the *real* one, called on a log whose ring holds the
+    effects a test handed in: the matching rules -- earliest wins, the
+    exclusive `before` bound, the fold that carries a widget's selection
+    onto its own earlier focus effect -- are what the resolver's behaviour
+    turns on, and a reimplementation here would be a second, diverging copy
+    of them. Nothing is started, so no AT-SPI listener exists.
+    """
 
     def __init__(self, effects=()):
-        self.effects = list(effects)
+        from pyguitest_recorder.windows.atspi_effects import AtspiEffectLog
 
-    def nearest(self, after, within, toplevel):
-        for eff in self.effects:
-            if after <= eff.at <= after + within and eff.toplevel == toplevel:
-                return eff
-        return None
+        self.effects = list(effects)
+        self._log = AtspiEffectLog()
+        self._log._effects.extend(self.effects)
+
+    def nearest(self, after, within, toplevel, before=None):
+        return self._log.nearest(after, within, toplevel, before)
 
 
 def _effect(name, role, at, toplevel="Target", selectable=False):
@@ -1475,7 +1485,7 @@ def test_wayland_effect_arriving_late_but_within_the_window_is_caught():
         def __init__(self):
             self.calls = 0
 
-        def nearest(self, after, within, toplevel):
+        def nearest(self, after, within, toplevel, before=None):
             self.calls += 1
             if self.calls < 3:  # the effect "arrives" only after a few polls
                 return None
@@ -1647,6 +1657,97 @@ def test_effect_attribution_question_is_answered_once_per_press():
     r.resolve(640, 400, when=1000.4)
     assert r.effect_attribution_stands(1000.4, until=1000.8) is True
     assert r.effect_attribution_stands(1000.4, until=1000.5) is True
+
+
+def test_a_press_stamped_in_another_clock_domain_does_not_hold_the_consumer():
+    # The live wait runs to the end of the match window, which is an
+    # absolute stamp: `when + _EFFECT_WINDOW`. A press stamp from another
+    # clock -- a backend whose rebasing onto `monotonic` broke, a caller
+    # passing wall-clock seconds -- put that end as far in the future as the
+    # two clocks differ, and the consumer thread sat there for the
+    # difference (minutes on a freshly booted machine, where `monotonic` is
+    # still small and a wall-clock stamp is not). Capped at one window from
+    # now, the press simply finds no effect and keeps its coordinates.
+    r = _wayland_effect_resolver(FakeEffectLog([]))
+    r._EFFECT_WINDOW = 0.05
+    started = time.monotonic()
+    assert r.resolve(640, 400, when=time.monotonic() + 5_000).element is None
+    assert time.monotonic() - started < 2
+
+
+def test_a_folded_selection_past_the_bound_falls_while_the_focus_name_stands():
+    # The row took focus at 1000.5, inside the click's span, and was selected
+    # at 1000.75 -- after the Down key at 1000.7 that actually selected it.
+    # `nearest` folds the selection onto the focus effect, so the live name
+    # came back selectable and the post-capture pass skipped it: the click was
+    # rendered `.select()`ed on the strength of the key's reaction. The two
+    # halves answer to the bound separately now -- the widget is this press's,
+    # the selection is the key's.
+    r = _wayland_effect_resolver(
+        FakeEffectLog(
+            [
+                _effect("Cherry", "list item", 1000.5),
+                _effect("Cherry", "list item", 1000.75, selectable=True),
+            ]
+        )
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.selectable is True
+    assert r.effect_attribution_stands(1000.4, until=1000.7) is True
+    assert r.effect_selection_stands(1000.4, until=1000.7) is False
+
+
+def test_a_folded_selection_inside_the_bound_stands():
+    # The same two effects with the next input at 1000.9: both halves are
+    # inside the span, and the click really did select the row.
+    r = _wayland_effect_resolver(
+        FakeEffectLog(
+            [
+                _effect("Cherry", "list item", 1000.5),
+                _effect("Cherry", "list item", 1000.75, selectable=True),
+            ]
+        )
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.9) is True
+    assert r.effect_selection_stands(1000.4, until=1000.9) is True
+
+
+def test_the_selection_question_is_answered_once_and_apart_from_the_other():
+    # Two records, consumed independently: a normalizer that asks in either
+    # order gets the same answers, and a second ask about the same press has
+    # nothing left to disprove.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.5, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_selection_stands(1000.4, until=1000.45) is False
+    assert r.effect_selection_stands(1000.4, until=1000.45) is True
+    assert r.effect_attribution_stands(1000.4, until=1000.45) is False
+
+
+def test_a_press_named_from_a_focus_effect_has_no_selection_to_disprove():
+    # A push button that only ever took focus: the live name is not
+    # selectable, so there is no selection record and nothing to reject.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Save", "push button", 1000.5)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.selectable is None
+    assert r.effect_selection_stands(1000.4, until=1000.45) is True
+
+
+def test_the_final_lookup_excludes_an_effect_at_the_next_input_itself():
+    # The live gate drops a name whose effect fired *at* the next input --
+    # strictly, `at < until`. The retry clipped its window to `until` and rode
+    # on `nearest`'s inclusive end, so that same effect came back and restored
+    # the name the gate had just removed.
+    log = FakeEffectLog([_effect("Cherry", "list item", 1000.7, selectable=True)])
+    r = _wayland_effect_resolver(log)
+    assert r.attribute_effect_final(when=1000.0, title="Target", until=1000.7) is None
+    assert (
+        r.attribute_effect_final(when=1000.0, title="Target", until=1000.75) is not None
+    )
 
 
 def test_effect_attribution_stands_for_a_press_not_named_from_an_effect():

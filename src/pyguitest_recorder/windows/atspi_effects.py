@@ -81,6 +81,17 @@ class AtspiEffect:
     False for the focus and press effects in `_EVENTS`, which say nothing about
     selectability; the default keeps older constructors (the tests') working."""
 
+    selected_at: float | None = None
+    """When the selection this effect's `selectable` came from fired, where
+    that was a *different*, later effect on the same widget -- `nearest`'s
+    fold, which carries a row's selection onto its earlier focus effect. None
+    where the effect is its own evidence (a selection effect, or none at all).
+
+    Kept because the two halves answer to different bounds: the focus effect
+    is this press's by its own stamp, while a selection that fired after the
+    user's next input belongs to that input. Only the resolver's
+    `effect_selection_stands` reads it."""
+
 
 class AtspiEffectLog:
     """Collect AT-SPI effects on a private event loop; query by time + window."""
@@ -174,7 +185,13 @@ class AtspiEffectLog:
                 listener.deregister(event_type)
         self._listeners.clear()
 
-    def nearest(self, after: float, within: float, toplevel: str) -> AtspiEffect | None:
+    def nearest(
+        self,
+        after: float,
+        within: float,
+        toplevel: str,
+        before: float | None = None,
+    ) -> AtspiEffect | None:
         """The earliest effect in [after, after+within] from window `toplevel`.
 
         Inclusive at both ends: an effect stamped in the press's own instant
@@ -182,12 +199,21 @@ class AtspiEffectLog:
         react to a press is what the press did; later effects are its
         consequences. `toplevel` ties it to the clicked window by the window's
         own title, since the window backend may publish no pid to match on.
+
+        `before` is an *exclusive* upper bound on top of the window -- the
+        user's next input, for a caller that knows it. Exclusive because an
+        effect stamped exactly at the next press is that press's reaction by
+        the rule the whole attribution runs on, and the live gate
+        (`effect_attribution_stands`) applies it strictly; expressed as a
+        narrower `within`, the inclusive end above would have admitted that
+        one effect and handed back the name the gate had just removed.
         """
         with self._lock:
             candidates = [
                 e
                 for e in self._effects
                 if after <= e.at <= after + within
+                and (before is None or e.at < before)
                 and e.name
                 and e.toplevel == toplevel
                 and e.role not in _WINDOW_ROLES
@@ -206,11 +232,17 @@ class AtspiEffectLog:
         # window, carry the selection: same source, and selection is the
         # meaningful half of the reaction. A press that only ever took focus
         # (a push button) keeps `selectable=False` and stays a click.
-        if not earliest.selectable and any(
-            e.selectable and e.name == earliest.name and e.role == earliest.role
+        # The selection's own stamp is carried with it: the fold is the one
+        # place where `selectable` comes from a *later* effect than the one
+        # being returned, and a caller holding this against the user's next
+        # input has to be able to tell the two apart.
+        selections = [
+            e.at
             for e in candidates
-        ):
-            return replace(earliest, selectable=True)
+            if e.selectable and e.name == earliest.name and e.role == earliest.role
+        ]
+        if not earliest.selectable and selections:
+            return replace(earliest, selectable=True, selected_at=min(selections))
         return earliest
 
     # -- listener thread ----------------------------------------------------

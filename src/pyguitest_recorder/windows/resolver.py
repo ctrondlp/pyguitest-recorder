@@ -606,6 +606,18 @@ class DesktopResolver:
     outlasted the gap between the two. Kept so `effect_attribution_stands`
     can answer once the next press is known; an entry is consumed by that
     question, so this holds only the presses still awaiting their bound."""
+    _effect_selected: dict[float, float] = field(default_factory=dict, init=False)
+    """Press stamp -> stamp of the *selection* the live name was marked
+    selectable by, where one was found.
+
+    The other half of the record above, and a different question: `nearest`
+    folds a widget's selection onto its own earlier focus effect, so a name
+    can be this press's by the focus effect's stamp while the selection it
+    was marked selectable by fired later -- after the user's next input,
+    which makes that selection the next input's. Kept apart so
+    `effect_selection_stands` can drop the claim of selection without
+    costing the press the widget it really did focus. Consumed by that
+    question, like the one above and independently of it."""
 
     def __post_init__(self) -> None:
         """Add this process and its terminal to the ignore set."""
@@ -1062,7 +1074,21 @@ class DesktopResolver:
         # session can take over a second) is not chased here -- that would stall
         # every button click -- but caught after capture by
         # `attribute_effect_final`.
-        deadline = max(time.monotonic() + self._EFFECT_WAIT, when + self._EFFECT_WINDOW)
+        # Capped at one window from now, whatever `when` says. The term
+        # above is an *absolute* stamp on the shared monotonic clock, so a
+        # press stamp from some other clock domain -- a capture backend
+        # whose rebasing broke, a caller passing a wall-clock time -- can
+        # sit arbitrarily far in the future, and the wait then lasts the
+        # difference between the two clocks rather than the length of a
+        # window. No legitimate wait is longer than `_EFFECT_WINDOW` from
+        # now (resolution cannot start before the press), and this is what
+        # makes the docstring's claim true: a stamp in the wrong domain
+        # finds no effect and degrades to a coordinate, promptly.
+        now = time.monotonic()
+        deadline = min(
+            max(now + self._EFFECT_WAIT, when + self._EFFECT_WINDOW),
+            now + self._EFFECT_WINDOW,
+        )
         while True:
             effect = self.effects.nearest(
                 after=when, within=self._EFFECT_WINDOW, toplevel=title
@@ -1079,6 +1105,16 @@ class DesktopResolver:
                 # effect log records no ancestry to scope by, only the toplevel
                 # title it was already matched on.
                 self._effect_named[when] = effect.at
+                if effect.selectable:
+                    # Where `nearest` folded a later selection onto an
+                    # earlier focus effect, the selection's own stamp is
+                    # what the bound has to be applied to; a selection
+                    # effect returned as itself is its own evidence.
+                    self._effect_selected[when] = (
+                        effect.selected_at
+                        if effect.selected_at is not None
+                        else effect.at
+                    )
                 return ElementRef(
                     role=effect.role,
                     name=effect.name,
@@ -1117,6 +1153,34 @@ class DesktopResolver:
             return True
         return at < until
 
+    def effect_selection_stands(self, when: float, until: float | None) -> bool:
+        """Whether the live name's *selection* evidence survives its bound.
+
+        The companion to `effect_attribution_stands`, for the half of a live
+        name that can belong to a different action than the rest of it.
+        `nearest` folds a widget's selection onto its own earlier focus
+        effect -- measured on KWin/Qt, a list item's focus leads its
+        selection by a few milliseconds -- so a press can be named from an
+        effect that is unambiguously its own while the selection that marked
+        the name `selectable` fired after the user's next input. That
+        selection is then the next input's: a row clicked at t taking focus,
+        and a Down key at t+0.1 selecting it, left the click rendered as
+        `.select()` on the row, and nothing revisited it, because a name
+        already marked selectable is one the post-capture pass skips.
+
+        False says only that: keep the widget, drop the claim it was
+        selected. The caller then has the bounded lookup
+        (`attribute_effect_final`) prove the selection inside the span or
+        leave the press a plain click on a widget it really did focus --
+        which is better than the coordinate that dropping the whole name
+        would leave. True for a press with no selection evidence to
+        disprove, and for the last press of a recording, which has no bound.
+        """
+        at = self._effect_selected.pop(when, None)
+        if at is None or until is None:
+            return True
+        return at < until
+
     def attribute_effect_final(
         self,
         when: float,
@@ -1144,7 +1208,11 @@ class DesktopResolver:
         that fired after the next press is that press's reaction and a span
         as wide as this one would otherwise reach the selection a *later*
         click made and hand it to an earlier click on a plain button. None
-        -- the last click of a recording -- keeps the full span.
+        -- the last click of a recording -- keeps the full span. Clipped
+        *exclusively*, the way the live gate applies the same rule: as a
+        narrower `within` it rode on `nearest`'s inclusive end, so an effect
+        stamped exactly at the next press was admitted here and handed back
+        the very name the gate had removed for being that press's.
 
         Scoped to *selection* effects on purpose. A click that only ever took
         focus (a push button) must stay a coordinate, not borrow some later,
@@ -1165,12 +1233,12 @@ class DesktopResolver:
         """
         if self.effects is None or not title:
             return None
-        within = self._EFFECT_WINDOW_FINAL
-        if until is not None:
-            within = min(within, until - when)
-            if within < 0:
-                return None
-        effect = self.effects.nearest(after=when, within=within, toplevel=title)
+        effect = self.effects.nearest(
+            after=when,
+            within=self._EFFECT_WINDOW_FINAL,
+            toplevel=title,
+            before=until,
+        )
         if effect is None or not effect.selectable:
             return None
         if element is not None:

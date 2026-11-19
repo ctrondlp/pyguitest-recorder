@@ -96,7 +96,68 @@ was released.
   not stop on the two-Escape chord, the 90-second watchdog stopped it and
   the run then passed on the recording it had — hiding exactly the
   stop-chord failure a live check exists to catch; it is now reported and
-  fails the run.
+  fails the run. The chord's success is read from capture's own
+  recognition rather than from the watchdog having stayed quiet: a Ctrl-C
+  during the run gives `Recorder.run()` a complete recording rather than an
+  exception, so the watchdog never fires, and the check printed "the
+  recorder stopped on the two Escapes" about a chord nothing had seen --
+  and could still answer OK. A run that ended any other way is now named
+  and fails as a capture problem.
+
+- **A click's effect span is bounded in press order, even with two buttons
+  held at once.** The bound comes from the next click's press, read at its
+  release, which assumes releases arrive in the order the presses did.
+  Press left at 10.0, press right at 10.2 and lift the right one first and
+  they do not: the right click was queued first, then bounded at 10.0 by
+  the left one's release -- an empty span, which cost it the selection it
+  had really caused -- while the left click, bounded by nothing, kept a
+  span wide enough to take that selection for itself. A button going down
+  now bounds any button already held, the way a key press does, and a
+  bound that predates a queued click's own press leaves it waiting for the
+  action that really follows it.
+
+- **A selection the bound disproves no longer costs a click the widget it
+  did reach.** The effect log folds a widget's selection onto its own
+  earlier focus effect -- a row's focus leads its selection by a few
+  milliseconds on KWin/Qt -- so a live name could be *this* press's by the
+  focus effect while the selection that marked it selectable fired after
+  the user's next input, which makes that selection the next input's. A row
+  focused by a click and selected by the Down key that followed came out
+  `.select()`ed, and a name already marked selectable is one the
+  post-capture pass skips, so nothing revisited it. The two halves are now
+  held against the bound separately: the widget stays, the claim that it
+  was selected goes, and the bounded lookup either proves the selection
+  inside the span or leaves a plain click on the right widget -- rather
+  than the coordinate that dropping the whole name would leave.
+
+- **A click name the bound withdraws is dropped from the typing fallback
+  too.** The last clicked text field is what names a run of typing on a
+  desktop that publishes no per-widget focus (GNOME Shell holds FOCUSED on
+  its own toplevel), and it was taken when the click was buffered. When the
+  bound then disproved that click's live name, the fallback still held the
+  old target -- so the typing that started in the very same event, which is
+  what delivered the bound, was attributed to the field the settle had just
+  rejected. The correction now reaches the fallback while it is still that
+  click's.
+
+- **The post-capture lookup excludes an effect stamped at the next input
+  itself.** The live gate drops a name whose effect fired at or after the
+  next input, strictly; the retry clipped its window to that same bound but
+  rode on the log's inclusive upper end, so an effect stamped exactly there
+  was admitted and handed back the name the gate had just removed. The log
+  takes an exclusive bound now, which is the rule the rest of the
+  attribution runs on.
+
+- **A press stamp from another clock no longer holds the consumer thread.**
+  The live effect wait runs to the end of the match window, which is an
+  absolute stamp on the shared monotonic clock (`when + _EFFECT_WINDOW`).
+  A stamp from some other domain -- a capture backend whose rebasing broke,
+  a caller passing wall-clock seconds -- put that end as far ahead as the
+  two clocks differ, and the wait then lasted the difference rather than
+  the length of a window: minutes on a freshly booted machine. The wait is
+  capped at one window from now, which no legitimate press can exceed, so
+  such a stamp degrades to a coordinate promptly -- as the code already
+  claimed it would.
 
 ### Changed
 

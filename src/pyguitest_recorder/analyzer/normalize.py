@@ -220,13 +220,20 @@ class _Pending:
     The gesture, not decoration: see `_record_route`.
     """
     keyed: float | None = None
-    """The first non-modifier key pressed while this button was down, if any.
+    """The first later input action while this button was down, if any: a
+    non-modifier key press, or another button going down.
 
     The click this press becomes is only queued for the effect pass at the
-    release, after that key has already been handled, so the key cannot bound
-    it the way `_close_pending_effects` bounds the clicks already queued. It
-    is remembered here instead and becomes the click's `until` when it is
-    deferred: a selection the key caused is the key's, not the click's.
+    release, after that action has already been handled, so it cannot bound
+    the click the way `_close_pending_effects` bounds the ones already
+    queued. It is remembered here instead and becomes the click's `until`
+    when it is deferred: a selection the key -- or the other button -- caused
+    is that action's, not this click's.
+
+    Another button counts because buttons can overlap: pressed at 10.0 and
+    10.2 and released in the other order, the second click was queued first
+    and the first click, bounded by nothing, took the selection the second
+    one had caused.
     """
 
 
@@ -332,6 +339,9 @@ class Normalizer:
     left -- the trailing clicks of the recording. Only populated on a resolver
     with the pass; inert without an effect log."""
     _clicked: Target | None = field(default=None, init=False)
+    _clicked_by: Click | None = field(default=None, init=False)
+    """The click `_clicked` was taken from, so a settle that corrects that
+    click's target can correct the fallback with it -- see `_rename`."""
     _last_input: float | None = field(default=None, init=False)
     _rest: _Rest | None = field(default=None, init=False)
     """The rest the pointer is sitting in, if it is sitting in one.
@@ -543,6 +553,14 @@ class Normalizer:
     def _on_button_press(self, raw: RawEvent) -> list[Event]:
         """Remember the press; a click is only known at release."""
         out: list[Event] = self._flush_text()
+        # A button going down bounds any button already held, the way a key
+        # press does: whatever it selects is its own doing. Recorded on the
+        # pending press rather than closing the queue, because the click
+        # this one will become is not queued until its release -- and with
+        # overlapping buttons that release can come after this one's.
+        for pending in self._held.values():
+            if pending.keyed is None:
+                pending.keyed = raw.timestamp
         self._held[raw.button] = _Pending(
             button=raw.button,
             target=self._target(raw),
@@ -599,6 +617,7 @@ class Normalizer:
             assert self._click is not None
             self._click.count += 1
             self._click_at = raw.timestamp
+            self._clicked_by = self._click
             return []
         # A new click, not the second press of a double: that one merges above
         # and bounds nothing, since its effect is the merged click's own.
@@ -611,6 +630,7 @@ class Normalizer:
             note=note,
         )
         self._click_at = raw.timestamp
+        self._clicked_by = self._click
         self._defer_effect(self._click, pending.timestamp, until=pending.keyed)
         return out
 
@@ -684,11 +704,24 @@ class Normalizer:
         effects of everything that came after it, and a long recording lost
         its first selections' names to the later ones. Settling at the bound
         keeps the queue to the clicks whose next action has not arrived.
+
+        A queued click whose own press is *not before* `at` keeps waiting
+        instead. The bound comes from the next click's press, read at its
+        release, and two overlapping buttons are released in whichever order
+        the user lifts them: pressed at 10.0 and 10.2 and released the other
+        way round, the second click was queued first and then bounded at
+        10.0 -- an empty span, which cost it the selection it had really
+        caused. Its bound arrives from the action after that, and the first
+        click's own `_Pending.keyed` already carries the second press.
         """
+        waiting = []
         for deferred in self._pending_effects:
+            if deferred.when >= at:
+                waiting.append(deferred)
+                continue
             deferred.until = at
             self._settle(deferred)
-        self._pending_effects.clear()
+        self._pending_effects = waiting
 
     def attribute_pending_effects(self) -> None:
         """Name the deferred Wayland clicks from the finished effect log.
@@ -713,15 +746,20 @@ class Normalizer:
     def _settle(self, deferred: _Deferred) -> None:
         """Give one deferred click its final name, now that its span is known.
 
-        Three steps, each conditional. First the live name is checked against
+        Four steps, each conditional. First the live name is checked against
         the bound: a click the live path named from an effect that turns out
         to have fired at or after the next input action loses that name --
         the effect was the next action's reaction -- and goes back to a
         coordinate with the reason on it, which the generator prints beside
-        the click. Then a click whose element is already known selectable or
-        not is left alone: the pass upgrades and names, it never renames.
-        Last, the span is read for a selection effect, which names a
-        coordinate click or upgrades a focus-named one.
+        the click. Then the *selection* half of a name that did survive is
+        checked on its own, because it can belong to a different action than
+        the rest of the name does: a row's selection effect folded onto its
+        earlier focus effect may have fired after the next input, and the
+        widget is then still this click's while the selection is not. Then a
+        click whose element is already known selectable or not is left
+        alone: the pass upgrades and names, it never renames. Last, the span
+        is read for a selection effect, which names a coordinate click or
+        upgrades a focus-named one.
         """
         attribute = getattr(self.resolver, "attribute_effect_final", None)
         if attribute is None:
@@ -733,15 +771,33 @@ class Normalizer:
             and stands is not None
             and not stands(deferred.when, deferred.until)
         ):
-            target = replace(
-                target,
-                element=None,
-                reason=(
-                    "the widget named for it live reacted only after the next "
-                    "input, so that reaction was the next input's"
+            target = self._rename(
+                deferred,
+                replace(
+                    target,
+                    element=None,
+                    reason=(
+                        "the widget named for it live reacted only after the next "
+                        "input, so that reaction was the next input's"
+                    ),
                 ),
             )
-            deferred.click.target = target
+        selection = getattr(self.resolver, "effect_selection_stands", None)
+        if (
+            target.element is not None
+            and target.element.selectable
+            and selection is not None
+            and not selection(deferred.when, deferred.until)
+        ):
+            # The widget stands, its selection does not. Dropping the flag
+            # rather than the name puts the click back in the state a
+            # focus-only live name leaves it in, so the lookup below can
+            # prove the selection inside the span or leave a plain click on
+            # the widget this press really did reach.
+            target = self._rename(
+                deferred,
+                replace(target, element=replace(target.element, selectable=None)),
+            )
         element = target.element
         if element is not None and element.selectable is not None:
             return
@@ -749,7 +805,24 @@ class Normalizer:
             deferred.when, deferred.title, until=deferred.until, element=element
         )
         if ref is not None:
-            deferred.click.target = replace(target, element=ref, reason=None)
+            self._rename(deferred, replace(target, element=ref, reason=None))
+
+    def _rename(self, deferred: _Deferred, target: Target) -> Target:
+        """Give a settled click its corrected target, the fallback included.
+
+        The last-clicked text field is a `Target` of its own
+        (`_text_target`'s fallback for a desktop that publishes no
+        per-widget focus), taken when the click was buffered. A settle that
+        corrects *that* click has to reach it too: a name the bound
+        disproved otherwise stayed the target of the very next run of
+        typing, which `_on_key_press` starts in the same event that settles
+        the click. Only while the fallback is still this click's -- a newer
+        click owns it after that, and its target is the right one.
+        """
+        deferred.click.target = target
+        if deferred.click is self._clicked_by:
+            self._clicked = target
+        return target
 
     def _mergeable(self, raw: RawEvent, target: Target) -> bool:
         """Whether this click continues the buffered one."""

@@ -352,17 +352,29 @@ def replay(source: str, title: str) -> list[str]:
         stop_probe(process)
 
 
-def _capture(recorder: Recorder, title: str) -> tuple[Recording, bool]:
+def _capture(recorder: Recorder, title: str) -> tuple[Recording, str]:
     """Run the recorder while the probe window is driven.
 
-    Returns the recording and whether the *watchdog* ended the run. The run
-    is meant to end on the stop chord the sender taps last; the watchdog is
-    what ends it when the recorder does not see the chord -- and that is a
-    capture failure in its own right, not a convenience. A backend that
-    caught the clicks and missed both Escapes would otherwise render,
-    validate and replay a clean-looking script, and the check would answer
-    OK about a recorder that cannot be stopped from the keyboard. So the
-    expiry is handed back for `check` to report as a problem.
+    Returns the recording and *how the run ended*, which the check reports
+    on: the run is meant to end on the stop chord the sender taps last, and
+    anything else is a capture failure in its own right rather than a
+    convenience. A backend that caught the clicks and missed both Escapes
+    would otherwise render, validate and replay a clean-looking script, and
+    the check would answer OK about a recorder that cannot be stopped from
+    the keyboard.
+
+    Three outcomes, and they have to be told apart by *positive* evidence
+    for the chord rather than by the absence of the watchdog:
+
+    - `"chord"`: capture itself recognised the stop presses
+      (`stop_pressed_at` on the backend), which is the one thing that says
+      the chord ended the run.
+    - `"watchdog"`: the 90-second timer stopped the recorder.
+    - `"unseen"`: the run ended some other way -- a Ctrl-C, which `run()`
+      turns into a complete recording rather than an exception, or capture
+      stopping early. The watchdog has not fired in that case, so "not
+      timed out" used to read as "stopped on the two Escapes" and the check
+      could still answer OK about a chord nothing had seen.
     """
     sender_error: BaseException | None = None
 
@@ -393,7 +405,11 @@ def _capture(recorder: Recorder, title: str) -> tuple[Recording, bool]:
     if sender_error is not None:
         where = "".join(traceback.format_exception(sender_error)).rstrip()
         raise Failure(f"driving the probe window failed -- {where}")
-    return recording, watchdog_fired.is_set()
+    if watchdog_fired.is_set():
+        return recording, "watchdog"
+    if recorder._stop_pressed_at() is not None:
+        return recording, "chord"
+    return recording, "unseen"
 
 
 def check(*, do_replay: bool) -> int:
@@ -421,16 +437,24 @@ def check(*, do_replay: bool) -> int:
         print("resolver:", type(recorder._resolver).__name__)
         for note in recorder.recording.environment.notes:
             print("    note:", note)
-        recording, timed_out = _capture(recorder, title)
+        recording, ended = _capture(recorder, title)
     finally:
         stop_probe(process)
 
     problems: list[str] = []
-    if timed_out:
+    if ended == "watchdog":
         print("stop chord: FAILED, the watchdog stopped the recorder after 90 s")
         problems.append(
             "the recorder did not stop on the Escape-Escape chord the sender "
             "tapped; the watchdog stopped it"
+        )
+    elif ended == "unseen":
+        print("stop chord: FAILED, the run ended without capture seeing it")
+        problems.append(
+            "the run ended before capture recognised the Escape-Escape chord "
+            "-- an interrupt, or capture stopping early -- so this says "
+            "nothing about whether the recorder can be stopped from the "
+            "keyboard; nothing below is a verdict on a complete recording"
         )
     else:
         print("stop chord: the recorder stopped on the two Escapes")
