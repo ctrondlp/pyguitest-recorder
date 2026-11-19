@@ -341,7 +341,17 @@ class Normalizer:
     _clicked: Target | None = field(default=None, init=False)
     _clicked_by: Click | None = field(default=None, init=False)
     """The click `_clicked` was taken from, so a settle that corrects that
-    click's target can correct the fallback with it -- see `_rename`."""
+    click's target can correct the fallback with it -- see `_rename`. None
+    where the fallback came from a press the click does not hold the target
+    of (the second press of a double click), which is a target no
+    correction to that click applies to."""
+    _maybe_merge_at: float | None = field(default=None, init=False)
+    """A press that looked like the second half of a double click.
+
+    Such a press bounds nothing *if* it merges, so the bound is held here
+    instead of being applied or dropped: `_close_pending_effects` uses it
+    where it is earlier than the action that did close the queue, and the
+    merge itself discards it. See `_on_button_press`."""
     _last_input: float | None = field(default=None, init=False)
     _rest: _Rest | None = field(default=None, init=False)
     """The rest the pointer is sitting in, if it is sitting in one.
@@ -572,12 +582,24 @@ class Normalizer:
         #
         # Except for the second press of a double click, which merges into
         # the first and bounds nothing: its effect is the merged click's
-        # own. Predicted here from the same three things `_mergeable` reads
-        # at the release -- button, interval and distance.
+        # own. Whether this press is that one is only *predicted* here,
+        # from the three things `_mergeable` reads -- button, interval and
+        # distance -- and the prediction can be wrong: a press that looks
+        # mergeable but is held past the double-click window, or whose
+        # click is flushed by an intervening action, never merges after
+        # all. So the prediction does not throw the bound away, it holds
+        # it: the stamp is kept as provisional and applied by whichever
+        # settle comes first, and discarded only when the merge actually
+        # happens. Without that, a press at 1.10 that looked mergeable and
+        # a key at 1.25 that ruled it out left the first click bounded at
+        # 1.25 -- and a row the second press selected at 1.15 came out as
+        # the first click's `.select()`.
         for pending in self._held.values():
             if pending.keyed is None:
                 pending.keyed = raw.timestamp
-        if not self._mergeable(raw, target):
+        if self._mergeable(raw, target):
+            self._maybe_merge_at = raw.timestamp
+        else:
             self._close_pending_effects(raw.timestamp)
         self._held[raw.button] = _Pending(
             button=raw.button,
@@ -634,8 +656,15 @@ class Normalizer:
             assert self._click is not None
             self._click.count += 1
             self._click_at = raw.timestamp
+            # The merge happened, so the press really did bound nothing.
+            self._maybe_merge_at = None
+            # The fallback is this press's own target, and the merged click
+            # still holds the first press's -- so a correction to that
+            # click must not be written over it. `_clicked_by` is left
+            # unset for exactly that reason; the first press's own
+            # correction is the one `_rename` is for.
             self._clicked = target
-            self._clicked_by = self._click
+            self._clicked_by = None
             return []
         # A new click, not the second press of a double: that one merges above
         # and bounds nothing, since its effect is the merged click's own.
@@ -744,6 +773,12 @@ class Normalizer:
         caused. Its bound arrives from the action after that, and the first
         click's own `_Pending.keyed` already carries the second press.
         """
+        # A press that looked like a double click left its stamp here
+        # rather than closing the queue; if it is earlier than the action
+        # that did, it is the bound -- it was the next input either way.
+        if self._maybe_merge_at is not None:
+            at = min(at, self._maybe_merge_at)
+            self._maybe_merge_at = None
         waiting = []
         for deferred in self._pending_effects:
             if deferred.when >= at:

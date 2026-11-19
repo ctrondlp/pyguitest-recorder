@@ -104,6 +104,23 @@ was released.
   and could still answer OK. A run that ended any other way is now named
   and fails as a capture problem.
 
+- **A press that only *looks* like a double click no longer loses its
+  bound.** Whether a press merges into the one before it is predicted at the
+  press — button, interval, distance — and the prediction can be wrong: a
+  press held past the double-click window, or whose click an intervening
+  action flushes, never merges after all. The prediction threw the bound
+  away, so a press at 1.10 that looked mergeable and a key at 1.25 that
+  ruled it out left the first click bounded at the *key* — and a row the
+  second press selected at 1.15 came out as the first click's `.select()`.
+  The stamp is held as provisional now, applied by whichever settle comes
+  first and discarded only when the merge actually happens.
+- **A merged press keeps its own typing fallback.** The second press of a
+  double click supplies the last-clicked target while the merged click still
+  holds the first press's, so a correction to that click — a late upgrade of
+  the first press's element — was written over it: typing went to the first
+  press's element instead of the one five pixels away that the second press
+  actually hit. A fallback that did not come from the click's own target is
+  no longer tied to it.
 - **A button press bounds the clicks already queued, not just the ones
   still held.** A press was recorded on every *held* button, which is what
   an overlapping release needs — but a click that had already been queued

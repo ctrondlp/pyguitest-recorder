@@ -506,6 +506,24 @@ def test_a_press_between_a_click_and_a_key_bounds_that_click(
     ]
 
 
+def test_a_press_that_looked_mergeable_still_bounds_once_the_merge_is_off(
+    press, release, key, window
+):
+    # The prediction at the press can be wrong. Click at 1.0/1.02, press
+    # the same spot at 1.10 -- which looks like a double click, so it
+    # bounds nothing -- and then a key at 1.25 rules the merge out. The
+    # first click was bounded at the *key*, so a row the second press
+    # selected at 1.15 could still come out as the first click's
+    # `.select()`. The provisional stamp is what the settle uses instead.
+    resolver = _DeferringResolver(window, ref=None)
+    normalizer = Normalizer(resolver=resolver)
+    raws = [press(1.0), release(1.02), press(1.10), key(1.25, "Down"), release(1.30)]
+    drain(normalizer, raws)
+    normalizer.attribute_pending_effects()
+    spans = [(when, until) for when, until, _ in resolver.calls]
+    assert spans[0] == (1.0, 1.10), spans
+
+
 def test_the_second_press_of_a_double_click_still_bounds_nothing(
     press, release, window
 ):
@@ -524,6 +542,97 @@ def test_the_second_press_of_a_double_click_still_bounds_nothing(
     ]
     drain(normalizer, raws)
     assert [(when, until) for when, until, _ in resolver.calls] == [(1.0, 3.0)]
+
+
+def test_a_merged_press_keeps_its_own_typing_fallback(press, release, key, window):
+    # The same-button shape, which is the one that catches the assignment
+    # order: press, release, press again *within* the double-click time and
+    # distance, then release outside the time -- so the merge is ruled out
+    # at that release, which is also where the first click is settled. The
+    # fake tells the two presses apart by their stamps rather than by their
+    # position, since the position is the same by construction.
+    entry = ElementRef(role="text", name="Filename", selectable=None)
+    row = ElementRef(role="list item", name="Cherry", selectable=True)
+
+    class _ByStamp(_RevokingResolver):
+        """The first press names a row, the second the entry it really hit."""
+
+        def focused(self):
+            return None
+
+        def resolve(self, x, y, screen=0, when=None):
+            # Keyed on the position as well as the stamp: a key event
+            # resolves at (0, 0), and a fake that named the entry there
+            # too would answer the pointer fallback with the same element
+            # as the click -- so the test could not tell the two apart.
+            if (x, y) != (200, 200):
+                return Target(x=x, y=y, screen=screen, window=self.window)
+            here = row if when is not None and when <= 1.05 else entry
+            return Target(x=x, y=y, screen=screen, window=self.window, element=here)
+
+    resolver = _ByStamp(window, ref=None, live=entry, disowned={1.0})
+    normalizer = Normalizer(resolver=resolver)
+    events = drain(
+        normalizer,
+        [
+            press(1.0),
+            release(1.02),
+            press(1.10),
+            release(1.80),
+            key(1.9, "a", text="a"),
+        ],
+    )
+    events += normalizer.flush()
+    clicks = _clicks(events)
+    assert clicks[0].target.element is None, "the first name was not revoked"
+    (typed,) = [e for e in events if isinstance(e, TextInput)]
+    assert typed.target.element is not None
+    assert typed.target.element.name == "Filename"
+
+
+def test_a_merge_does_not_let_the_first_press_correct_the_fallback(
+    press, release, key, window
+):
+    # The merge branch: the fallback is the *second* press's target, while
+    # the merged click still holds the first press's. A late upgrade to the
+    # first press's element is a correction to that click -- and it was
+    # written over the fallback, so typing went to the row the first press
+    # named instead of the entry the second press actually hit, five pixels
+    # away and inside the merge tolerance.
+    row = ElementRef(role="list item", name="Cherry", selectable=None)
+    upgraded = ElementRef(role="list item", name="Cherry", selectable=True)
+    entry = ElementRef(role="text", name="Filename", selectable=None)
+
+    class _ByPoint(_DeferringResolver):
+        """(200, 200) is the row; (205, 200), five pixels on, is the entry."""
+
+        def focused(self):
+            return None
+
+        def resolve(self, x, y, screen=0, when=None):
+            here = {(200, 200): row, (205, 200): entry}.get((x, y))
+            return Target(x=x, y=y, screen=screen, window=self.window, element=here)
+
+    resolver = _ByPoint(window, ref=upgraded, live=row)
+    normalizer = Normalizer(resolver=resolver)
+    events = drain(
+        normalizer,
+        [
+            press(1.0),
+            release(1.02),
+            press(1.10, x=205),
+            release(1.12, x=205),
+            key(1.5, "a", text="a"),
+        ],
+    )
+    events += normalizer.flush()
+    (click,) = _clicks(events)
+    assert click.count == 2, "the two presses did not merge"
+    assert click.target.element is not None
+    assert click.target.element.selectable is True, "the upgrade did not happen"
+    (typed,) = [e for e in events if isinstance(e, TextInput)]
+    assert typed.target.element is not None
+    assert typed.target.element.name == "Filename"
 
 
 def test_a_new_click_keeps_its_own_typing_fallback(press, release, key, window):
