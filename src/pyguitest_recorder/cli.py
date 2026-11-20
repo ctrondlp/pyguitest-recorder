@@ -958,7 +958,34 @@ def _emit(
             raw=recording.raw if settings.record_raw else [],
             started_at=recording.started_at,
         ).save(settings.session_file)
-        print(f"Recording saved to {settings.session_file}", file=sys.stderr)
+        # Said where the file has just been written, for --no-redact's
+        # reason: the flag was set at the start of a run that may have taken
+        # minutes, and this is the moment the artefact exists.
+        #
+        # Unconditional, because a saved recording is sensitive whether or
+        # not --record-raw was given: redaction is applied by the generator,
+        # so the events in this file carry the text that was typed even when
+        # the script withheld it. `--record-raw` adds the raw stream on top,
+        # which is the keystrokes as captured, before anything looked at
+        # them. Worded as what the file *holds* rather than as "wrote a
+        # password", for the same reason the redaction warning is: the one
+        # case that matters most is a password field the accessibility tree
+        # never published as one, and nothing here knows that happened.
+        raw_note = (
+            " It also holds the raw event stream (--record-raw), which is "
+            "every keystroke as captured."
+            if settings.record_raw
+            else ""
+        )
+        # Path, not the configured string: `_mode_note` stats the file, and
+        # `session_file` is plain text out of the config or the flag.
+        saved = Path(settings.session_file)
+        print(
+            f"Recording saved to {saved}{_mode_note(saved)}; it holds the "
+            "text that was typed, which script redaction does not cover."
+            f"{raw_note} Treat it like a password file.",
+            file=sys.stderr,
+        )
     written: Path | None = None
     if settings.output:
         written = _write_script(

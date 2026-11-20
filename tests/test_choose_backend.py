@@ -283,14 +283,41 @@ class TestContextBackends:
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
         assert self._recorder()._context_backends() == ("x11", "atspi")
 
+    def _patch_compositor(self, monkeypatch, compositor):
+        import types
+
+        import pyguitest
+
+        monkeypatch.setattr(
+            pyguitest,
+            "detect",
+            lambda *a, **k: types.SimpleNamespace(compositor=compositor),
+        )
+
     def test_wayland_names_the_window_tier_and_atspi(self, monkeypatch):
         # Native Wayland cannot be asked through x11 (it cannot drive the
         # session); the compositor's own window tier (`windows`) + atspi is the
-        # pair, and `_on_wayland` is what selects it.
+        # pair, and `_on_wayland` is what selects it. On a non-Mutter
+        # compositor the `windows` group is that tier.
+        from pyguitest.session import Compositor
+
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
+        self._patch_compositor(monkeypatch, Compositor.KWIN)
         recorder = self._recorder(backend="wayland")
         assert recorder._on_wayland() is True
         assert recorder._context_backends() == ("windows", "atspi")
+
+    def test_wayland_on_mutter_names_gnomeshell(self, monkeypatch):
+        # Mutter's window tier is the GNOME Shell extension, a backend named in
+        # its own right that the `windows` group does not cover -- so the pair
+        # is `gnomeshell` + atspi there, or the session strands on bare
+        # coordinates. See `_wayland_window_backend`.
+        from pyguitest.session import Compositor
+
+        monkeypatch.setattr(recorder_module.sys, "platform", "linux")
+        self._patch_compositor(monkeypatch, Compositor.MUTTER)
+        recorder = self._recorder(backend="wayland")
+        assert recorder._context_backends() == ("gnomeshell", "atspi")
 
     def test_auto_is_not_wayland_before_a_backend_is_built(self, monkeypatch):
         # `auto` reads as xrecord by name; only a built wayland-evdev backend

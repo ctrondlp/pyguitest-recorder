@@ -41,6 +41,35 @@ def test_nearest_takes_the_earliest_in_the_window():
     assert got is not None and got.name == "Choosers"
 
 
+def test_nearest_prefers_selection_over_an_earlier_focus_on_the_same_widget():
+    # Measured on KWin/Qt: clicking a list item publishes a focus effect
+    # (selectable=False) a few ms ahead of the selection effect
+    # (selectable=True) on the *same* widget. Earliest-wins alone would take the
+    # focus one and lose the selection, so the generator would emit `.click()`
+    # for a row that should `.select()`. `nearest` keeps earliest for identity
+    # but carries the selection when the same widget produced one in the window.
+    log = AtspiEffectLog()
+    _put(log, at=1000.20, name="Cherry", role="list item", selectable=False)
+    _put(log, at=1000.21, name="Cherry", role="list item", selectable=True)
+    got = log.nearest(after=1000.0, within=0.6, toplevel="Target")
+    assert got is not None
+    assert (got.name, got.role) == ("Cherry", "list item")
+    assert got.selectable is True
+    # Its stamp stays the earliest one -- identity, not the selection's time.
+    assert got.at == 1000.20
+
+
+def test_nearest_does_not_borrow_selectability_from_a_different_widget():
+    # A selection on some *other* widget in the window must not make the chosen
+    # widget look selectable -- the two are unrelated reactions.
+    log = AtspiEffectLog()
+    _put(log, at=1000.20, name="Save", role="push button", selectable=False)
+    _put(log, at=1000.25, name="Choosers", role="page tab", selectable=True)
+    got = log.nearest(after=1000.0, within=0.6, toplevel="Target")
+    assert got is not None and got.name == "Save"
+    assert got.selectable is False
+
+
 def test_nearest_ignores_effects_before_the_press():
     log = AtspiEffectLog()
     _put(log, at=999.0, name="Earlier")
@@ -105,6 +134,32 @@ def test_an_effect_in_a_file_dialog_is_tied_to_the_dialog():
         assert Log._toplevel_name(button) == "Save", role
     unknown = _Node("push button", "Cancel", parent=_Node("panel", "", app))
     assert Log._toplevel_name(unknown) == ""
+
+
+def test_toplevel_is_found_when_the_bridge_labels_it_filler():
+    # Measured on the Qt AT-SPI bridge under KWin/Wayland: the toplevel that
+    # carries the window title is published as `filler`, not `frame`, one
+    # level below `application` -- so the window-role walk returned "" and
+    # `nearest(toplevel=<kdotool title>)` never matched a real selection.
+    # Keying on the tree shape (the application's child) finds it anyway.
+    from pyguitest_recorder.windows.atspi_effects import AtspiEffectLog as Log
+
+    app = _Node("application", "list_probe.py")
+    toplevel = _Node("filler", "PGT List Probe", parent=app)
+    lst = _Node("list", "Fruit", parent=toplevel)
+    item = _Node("list item", "Cherry", parent=lst)
+    assert Log._toplevel_name(item) == "PGT List Probe"
+
+
+def test_a_frame_toplevel_still_resolves_the_same():
+    # The window-role shortcut is unchanged: a normal `frame` toplevel
+    # resolves exactly as before, so no non-Wayland tree shifts.
+    from pyguitest_recorder.windows.atspi_effects import AtspiEffectLog as Log
+
+    app = _Node("application", "app")
+    frame = _Node("frame", "Main Window", parent=app)
+    button = _Node("push button", "Go", parent=frame)
+    assert Log._toplevel_name(button) == "Main Window"
 
 
 def test_nearest_skips_a_nameless_source():

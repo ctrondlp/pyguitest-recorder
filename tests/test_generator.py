@@ -1829,6 +1829,18 @@ def test_the_profile_names_the_pyguitest_the_output_was_checked_against():
     assert expected == PROFILE
 
 
+def test_the_floor_is_a_patch_release_on_the_profile_line():
+    # FLOOR is what `--require-version` writes and what pyproject pins (held
+    # equal in test_docs); it carries a patch because the oldest pyguitest
+    # that replays every emitted call correctly has been one. It must still
+    # lie on PROFILE's line -- a floor on another minor would make the header
+    # and the opener disagree about which pyguitest the script is for.
+    from pyguitest_recorder.generator import FLOOR, PROFILE
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", FLOOR), FLOOR
+    assert FLOOR.startswith(PROFILE.removeprefix("pyguitest-") + "."), (FLOOR, PROFILE)
+
+
 def test_a_window_that_moved_has_its_origin_read_again():
     # Every offset is relative to where the window was when that event was
     # captured, so one geometry read shared across a move puts every later
@@ -3913,8 +3925,8 @@ class TestRequireVersionPreamble:
 
     Off by default -- a script replayed where it was recorded runs against
     the pyguitest that generated it. On, the floor opens the body ahead of
-    the capability preamble, and the version is derived from PROFILE so the
-    two cannot drift.
+    the capability preamble, and the version is FLOOR -- the full release,
+    not PROFILE's minor line -- so the two cannot drift.
     """
 
     def _click(self, window):
@@ -3928,11 +3940,14 @@ class TestRequireVersionPreamble:
         source = render(self._click(window))
         assert "require_version" not in source
 
-    def test_on_it_opens_the_body_with_the_profile_version(self, window):
+    def test_on_it_opens_the_body_with_the_floor_release(self, window):
+        # The full release, with its patch: "0.26" would have let a 0.26.0
+        # install pass the floor and then refuse an emitted `Prior`/`Next` on
+        # macOS, the very case the opener exists to fail early on.
         source = render(self._click(window), require_version=True)
-        version = generator_module.PROFILE.removeprefix("pyguitest-")
-        wanted = f'gui.require_version("{version}")'
+        wanted = f'gui.require_version("{generator_module.FLOOR}")'
         assert wanted in source
+        assert generator_module.FLOOR.count(".") == 2
         body = [
             line.strip()
             for line in source.splitlines()

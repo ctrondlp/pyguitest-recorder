@@ -182,7 +182,10 @@ generator emits -- and makes `focused()`/`focus_tracking_works()` answer
 no element backend. The resolver already caught that exception broadly
 (`DesktopResolver.focused()`'s `except Exception`), so nothing here was
 relying on the old behaviour either. A script generated here is checked
-against 0.26 and says so; nothing about what it replays changes.
+against 0.26 and says so; nothing about what it replays changes. The
+*patch* floor, though, is 0.26.1 -- see `FLOOR`: a key name this generator
+emits was refused on one platform until then, and a minor-line profile
+cannot say so.
 
 0.23 is a load-bearing floor rather than a pairing step, and it is the first
 one whose reason is a *platform* rather than a call. Nothing new is emitted:
@@ -222,6 +225,23 @@ window coordinates rather than passing it over, so a click on a GTK4
 window resolves to the widget under it where it used to resolve to
 nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
+"""
+
+FLOOR = "0.26.1"
+"""The oldest pyguitest a generated script replays correctly on every platform.
+
+What `--require-version` writes into a script (`_require_version_line`), and
+the same release `pyproject.toml` pins -- `tests/test_docs.py` holds the two
+level. PROFILE names the *minor line* the output was checked against, and a
+floor that is only a minor line cannot say "0.26.0 gets one emitted call
+wrong": the generator emits `Prior` and `Next` for Page Up/Down, from both
+the evdev and win32 keysym tables, and macOS refused both until 0.26.1
+taught `macquartz` the X11 spellings. A script generated under 0.26.0 that
+asked for "0.26" would therefore have passed its own floor on a Mac and
+raised on the first page key. So the floor carries the patch, and it moves
+only when a patch release fixes what an emitted call *gets wrong*; a patch
+that fixes nothing a script replays leaves it where it is. It always lies on
+PROFILE's line, which the test suite also holds.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -582,16 +602,18 @@ class GeneratorOptions:
 
     capability_preamble: bool = True
     require_version: bool = False
-    """Open the script with `gui.require_version(...)` naming PROFILE's line.
+    """Open the script with `gui.require_version(...)` naming FLOOR.
 
     Off by default -- a script replayed where it was recorded runs against
     the pyguitest that generated it, and a hard floor would only refuse
     replays that might have worked. On, the first statement in the body is
     the version floor, ahead of the capability preamble: for scripts that
     travel, where an older pyguitest should fail at the first line with both
-    versions named rather than mid-run with an AttributeError. The version
-    is derived from PROFILE rather than written here, so the two cannot
-    drift.
+    versions named rather than mid-run with an AttributeError -- or, worse, a
+    refused key name on one platform. The version is FLOOR -- the full
+    release, since the oldest pyguitest that replays every emitted call
+    correctly has been a patch release -- rather than written here, so the
+    two cannot drift.
     """
     comments: bool = True
     function_name: str = "main"
@@ -3215,16 +3237,18 @@ def _drop_unused_bindings(body: list[str]) -> list[str]:
 
 
 def _require_version_line() -> str:
-    """The version-floor opener, derived from PROFILE so the two cannot drift.
+    """The version-floor opener, derived from FLOOR so the two cannot drift.
 
-    PROFILE is "pyguitest-<major>.<minor>"-shaped; the call takes the dotted
-    release alone. Written as the shape rather than an example release, which
-    is what left this docstring naming 0.18 two minors after the fact.
-    `Session.require_version` treats it as a floor, not a pin, so a newer
-    pyguitest replays the script without complaint -- see that method's own
-    docstring for the exact comparison.
+    FLOOR is the full "<major>.<minor>.<patch>" release, not PROFILE's
+    minor line: a script demands the oldest pyguitest that replays every call
+    it emits correctly, and that has been a patch release (see FLOOR). Written
+    as the shape rather than an example release, which is what left this
+    docstring naming 0.18 two minors after the fact. `Session.require_version`
+    treats it as a floor, not a pin, so a newer pyguitest replays the script
+    without complaint -- see that method's own docstring for the exact
+    comparison.
     """
-    return f'gui.require_version("{PROFILE.removeprefix("pyguitest-")}")'
+    return f'gui.require_version("{FLOOR}")'
 
 
 def _require_lines(capabilities: set[str]) -> list[str]:

@@ -29,7 +29,7 @@ from pathlib import Path
 from pyguitest_recorder.analyzer import SyncOptions, infer_synchronization
 from pyguitest_recorder.cli import build_parser
 from pyguitest_recorder.config import Settings
-from pyguitest_recorder.generator import PROFILE
+from pyguitest_recorder.generator import FLOOR, PROFILE
 from pyguitest_recorder.model import Click, Pause, Target, WaitForWindow, WindowRef
 
 _MAIN = WindowRef(
@@ -103,6 +103,17 @@ def test_documented_pyguitest_floor_matches_packaging():
     for page in _PAGES:
         for stated in _FLOOR.findall(_read(page)):
             assert stated == floor, f"{page} says pyguitest {stated} or newer"
+
+
+def test_the_generated_version_floor_is_the_packaging_floor():
+    """``--require-version`` wrote ``"0.26"`` while packaging pinned 0.26.1.
+
+    The opener a generated script demands has to be the release this package
+    itself needs: pyproject moved to a patch because an emitted key name was
+    refused below it, and a floor derived from the minor-line PROFILE let a
+    script pass its own check on exactly that install.
+    """
+    assert _declared_floor() == FLOOR
 
 
 def test_rendered_profile_line_names_the_generator_profile():

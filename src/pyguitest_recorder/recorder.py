@@ -824,6 +824,15 @@ class Recorder:
             self._consume(self._stop_key.release())
             for event in self._normalizer.flush():
                 self._add(event)
+            # Name any native-Wayland click the live effect path left on a
+            # coordinate because its selection effect had not arrived yet. By
+            # here capture has ended and the effect log is complete but still
+            # open, so the whole log is available to match against -- which is
+            # what lets a slow Wayland toolkit's late selection still become a
+            # `.select()`. Inert off native Wayland (no effect log, nothing
+            # deferred). The clicks are already in the recording; this patches
+            # them in place.
+            self._normalizer.attribute_pending_effects()
         finally:
             with self._lifecycle:
                 was_consuming = self._consuming
@@ -1311,12 +1320,14 @@ class Recorder:
             window, element = "win32", "uia"
         elif self._on_wayland():
             # A native-Wayland recording cannot be asked about through `x11`
-            # (it cannot drive the session at all). pyguitest's `windows`
-            # factory is the compositor's own window tier -- kdotool on KWin,
-            # the Shell extension on Mutter, the IPC backends on wlroots --
-            # and it answers in the same screen space the evdev backend's
-            # coordinates are scaled to.
-            window, element = "windows", "atspi"
+            # (it cannot drive the session at all). The compositor's own window
+            # tier answers in the same screen space the evdev backend's
+            # coordinates are scaled to -- and is what places AT-SPI's
+            # window-relative rectangles onto the screen, which is what lets a
+            # click be named by coordinate here at all (see `_live_at`). Which
+            # backend that is depends on the compositor; `_wayland_window_backend`
+            # picks it.
+            window, element = self._wayland_window_backend(), "atspi"
         else:
             window, element = "x11", "atspi"
         wanted = []
@@ -1325,6 +1336,30 @@ class Recorder:
         if self.settings.element_context:
             wanted.append(element)
         return tuple(wanted)
+
+    def _wayland_window_backend(self) -> str:
+        """The pyguitest window backend for the compositor being recorded.
+
+        `windows` is pyguitest's compositor-window *group* -- kdotool on KWin,
+        the IPC backends on wlroots, the protocol on COSMIC -- but it does not
+        cover Mutter, whose window tier is the GNOME Shell extension, a backend
+        named in its own right (`gnomeshell`) rather than one the group selects.
+        So name that one directly on Mutter: asking for `windows` there fails to
+        compose with `atspi`, the session falls back to one half or the other,
+        and with it goes the window geometry that places AT-SPI's
+        window-relative rectangles -- every click then stranded on a bare
+        coordinate. Any detection failure keeps the group, which is right
+        everywhere the group does apply.
+        """
+        try:
+            import pyguitest
+            from pyguitest.session import Compositor
+
+            if pyguitest.detect().compositor is Compositor.MUTTER:
+                return "gnomeshell"
+        except Exception:  # noqa: BLE001 - detection is best-effort here
+            pass
+        return "windows"
 
     def _session_locator(self, display: str) -> str:
         """Where the session was looked for, in this platform's own terms.

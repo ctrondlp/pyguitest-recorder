@@ -48,11 +48,11 @@ those flags actually change without re-performing the interaction.
 
 For a script that will *travel* — handed to a team, committed to CI, kept for
 months — `--require-version` opens it with `gui.require_version(...)` naming
-the pyguitest line it was generated against, so an older install fails at the
-first statement with both versions named instead of mid-run with an
-`AttributeError`. Off by default: a script replayed where it was recorded
-runs against the pyguitest that generated it, and a hard floor would only
-refuse replays that might have worked.
+the oldest pyguitest release the script replays correctly under, so an older
+install fails at the first statement with both versions named instead of
+mid-run with an `AttributeError`. Off by default: a script replayed where it
+was recorded runs against the pyguitest that generated it, and a hard floor
+would only refuse replays that might have worked.
 
 ## Checks: what makes it a test
 

@@ -8,6 +8,7 @@ window never being the answer.
 
 import os
 import sys
+from unittest import mock
 
 import pytest
 
@@ -1099,6 +1100,74 @@ class ElementSession(FakeSession):
         return self._extents
 
 
+class PidScopingSession(ElementSession):
+    """An `ElementSession` whose `element_at` accepts and records a `pid` scope.
+
+    Models pyguitest from the release that added it, so the resolver's
+    signature probe sees the parameter and the native-Wayland path engages.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.element_at_pids = []
+
+    def element_at(self, x, y, *, pid=None):
+        self.element_at_pids.append(pid)
+        return super().element_at(x, y)
+
+
+def test_wayland_resolve_scopes_element_at_to_the_window_pid():
+    # On native Wayland the coordinate lookup is scoped to the clicked window's
+    # process -- the one thing that lets `element_at` answer there at all. The
+    # window carries pid 1234, so the resolve must pass that through.
+    session = PidScopingSession(window=FakeWindow(pid=1234))
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        resolve_windows=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+    )
+    r.resolve(150, 100)
+    assert 1234 in session.element_at_pids
+    assert None not in session.element_at_pids
+
+
+def test_off_wayland_resolve_calls_element_at_unscoped():
+    # Where coordinates are trustworthy, `element_at` is called as before --
+    # no pid -- so an older pyguitest with only the two-argument form still
+    # works and nothing changes off Wayland.
+    session = PidScopingSession(window=FakeWindow(pid=1234))
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        resolve_windows=True,
+        windows=False,
+        macos=False,
+        wayland=False,
+    )
+    r.resolve(150, 100)
+    assert session.element_at_pids == [None]
+
+
+def test_an_old_pyguitest_without_pid_is_not_scoped():
+    # The signature probe decides: a session whose `element_at` takes only
+    # (x, y) is called that way even on Wayland, degrading to the effect log
+    # rather than raising TypeError on every click.
+    session = ElementSession(window=FakeWindow(pid=1234))  # element_at(x, y)
+    r = DesktopResolver(
+        session=session,
+        elements=True,
+        resolve_windows=True,
+        windows=False,
+        macos=False,
+        wayland=True,
+    )
+    assert r._element_at_scopes is False
+    r.resolve(150, 100)  # must not raise
+
+
 class DisclosureSession(ElementSession):
     """A GTK3 tree view whose hit test answers the view, not the row.
 
@@ -1340,16 +1409,25 @@ def test_wayland_pidless_title_match_needs_a_stable_title():
 
 
 class FakeEffectLog:
-    """Stands in for AtspiEffectLog: answers `nearest` from a fixed list."""
+    """Stands in for AtspiEffectLog over a fixed list of effects.
+
+    `nearest` is the *real* one, called on a log whose ring holds the
+    effects a test handed in: the matching rules -- earliest wins, the
+    exclusive `before` bound, the fold that carries a widget's selection
+    onto its own earlier focus effect -- are what the resolver's behaviour
+    turns on, and a reimplementation here would be a second, diverging copy
+    of them. Nothing is started, so no AT-SPI listener exists.
+    """
 
     def __init__(self, effects=()):
-        self.effects = list(effects)
+        from pyguitest_recorder.windows.atspi_effects import AtspiEffectLog
 
-    def nearest(self, after, within, toplevel):
-        for eff in self.effects:
-            if after <= eff.at <= after + within and eff.toplevel == toplevel:
-                return eff
-        return None
+        self.effects = list(effects)
+        self._log = AtspiEffectLog()
+        self._log._effects.extend(self.effects)
+
+    def nearest(self, after, within, toplevel, before=None):
+        return self._log.nearest(after, within, toplevel, before)
 
 
 def _effect(name, role, at, toplevel="Target", selectable=False):
@@ -1386,6 +1464,58 @@ def test_wayland_click_names_a_tab_from_the_effect_log():
     assert target.element is not None
     assert (target.element.name, target.element.role) == ("Choosers", "page tab")
     assert (target.x, target.y) == (640, 400)
+
+
+def test_wayland_effect_arriving_late_but_within_the_window_is_caught():
+    # Capture running behind live input: resolution starts well after the
+    # press and the selection effect fires late -- but still inside the
+    # [when, when+_EFFECT_WINDOW] window `nearest` honours. The wait must
+    # reach the end of that window, not give up at a fixed offset from when
+    # resolution happened to start. Measured on KWin/Wayland: a list-item
+    # selection fired 0.02s past the old deadline and came out a coordinate
+    # click. With `_EFFECT_WAIT` at 0 a fixed-offset deadline expires at once,
+    # so this would fail on the pre-fix resolver -- the non-vacuous part.
+    #
+    # Driven on a clock of the test's own, which each poll advances: the
+    # real one made this the suite's one load-sensitive test -- a stall
+    # longer than the window between two polls expires the deadline and
+    # the effect is missed, which is a failure about the machine rather
+    # than about the resolver.
+    class Clock:
+        """`time`, as `_effect_element_in` uses it."""
+
+        def __init__(self):
+            self.now = 1000.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    now = clock.now
+    when = now - 0.1  # the press is already 0.1s old by the time it resolves
+    eff = _effect("Cherry", "list item", now + 0.15, selectable=True)
+
+    class LateLog:
+        def __init__(self):
+            self.calls = 0
+
+        def nearest(self, after, within, toplevel, before=None):
+            self.calls += 1
+            if self.calls < 3:  # the effect "arrives" only after a few polls
+                return None
+            if after <= eff.at <= after + within and eff.toplevel == toplevel:
+                return eff
+            return None
+
+    r = _wayland_effect_resolver(LateLog())
+    r._EFFECT_WAIT = 0.0  # a fixed-offset deadline would give up immediately
+    with mock.patch.object(resolver_module, "time", clock):
+        target = r.resolve(640, 400, when=when)
+    assert target.element is not None
+    assert (target.element.name, target.element.role) == ("Cherry", "list item")
 
 
 def test_wayland_selection_effect_names_a_selectable_element():
@@ -1442,6 +1572,238 @@ def test_wayland_effect_log_only_binds_effects_after_the_press():
     # An effect that predates the press is a different interaction's.
     log = FakeEffectLog([_effect("Earlier", "list item", 999.0)])
     assert _wayland_effect_resolver(log).resolve(640, 400, when=1000.4).element is None
+
+
+def test_attribute_effect_final_names_a_selection_past_the_live_window():
+    # The post-capture pass: a selection effect that fired far later than the
+    # live window would wait (1.8s after the press) still names the click,
+    # because by then the whole effect log is in hand -- the slow-Wayland case
+    # the live fast path cannot cover without stalling recording.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1001.8, selectable=True)])
+    )
+    ref = r.attribute_effect_final(when=1000.0, title="Target")
+    assert ref is not None
+    assert (ref.name, ref.role, ref.selectable) == ("Cherry", "list item", True)
+
+
+def test_attribute_effect_final_ignores_a_non_selection_effect():
+    # A late focus or press effect (a push button) must stay a coordinate, not
+    # borrow an unrelated effect the wide post-capture window happens to reach.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Save", "push button", 1001.8, selectable=False)])
+    )
+    assert r.attribute_effect_final(when=1000.0, title="Target") is None
+
+
+def test_attribute_effect_final_needs_a_window_title():
+    # No title, nothing to scope the match to -- it declines rather than guess.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.5, selectable=True)])
+    )
+    assert r.attribute_effect_final(when=1000.0, title="") is None
+
+
+def test_attribute_effect_final_stops_at_the_next_input_action():
+    # A button clicked at 1000.0, a row clicked at 1000.6, its selection logged
+    # at 1000.9: inside the 2.5s span from the first press, but after the
+    # second. It is the second click's effect; the first must not be named by
+    # it. Without the bound the same log names the button click a row.
+    log = FakeEffectLog([_effect("Cherry", "list item", 1000.9, selectable=True)])
+    r = _wayland_effect_resolver(log)
+    assert r.attribute_effect_final(when=1000.0, title="Target", until=1000.6) is None
+    assert r.attribute_effect_final(when=1000.0, title="Target") is not None
+    ref = r.attribute_effect_final(when=1000.6, title="Target", until=None)
+    assert ref is not None and ref.name == "Cherry"
+
+
+def test_attribute_effect_final_upgrades_a_focus_named_ref_of_the_same_widget():
+    # The live path read the log between the row's focus effect and its
+    # selection effect and named the row without `selectable`. Handed that
+    # ref, the pass marks it selectable -- same name and role -- so the
+    # generator emits `.select()` after all.
+    log = FakeEffectLog([_effect("Cherry", "list item", 1000.3, selectable=True)])
+    r = _wayland_effect_resolver(log)
+    focused = ElementRef(role="list item", name="Cherry", pid=77, selectable=None)
+    ref = r.attribute_effect_final(when=1000.0, title="Target", element=focused)
+    assert ref == ElementRef(role="list item", name="Cherry", pid=77, selectable=True)
+
+
+def test_attribute_effect_final_never_renames_a_named_ref():
+    # A different widget's selection inside the span is not this click's: a
+    # focus-named button stays the button, unchanged, rather than becoming the
+    # row somebody else selected.
+    log = FakeEffectLog([_effect("Cherry", "list item", 1000.3, selectable=True)])
+    r = _wayland_effect_resolver(log)
+    button = ElementRef(role="push button", name="Save", pid=77, selectable=None)
+    assert r.attribute_effect_final(when=1000.0, title="Target", element=button) is None
+
+
+def test_effect_attribution_falls_when_the_effect_fired_after_the_next_input():
+    # The live resolver named the press at 1000.4 from a selection that fired at
+    # 1000.75 -- inside the effect window, so it looked like this click's. The
+    # normalizer later learns the next input landed at 1000.7, BEFORE that
+    # effect: the row selected because of the second action, not this one, and
+    # the live name was a guess the bound now disproves. Measured on COSMIC: a
+    # button click followed 0.3 s later by a Down key came out as a click on the
+    # row the key had selected.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.name == "Cherry"
+    assert r.effect_attribution_stands(1000.4, until=1000.7) is False
+
+
+def test_effect_attribution_stands_when_the_effect_precedes_the_next_input():
+    # Same press, but the next input came at 1000.8: the effect fired inside
+    # this click's span and the name stays.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.8) is True
+
+
+def test_effect_attribution_question_is_answered_once_per_press():
+    # The record is consumed by the question: a second ask about the same
+    # press has nothing to revoke and answers "stands" -- so a normalizer that
+    # settles a click twice cannot strip a name it already kept.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.8) is True
+    assert r.effect_attribution_stands(1000.4, until=1000.5) is True
+
+
+def test_a_press_stamped_in_another_clock_domain_does_not_hold_the_consumer():
+    # The live wait runs to the end of the match window, which is an
+    # absolute stamp: `when + _EFFECT_WINDOW`. A press stamp from another
+    # clock -- a backend whose rebasing onto `monotonic` broke, a caller
+    # passing wall-clock seconds -- put that end as far in the future as the
+    # two clocks differ, and the consumer thread sat there for the
+    # difference (minutes on a freshly booted machine, where `monotonic` is
+    # still small and a wall-clock stamp is not). Capped at one window from
+    # now, the press simply finds no effect and keeps its coordinates.
+    #
+    # Driven on a clock of the test's own, which each poll advances: an
+    # uncapped wait would poll an hour of that clock away in no real time
+    # at all, so the budget below fails the run *promptly* rather than
+    # after the elapsed-time assertion a real clock would make us wait for.
+    class Clock:
+        """`time`, as `_effect_element_in` uses it."""
+
+        def __init__(self):
+            self.now = 1000.0
+            self.polls = 0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.polls += 1
+            assert self.polls <= 20, (
+                "the live wait is polling on and on: it is not capped at a "
+                "window from now"
+            )
+            self.now += seconds
+
+    clock = Clock()
+    r = _wayland_effect_resolver(FakeEffectLog([]))
+    r._EFFECT_WINDOW = 0.05
+    with mock.patch.object(resolver_module, "time", clock):
+        target = r.resolve(640, 400, when=clock.now + 5_000)
+    assert target.element is None
+    assert clock.polls <= 3, f"waited {clock.polls} polls for a stamp it cannot use"
+
+
+def test_a_folded_selection_past_the_bound_falls_while_the_focus_name_stands():
+    # The row took focus at 1000.5, inside the click's span, and was selected
+    # at 1000.75 -- after the Down key at 1000.7 that actually selected it.
+    # `nearest` folds the selection onto the focus effect, so the live name
+    # came back selectable and the post-capture pass skipped it: the click was
+    # rendered `.select()`ed on the strength of the key's reaction. The two
+    # halves answer to the bound separately now -- the widget is this press's,
+    # the selection is the key's.
+    r = _wayland_effect_resolver(
+        FakeEffectLog(
+            [
+                _effect("Cherry", "list item", 1000.5),
+                _effect("Cherry", "list item", 1000.75, selectable=True),
+            ]
+        )
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.selectable is True
+    assert r.effect_attribution_stands(1000.4, until=1000.7) is True
+    assert r.effect_selection_stands(1000.4, until=1000.7) is False
+
+
+def test_a_folded_selection_inside_the_bound_stands():
+    # The same two effects with the next input at 1000.9: both halves are
+    # inside the span, and the click really did select the row.
+    r = _wayland_effect_resolver(
+        FakeEffectLog(
+            [
+                _effect("Cherry", "list item", 1000.5),
+                _effect("Cherry", "list item", 1000.75, selectable=True),
+            ]
+        )
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=1000.9) is True
+    assert r.effect_selection_stands(1000.4, until=1000.9) is True
+
+
+def test_the_selection_question_is_answered_once_and_apart_from_the_other():
+    # Two records, consumed independently: a normalizer that asks in either
+    # order gets the same answers, and a second ask about the same press has
+    # nothing left to disprove.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.5, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_selection_stands(1000.4, until=1000.45) is False
+    assert r.effect_selection_stands(1000.4, until=1000.45) is True
+    assert r.effect_attribution_stands(1000.4, until=1000.45) is False
+
+
+def test_a_press_named_from_a_focus_effect_has_no_selection_to_disprove():
+    # A push button that only ever took focus: the live name is not
+    # selectable, so there is no selection record and nothing to reject.
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Save", "push button", 1000.5)])
+    )
+    target = r.resolve(640, 400, when=1000.4)
+    assert target.element is not None and target.element.selectable is None
+    assert r.effect_selection_stands(1000.4, until=1000.45) is True
+
+
+def test_the_final_lookup_excludes_an_effect_at_the_next_input_itself():
+    # The live gate drops a name whose effect fired *at* the next input --
+    # strictly, `at < until`. The retry clipped its window to `until` and rode
+    # on `nearest`'s inclusive end, so that same effect came back and restored
+    # the name the gate had just removed.
+    log = FakeEffectLog([_effect("Cherry", "list item", 1000.7, selectable=True)])
+    r = _wayland_effect_resolver(log)
+    assert r.attribute_effect_final(when=1000.0, title="Target", until=1000.7) is None
+    assert (
+        r.attribute_effect_final(when=1000.0, title="Target", until=1000.75) is not None
+    )
+
+
+def test_effect_attribution_stands_for_a_press_not_named_from_an_effect():
+    # A press the focus path named (or nothing named) has no effect record to
+    # disprove; an unbounded one (the last click of the recording) neither.
+    r = _wayland_effect_resolver(FakeEffectLog([]))
+    assert r.resolve(640, 400, when=1000.4).element is None
+    assert r.effect_attribution_stands(1000.4, until=1000.5) is True
+    r = _wayland_effect_resolver(
+        FakeEffectLog([_effect("Cherry", "list item", 1000.75, selectable=True)])
+    )
+    r.resolve(640, 400, when=1000.4)
+    assert r.effect_attribution_stands(1000.4, until=None) is True
 
 
 def _stale_focus_resolver(effects):

@@ -26,7 +26,7 @@ import contextlib
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 __all__ = ["AtspiEffect", "AtspiEffectLog"]
@@ -81,12 +81,33 @@ class AtspiEffect:
     False for the focus and press effects in `_EVENTS`, which say nothing about
     selectability; the default keeps older constructors (the tests') working."""
 
+    selected_at: float | None = None
+    """When the selection this effect's `selectable` came from fired, where
+    that was a *different*, later effect on the same widget -- `nearest`'s
+    fold, which carries a row's selection onto its earlier focus effect. None
+    where the effect is its own evidence (a selection effect, or none at all).
+
+    Kept because the two halves answer to different bounds: the focus effect
+    is this press's by its own stamp, while a selection that fired after the
+    user's next input belongs to that input. Only the resolver's
+    `effect_selection_stands` reads it."""
+
 
 class AtspiEffectLog:
     """Collect AT-SPI effects on a private event loop; query by time + window."""
 
     def __init__(self, maxlen: int = 256) -> None:
-        """Keep the last `maxlen` effects; nothing runs until `start`."""
+        """Keep the last `maxlen` effects; nothing runs until `start`.
+
+        The ring is a memory bound, not an attribution window. Every reader
+        asks about a span that is already closed -- the live resolver about
+        the moments after a press, the normalizer about a click the next input
+        action has just bounded -- and consumes the evidence then, so what the
+        ring has to hold is the effects of the interaction in flight, not the
+        session's. The one span still open at the end of a recording is the
+        trailing click's; a burst of more effects than this inside its span
+        would evict the earliest, and that is the residual the bound accepts.
+        """
         self._effects: deque[AtspiEffect] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -164,7 +185,13 @@ class AtspiEffectLog:
                 listener.deregister(event_type)
         self._listeners.clear()
 
-    def nearest(self, after: float, within: float, toplevel: str) -> AtspiEffect | None:
+    def nearest(
+        self,
+        after: float,
+        within: float,
+        toplevel: str,
+        before: float | None = None,
+    ) -> AtspiEffect | None:
         """The earliest effect in [after, after+within] from window `toplevel`.
 
         Inclusive at both ends: an effect stamped in the press's own instant
@@ -172,17 +199,51 @@ class AtspiEffectLog:
         react to a press is what the press did; later effects are its
         consequences. `toplevel` ties it to the clicked window by the window's
         own title, since the window backend may publish no pid to match on.
+
+        `before` is an *exclusive* upper bound on top of the window -- the
+        user's next input, for a caller that knows it. Exclusive because an
+        effect stamped exactly at the next press is that press's reaction by
+        the rule the whole attribution runs on, and the live gate
+        (`effect_attribution_stands`) applies it strictly; expressed as a
+        narrower `within`, the inclusive end above would have admitted that
+        one effect and handed back the name the gate had just removed.
         """
         with self._lock:
             candidates = [
                 e
                 for e in self._effects
                 if after <= e.at <= after + within
+                and (before is None or e.at < before)
                 and e.name
                 and e.toplevel == toplevel
                 and e.role not in _WINDOW_ROLES
             ]
-        return min(candidates, key=lambda e: e.at) if candidates else None
+        if not candidates:
+            return None
+        earliest = min(candidates, key=lambda e: e.at)
+        # A click on a selectable row publishes two near-simultaneous effects
+        # on the *same* widget: it takes focus (`selectable=False`) and it
+        # becomes selected (`selectable=True`), in that order -- measured on
+        # KWin/Qt, a list item's focus effect led its selection effect by a few
+        # milliseconds. Earliest-wins alone would name the row from the focus
+        # effect and lose that it was *selected*, so the generator would emit a
+        # `.click()` where a `.select()` belongs. So keep earliest for identity
+        # but, when that same widget also produced a selection effect inside the
+        # window, carry the selection: same source, and selection is the
+        # meaningful half of the reaction. A press that only ever took focus
+        # (a push button) keeps `selectable=False` and stays a click.
+        # The selection's own stamp is carried with it: the fold is the one
+        # place where `selectable` comes from a *later* effect than the one
+        # being returned, and a caller holding this against the user's next
+        # input has to be able to tell the two apart.
+        selections = [
+            e.at
+            for e in candidates
+            if e.selectable and e.name == earliest.name and e.role == earliest.role
+        ]
+        if not earliest.selectable and selections:
+            return replace(earliest, selectable=True, selected_at=min(selections))
+        return earliest
 
     # -- listener thread ----------------------------------------------------
     def _run(self) -> None:
@@ -269,20 +330,38 @@ class AtspiEffectLog:
 
     @staticmethod
     def _toplevel_name(src: Any) -> str:
-        """The name of the nearest window-role ancestor, or ''.
+        """The name of the window this accessible belongs to, or ''.
+
+        Two shapes of tree, because one bridge does not label its toplevel a
+        window. The usual one -- `frame`/`window`/`dialog` (etc.) ancestor --
+        is matched directly. The other was measured on the Qt AT-SPI bridge
+        under KWin/Wayland: the toplevel that carries the window title is
+        published as a **`filler`**, not a `frame`, so the window-role check
+        never fires and the title sits one level below `application`
+        (desktop frame -> application -> **toplevel** -> widgets). Keying on
+        the tree's *shape* -- the accessible whose parent is the
+        `application` -- finds the title whatever role the bridge gave it,
+        and is the same node a normal `frame` would be, so a window-role tree
+        still resolves identically.
 
         Bounded: a cycle or a pathological tree must not hang the listener.
         """
         node = src
+        prev = None
         for _ in range(24):
             try:
                 role = node.get_role_name()
                 if role in _WINDOW_ROLES:
                     return node.get_name() or ""
+                # The toplevel is the application's direct child; return it
+                # even when the bridge did not give it a window role.
+                if role == "application" and prev is not None:
+                    return prev.get_name() or ""
                 parent = node.get_parent()
             except Exception:  # noqa: BLE001
                 return ""
             if parent is None:
                 return ""
+            prev = node
             node = parent
         return ""
