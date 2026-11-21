@@ -756,7 +756,7 @@ def replay(source: str, display: str) -> list[str]:
 def round_trip(recording: Recording, source: str) -> list[str]:
     """Save the recording, read it back, and check it renders the same.
 
-    The claim `--regenerate` rests on: a recording is the durable artefact and
+    The claim `--regenerate` rests on: a recording is the durable artifact and
     the script is derived from it, so a saved one has to render to the same
     thing on a later run. Only ever checked against events built in a test
     before this; here it is a real capture, with real windows, elements,

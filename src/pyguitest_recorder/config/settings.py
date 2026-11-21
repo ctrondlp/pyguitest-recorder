@@ -274,6 +274,25 @@ class Settings:
     failing to import.
     """
 
+    event_delay: float | None = None
+    """`event_delay` for the generated script's own `pyguitest.connect(...)`.
+
+    Unset is not "no delay": it is the measured default
+    (`generator.python._INPUT_EVENT_DELAY`) for a script that synthesises
+    pointer or key input, and nothing for a script of named element calls and
+    checks, which charges no event delay anyway. pyguitest's session default is
+    `0.0` and its own `connect()` docstring says a script driving real input
+    should usually override it -- a generated script is that script, and the two
+    failures it prevents (a click lost behind the move in front of it, a key
+    lost behind the key in front of it) are both silent.
+
+    Set a number to pin one: higher for an application that needs longer to
+    settle between events, or `0.0` to ask for pyguitest's unpaced default
+    deliberately. There is no separate `key_delay` setting -- nothing measured
+    here needs one, and `type_text`'s pacing is the generated script's own
+    literal to edit if an autocompleting field ever does.
+    """
+
     max_waypoints: int = 32
     """Cap on `via` points under `motion = "recorded"`; 0 or less means no cap.
 
@@ -392,6 +411,7 @@ class Settings:
         """
         self._validate_timeout_numbers()
         self._validate_timeout_ordering()
+        self._validate_event_delay()
         self._validate_motion_needs_record_motion()
         self._validate_check_key_is_not_the_stop_key()
         self._validate_header_needs_include_header()
@@ -418,6 +438,26 @@ class Settings:
                 raise ConfigError(
                     f"{name} must be a finite number greater than 0, got {value!r}"
                 )
+
+    def _validate_event_delay(self) -> None:
+        """Reject an `event_delay` that would be written into a script as-is.
+
+        Refused rather than clamped for the same reason the timeouts are: the
+        value is rendered straight into the generated `connect(...)` as a
+        literal, so a negative number reaches `time.sleep` at replay and raises
+        there -- in somebody else's script, long after the flag that caused it
+        -- and `inf`/`nan`, which argparse's `type=float` accepts as readily as
+        a number, either hang the replay forever or sleep for no time while
+        looking like a setting. `0` is allowed and meaningful: it is pyguitest's
+        own unpaced default, asked for deliberately.
+        """
+        if self.event_delay is None:
+            return
+        if not math.isfinite(self.event_delay) or self.event_delay < 0:
+            raise ConfigError(
+                f"event_delay must be a finite number of seconds, 0 or more, "
+                f"got {self.event_delay!r}"
+            )
 
     def _validate_timeout_ordering(self) -> None:
         """Reject a `max_timeout` below `default_timeout`.

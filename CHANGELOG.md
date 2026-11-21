@@ -3,6 +3,193 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.21.0] — 2026-11-21
+
+A minor, for `event_delay`: new command-line and configuration surface, plus
+a new field on a recorded run of typing (`TextInput.prior_text`, optional, so
+every older session still loads and regenerates). The pyguitest floor does
+not move -- nothing emitted here is new API over there.
+
+What the release is actually about is the whole generated artifact: what a
+script *does* when it replays, rather than whether it renders. Four of the
+fixes are a script that validates clean and does something other than what
+was recorded -- the failure class this repository works hardest to avoid --
+and three of those were reproduced live on a real GTK application, one of
+them with the fix switched off on the same desktop to watch the defect
+happen, before being fixed.
+
+### Fixed
+
+- **The click that dismisses a modal dialog is no longer recorded as a click
+  on whatever the dialog was covering.** Known, reproduced and left open since
+  2026-09-23, and the most serious thing in `docs/developers/status.md`:
+  recording "click `Confirm`, then click `OK` in the dialog it raises"
+  produced a script that validated clean, ran clean and opened the dialog
+  twice without ever dismissing it. The cause is structural rather than lag --
+  a click that dismisses a window is always consumed *after* that window has
+  gone, so there is no dialog left in the accessible tree to resolve against
+  and the hit test answers with the parent's own control at the same point,
+  which the window list then agrees with. The resolver now remembers the
+  transient toplevels (`dialog`, `alert`, `file chooser`) it has seen over a
+  point, with their rectangles, for a couple of seconds, and refuses to name
+  an element from a *persistent* window underneath one of them. Refusing is
+  the whole fix: the coordinate the click falls back to is relative to the
+  parent, the dialog opens in the same place, so the refused click dismisses
+  the dialog where the confidently-named one did not. Measured on a real GTK
+  modal on a private X server, with and without the change: without it the
+  dismissing click came out as `check box 'Enabled'` -- a control in the
+  parent window that a generated script would have *toggled*. Costs no window
+  list on the ordinary path: a dialog the pointer is already inside is
+  remembered from the window rectangle the resolver has in hand, and the one
+  lookup happens only on the mismatch that reveals a dialog nobody had seen.
+
+  **Recognised by window class as well as by role, which is what makes it
+  work on Windows.** `dialog`, `alert` and `file chooser` are an at-spi
+  vocabulary: measured on Windows 11, a `MessageBoxW` modal and an ordinary
+  application window *both* publish accessible role `window`, so the role
+  cannot tell them apart there at all. The window class can -- `#32770` for a
+  standard dialog against the application's own for its frame -- and
+  `Window.app_id` carries the class on that platform, the same field the
+  frame-host check already reads. So a transient toplevel is recognised by
+  either signal, and a click into a dialog that is *still there* is kept by
+  either one. What neither signal marks is a framework that builds its own
+  toplevel (WPF, WinUI); UI Automation's `IsDialog` property is what would
+  answer for those, and pyguitest does not expose it. On macOS the measurement
+  says the memory cannot fire at all -- a dialog there publishes role
+  `window`, an empty window title and the owning process as its app id -- so
+  this is an at-spi and standard-Win32 fix, and `docs/developers/status.md`
+  records what each of the three bridges answered.
+
+  The race is also one the recorder can *win*: on Debian 13/GNOME the same
+  interaction resolved correctly both with the fix and with it stubbed out,
+  because press 2 was consumed before GTK had destroyed the dialog. This is
+  the safety net for the losing case, and it costs nothing in the winning one.
+
+- **A click that opens a window is emitted through the pointer, which is what
+  lets the script that follows it work at all.** Replaying a generated script
+  against the GTK probe window on Debian 13/GNOME: `button("Confirm").click()`
+  opened the modal through the accessible action, and then *nothing else in
+  that application answered an action* — `button("OK", within=…).click()` left
+  the dialog open, still open ten seconds later, and the script exited 0
+  having not dismissed it. The cause is the one `docs/troubleshooting.md`
+  names: a GTK dialog runs its own nested loop inside the handler of the
+  action that opened it, so the at-spi bridge in that process never returns
+  from that call and every later action waits behind it. The recording already
+  knows which click that was — the analyzer put a `wait_for_window` after it —
+  so that one click is now rendered `click(via="pointer")`, with the
+  capabilities it needs added to the preamble so a desktop that cannot do it
+  says so on line one. Measured after the change: the same two clicks dismiss
+  the dialog, and the replay ends with the window list clean. Only the opener
+  changes, and only under `click_via = "auto"`: a caller who pinned a route
+  gets the route they pinned.
+
+- **The dialog memory works on macOS, which needed a fix on each side.** Two
+  things stopped it. pyguitest reported every Mac modal as a plain `window` —
+  `AXDialog`/`AXSystemDialog` arrive as a *subrole*, not a role, so the map
+  never matched them; that is fixed in pyguitest 0.27.0, and with an older one
+  installed a Mac dialog is still a `window` and the memory simply does not
+  fire, exactly as before. And this side required the element's toplevel name
+  to equal the window's title, while a Mac dialog's window-list entry carries
+  an **empty** title — measured on 15.8.1, where the element's own toplevel is
+  `('dialog', 'alert')` and the window's title is `''`. Only a real
+  *disagreement* stops the memory now; a window that publishes no title says
+  nothing either way, which is the rule `_other_toplevel_of` already followed
+  from the other side. Verified live on macOS: the dialog is remembered, and
+  the click that dismisses it is refused rather than attributed to the window
+  underneath.
+
+- **Typing into a field that already held text is emitted as keystrokes, not
+  as a whole-value replacement.** `Element.set_text` and a run of typing are
+  the same act only for a field that was empty: they both leave it holding
+  exactly what was typed. For a field with something in it they are not, and
+  the script was the wrong one -- a recording of adding a word to a sentence
+  replayed as a field holding the word alone, from a public API, with perfect
+  syntax. A run now carries what the field held when it opened
+  (`TextInput.prior_text`, read once per run and never for a sensitive one,
+  where reading the field would carry the secret into the recording by the
+  other hand), and a run into a field that was not empty is emitted as
+  `gui.type_text(...)` at the caret the click before it placed -- so that
+  click also keeps its coordinate, since neither `focus()` nor a named
+  `click()` can aim at a position *within* the text. An empty field is
+  unchanged, which is the rendering five platforms' live runs measured.
+  Live-measured on a real GTK entry: typing `hello` into the empty field
+  still renders `set_text("hello")`, and typing `xy` at the end of it renders
+  `gui.type_text("xy")`, leaving `helloxy` where `set_text("xy")` would have
+  left `xy`. A recording made before this field existed, or on a desktop whose
+  bridge will not give the text up, renders exactly as it did.
+
+- **A generated script paces its own input.** `Session`'s `event_delay`
+  defaults to `0.0` and pyguitest's own `connect()` says a script driving real
+  input should usually override it -- which is what every script generated
+  here is, and none of them did. Two measured failures, both silent: a click
+  that arrives before the pointer move in front of it has been processed is
+  simply dropped (pyguitest's `connect()`: found on two driver scripts that
+  "ran for a long time looking fine because nothing checked that each click
+  actually landed", and `event_delay=0.15` turned a high silent-miss rate into
+  a clean run), and `send_keys("7*6~")` losing its trailing Enter against a
+  widget that updates off the main loop (pyguitest's `docs/validation.md`).
+  The generated `connect()` now names 0.15 where the script synthesises
+  pointer or key input and nothing where it does not -- a named element's
+  `click()`, `focus()` or an `expect_*` charges no event delay at all, so a
+  fully semantic script is unchanged. `event_delay` is a setting and
+  `--event-delay` a flag; `0` asks for pyguitest's unpaced default
+  deliberately rather than inheriting it.
+
+- **A script with no check in it says so.** The README has always explained
+  that actions alone are not a test -- a script can click Save, exit 0, and
+  prove nothing about whether anything was saved -- and the generated file
+  never mentioned it. It now opens its notes with a warning naming the check
+  key, for any recording whose checks produced no `expect_*` call at all.
+  Counted by calls rendered rather than by `Assertion` events, because five
+  paths record a check and emit nothing: a `text`, `checked` or `showing`
+  check whose element could not be named, a `window` check on a window with
+  no title, the `nothing` check the recorder writes when a check was asked for
+  over something unidentifiable, and a check from a later version of this
+  package. Each of those already warned on its own; each also leaves the
+  script verifying nothing.
+
+- **The toplevel check stops at the nearest toplevel an element names.** It
+  walked past one that *matched* the window under the point and refused on an
+  outer one that did not, so on a toolkit that nests a dialog under its parent
+  frame -- Qt and KDE, where toplevels need not be the siblings GTK makes them
+  -- every correctly resolved dialog element was rejected by its own parent's
+  name. Only a real disagreement should reject, which is the rule everywhere
+  else in that class.
+
+- **The warning about text that went somewhere unnameable is no longer
+  attached to a field that was named.** It fired for every run that reached
+  `type_text`, which now includes a run at a caret and has always included
+  every run under `--absolute-coordinates`. A false claim there is worse than
+  none: what it exists to make a reader do is check the file for a secret the
+  recorder could not have known about.
+
+### Added
+
+- **`event_delay` / `--event-delay`**: the pause the generated session takes
+  after each synthesised pointer and key event. See the fix above for what the
+  default answers; a number pins it, and `0` asks for an unpaced session.
+
+- **A FreeBSD job in CI, nightly.** `pyproject.toml` has claimed the platform
+  since the live GhostBSD recording and replay, and nothing in CI ran on it --
+  while `windows` and `macos` both existed on precisely that reasoning. GitHub
+  has no BSD runners, so the job boots a FreeBSD VM under QEMU on an ubuntu
+  one and runs the suite there, nightly and on dispatch rather than per push,
+  since the boot costs minutes before a single test runs. The sibling
+  pyguitest repository's own FreeBSD job tests that package, not this one, so
+  it cannot see a Linux-only assumption made here.
+
+### Changed
+
+- **`backends/macos.py`'s module docstring says what has now been run.** It
+  still opened with "what has *not*: a recording session against a live
+  desktop, and the Unicode string `CGEventKeyboardGetUnicodeString` is
+  supposed to hand back" -- both of which `docs/developers/status.md` records
+  as measured, one of them the source of the special-key fix in 0.6.0. It now
+  names both live runs and keeps the qualification that still holds: every
+  event in them was posted, by a separate process, because a tap skips the
+  events of the process that installed it, so provenance and modifier-flag
+  order are posted-event measurements.
+
 ## [0.20.1] — 2026-11-17
 
 ### Fixed
@@ -219,7 +406,7 @@ was released.
   and on `PROFILE`'s line. The floor is what makes the emitted script's own
   vocabulary portable, which is what this pin is for.
 - **Saving a recording now says what the file holds.** The only thing said
-  at the moment the artefact appeared was `Recording saved to X`, and a
+  at the moment the artifact appeared was `Recording saved to X`, and a
   saved recording is sensitive whether or not `--record-raw` was given:
   redaction is applied by the *generator*, so the events in the file carry
   the text that was typed even when the script withheld it. `--record-raw`

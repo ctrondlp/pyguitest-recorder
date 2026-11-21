@@ -22,6 +22,8 @@ claiming everything works.
 | XRecord capture of a real application | run live, here and on CI runners |
 | win32 capture (low-level hooks, keysyms, `ToUnicodeEx`) | run live on Windows 11 -- see below |
 | AT-SPI element resolution | run live against a real accessibility bus; same-process multi-window case run live -- see below |
+| The click that dismisses a modal dialog | run live on a real GTK modal, measured with the fix and with it switched off -- see below |
+| Whether a typed run replaces a field's value or goes in at a caret | run live on a real GTK entry, both cases -- see below |
 | Focus-based targeting for typed text | run live; names a GTK4 field |
 | Drag, window switching, save/regenerate | run live |
 | Record-and-replay round trip on X11, with verification | run live on a private Xvfb -- see below |
@@ -32,6 +34,304 @@ claiming everything works.
 | wayland record -> generate -> replay, auto fallback, `--doctor` | run live on native-Wayland KDE Plasma 6 and GNOME Shell 51 sessions -- see below |
 | Keyboard attribution on native Wayland (`resolve_keyboard`) | run live on KWin and GNOME Shell 51 -- 122/122 keystrokes named the application, replay exit 0; see below |
 | win32 hook health (a hook Windows removed silently) | run live on Windows 11 -- a real hook removed by hand, reported 2.7s later; see below |
+
+## The modal dialog, fixed and measured both ways (2026-11-21)
+
+**The gap this file has carried since 2026-09-23 is closed.** The section
+further down ("A modal dialog: found, reproduced, and **not** fixed") is the
+record of finding it; this is the record of fixing it, and of watching the
+defect happen on the same desktop with the fix switched off.
+
+A private Xvfb with its own accessibility bus, `scripts/gtk_probe_window.py`
+as the application, and the interaction the earlier run characterised: click
+`Confirm`, which raises the modal `Confirm Action`, then click that dialog's
+`OK`, which dismisses it. Both presses were driven by XTEST and resolved by a
+real `Recorder` against a real AT-SPI bus. Two passes in one run, the second
+with `_transient_over` stubbed out, which is the behaviour before the fix.
+
+Without the fix, press 2 -- the click that dismissed the dialog, aimed at
+`OK`'s own measured rectangle -- was recorded as:
+
+```
+press 2 at (404, 354)  -> window 'Modal Probe', element check box 'Enabled'
+```
+
+A **check box** in the parent window, at the same point the dialog's button
+had been. Worse than the original finding's `button 'Confirm'`: a generated
+script would not merely have missed the dialog, it would have toggled a
+control nobody touched, and reported success.
+
+With the fix, the same press:
+
+```
+press 2 at (404, 354)  -> window 'Modal Probe', element None
+    reason: a 'Confirm Action' dialog was over this point a moment before
+            this click, and the click that dismisses a dialog is consumed
+            after it has gone -- so what is named here is whatever the
+            dialog was covering
+```
+
+Press 1 is refused in both passes, by the toplevel check that found this in
+the first place, and that refusal is where the memory comes from: it is the
+only moment the resolver sees the dialog at all, so the rectangle is looked
+up then, once, rather than by listing windows on every click. Reproduced
+twice, identically.
+
+**What this run cannot show.** Whether the *replay* then dismisses the dialog.
+A GTK toplevel under no window manager never takes keyboard focus on this
+server -- measured separately below -- and a replay of this script needs the
+window focused for its own keystrokes; the coordinate half of the argument
+(the fallback point is relative to the parent, and the dialog opens in the
+same place) is reasoned from the recorded geometry rather than replayed here.
+
+## The same two fixes, taken to the fleet (2026-11-21)
+
+The private-Xvfb runs above are one bridge on one machine. These are the same
+two changes measured on the three bridges and the two other platforms the
+package claims, and two of the five results changed the code.
+
+### Debian 13 / GNOME, XWayland client, real window manager
+
+The thing a bare X server cannot test: a pointer click that genuinely focuses
+a field and places a caret in it.
+
+- **Typing: the generated script is accurate, by its end state.** Recorded
+  clicking into the empty `Name` entry and typing `hello`, then clicking past
+  the end of that text and typing `xy`. `prior_text` read `''` then `'hello'`;
+  the script came out as `set_text("hello")` for the first run and, for the
+  second, the kept coordinate click plus `gui.type_text("xy")`. Replayed
+  against a *fresh* window it left the entry holding **`helloxy`** -- the same
+  string the recording produced, where `set_text("xy")` would have left `xy`.
+- **The modal attribution did not need the fix here, and was not harmed by
+  it.** The same "click Confirm, then OK" interaction resolved *correctly*
+  with the fix and with `_transient_over` stubbed out: both runs named
+  `button("OK")` scoped to `Confirm Action`. So the misattribution is a race
+  the recorder can also *win* -- on this box it consumed press 2 before GTK
+  had destroyed the dialog, where on the Xvfb box it did not. The fix is a
+  safety net for the losing case and costs nothing in the winning one.
+- **The replay did not dismiss the dialog -- found, diagnosed and fixed.** The
+  generated script named the right controls and still left the modal open,
+  ten seconds later and at the end of the run. Two defects underneath, one on
+  each side:
+
+  **1. `click(via="pointer")` moved no pointer at all** (fixed in pyguitest
+  0.27.0). Four routes against the same button, each from a fresh window:
+
+  | route | pointer | dialog opened |
+  |---|---|---|
+  | `move_mouse(centre)` + `click()` | (587,231) -> (360,357) | yes |
+  | `gui.click_element(element)` | (587,231) -> (360,357) | yes |
+  | `element.click(via="pointer")` | **(587,231) -> (587,231)** | **no** |
+  | `element.click()` (the ladder) | unmoved (action route) | yes |
+
+  The pointer route tried dogtail's own click first and fell back to the
+  session's pointer only when dogtail *raised*; on this compositor dogtail
+  injected nothing and raised nothing, so the fallback never happened. The
+  order is now the session's pointer first. Re-measured after the fix: all
+  four routes land. The *default* ladder reaches the same rung whenever an
+  element publishes no clickable action, so those clicks were going nowhere
+  here as well -- measured after the fix on an action-less element, with the
+  pointer parked at (20, 20): `click()` left it exactly at the element's
+  centre.
+
+  **2. The *opening* click must not go through an accessible action** (fixed
+  here). With the pointer route working, both routes dismiss the dialog --
+  `via=action` and `via=pointer`, measured -- which located the real fault:
+  it is not the dismissing click but the one that *opens* the modal. A GTK
+  dialog runs its own nested loop inside the handler of the action that
+  opened it, so the at-spi bridge in that process never returns from that
+  call and every later action queues behind it. The generator now renders a
+  click the recording shows opened a window as `click(via="pointer")`.
+
+  End to end after both fixes, on a fresh window: `replay exit: 0`,
+  `windows after the replay: ['Live Probe']`, **the modal was left open:
+  False** -- where the same scenario before them ended with
+  `['Live Probe', 'Confirm Action']`.
+
+### Windows 11, UI Automation
+
+Two measurements, and the first one changed the code.
+
+- **A modal publishes the role a main window publishes.** A `MessageBoxW`
+  dialog and this repo's own probe window both resolved to
+  `('window', <title>)` in an element's ancestry -- so `TRANSIENT_ROLES`, an
+  at-spi vocabulary, can never fire here. What does tell them apart is the
+  window class, which `Window.app_id` carries on this platform: `#32770` for
+  the dialog, `PyguitestRecorderProbeWindow` for the frame. `DIALOG_CLASSES`
+  is that signal, and the dialog memory now reads role *or* class.
+- **With that, the sequence was measured here both ways.** One process owning
+  a main window and the `#32770` modal it raises -- this repo's own Win32
+  fixture with its push button changed to raise one -- the pointer resting on
+  the dialog's `OK` and then clicking it. The hover is where the dialog gets
+  remembered (`remembered: ['Confirm Action']`, which on this platform can
+  only have come from the class), and a point the dialog had covered, resolved
+  while that memory was live, answered:
+
+  ```
+  with the fix:  window 'Modal Fixture', element None
+                 reason: a 'Confirm Action' dialog was over this point a
+                 moment before this click ...
+  without it:    window 'Modal Fixture', element menu item 'Actions'
+  ```
+
+  A menu item a generated script would have *activated*. Two things the run
+  also settled, both worth knowing before the next probe is written here:
+  Windows places a message box where it likes -- here mostly outside the
+  window that owns it, on a 125%-scaled display, so the point the dialog's own
+  button sat at is refused by the pid check rather than by this -- and the
+  two-second memory is shorter than a probe that prints diagnostics between
+  the click and the resolve, which is why the first attempt refused nothing.
+- **A field's prior text is readable.** `element_text` answered `'hello'` both
+  by the target's point and off keyboard focus, so `prior_text` -- and with it
+  the choice between setting a value and typing at a caret -- works on this
+  bridge too.
+- The suite runs clean from the deployed tree (1394 passed, 23 skipped before
+  the class work, 1399 after it).
+
+### macOS 15.8.1, the Accessibility API
+
+**Closed the same day, with a fix on each side.** The first measurement said
+the memory could not fire here at all: a dialog resolved to an element whose
+nearest toplevel was `('window', 'alert')` — the same `window` role Windows
+gives — while its window-list entry carried an *empty* title and the owning
+process as its `app_id` (`UserNotificationCenter`). Two separate causes, and
+both are now fixed:
+
+- **pyguitest reported every Mac modal as a plain `window`.** Read straight
+  off the live tree: the dialog is `role='AXWindow'
+  subrole='AXSystemDialog' title='' roleDescription='system dialog'`, a
+  Terminal window `AXWindow`/`AXStandardWindow`. `AXDialog` and
+  `AXSystemDialog` had been in pyguitest's role table since its macOS backend
+  landed and never matched anything, because they are *subroles*.
+  pyguitest 0.27.0 consults `kAXSubroleAttribute` for a window, and
+  `gui.elements(role=Role.DIALOG)` now returns the modal where it returned
+  nothing. With an older pyguitest installed a Mac dialog is still a `window`
+  and the memory does not fire — the behaviour this file recorded before,
+  degraded rather than broken.
+- **This side required the names to agree.** `_remember_transient` compared
+  the element's toplevel name with the window's title, and here one is
+  `'alert'` and the other `''`. Only a real disagreement stops it now.
+
+**A Mac dialog's title depends on who owns it, and both shapes now work.**
+The empty title above is the shape macOS gives a dialog it routes through
+`UserNotificationCenter` -- which is what happens for an application that is
+not frontmost. A dialog owned by the application itself carries its title
+normally: measured on the same box, `title='Confirm Action'
+app_id='Terminal'`, `elements(role=Role.DIALOG)` returning
+`('dialog', 'Confirm Action')`, and -- the part a generated script depends on
+-- **`gui.window_element("Confirm Action")` resolving to that dialog**, with
+its `OK` and `Cancel` buttons findable `within=` it. That scoping is new on
+this platform: before the subrole fix the dialog answered `window`, so a
+`window_element` lookup could not tell it from the application window behind
+it. `focused()` still answers a widget rather than a toplevel, which is the
+other thing a role change could have broken.
+
+With both in place, measured live on 15.8.1: the pointer rests on the
+dialog's own button (`hover -> element push button 'Allow'`), the dialog is
+remembered (`remembered: ['alert']`), and the point it covered — resolved
+after the dialog has gone — comes back refused, naming the dialog in its
+reason. The hit test inside a Mac dialog does name widgets, which is what
+makes the free half of the memory reachable there: `element_at` answered
+`push button 'Allow'`, labels and images, all with
+`(('application', 'UserNotificationCenter'), ('dialog', 'alert'))` as their
+ancestry. The suite runs clean from the deployed tree (1330 passed, 87
+skipped before this work, 1335 after it).
+
+One harness note for the next run here: `osascript`'s own `display dialog`
+never reaches the logged-in session from an SSH shell (that is the
+`Background` launchd domain), so the dialog has to be told to an application
+already in the session — `tell application "Finder" to display dialog …` —
+and which *window* carries it then depends on what is frontmost: macOS routes
+a background app's dialog through `UserNotificationCenter` and a frontmost
+app's through the app itself. Look for a window the list did not have before,
+not for a particular owner. Terminating an `osascript` that is holding a
+modal can also leave Finder refusing the next one for a while.
+
+### Both suites, both trees, on all four (2026-11-21, after the fixes)
+
+The two platform fixes above are a pyguitest change and a recorder change
+together, so both trees were deployed to each box and both suites run from
+them -- `pyguitest 0.27.0` first on the path, since the recorder's `PROFILE`
+test ties itself to the *installed* pyguitest:
+
+| box | pyguitest suite | recorder suite |
+|---|---|---|
+| FreeBSD 15.1 | 2953 passed, 68 skipped | 1494 passed, 3 skipped |
+| Debian 13 (GNOME) | 2993 passed, 28 skipped | 1570 passed, 7 skipped |
+| macOS 15.8.1 | 2932 passed, 89 skipped | 1349 passed, 88 skipped |
+| Windows 11 | 2663 passed, 112 skipped | 1414 passed, 23 skipped |
+
+**What is verified live and what is not.** The dialog memory's *fix path* is
+measured on all three bridges: at-spi (the Xvfb run and Debian), the Windows
+class route, and macOS. The *contrast* -- the defect happening with the fix
+switched off -- is measured on at-spi and on Windows; on macOS it is not,
+because that box serves one AppleScript dialog at a time and a second pass
+queues behind the first, so the stubbed run never got a dialog of its own.
+The macOS shape is covered by `tests/test_resolver.py`'s
+`TestTheSameDialogAsMacosPublishesIt`, built from the live measurements
+above.
+
+### FreeBSD 15.1
+
+The new nightly CI job's own steps, run on a real box rather than trusted:
+`python3 -m ensurepip` answers (pip 25.0.1), `pip install -e '.[x11]' pytest`
+resolves pyguitest 0.26.1 from PyPI and builds this package editable, and the
+suite passes -- **1474 passed, 3 skipped**, comfortably over the job's floor.
+The one correction it forced: `python3` there is **3.12**, so the job's
+fallback package name is derived from the interpreter rather than written as
+`py311-pip`, which would have installed pip for a Python the job does not use.
+
+## Typing into a field that already held text (2026-11-21)
+
+`TextInput.prior_text`, measured on a real GTK entry on the same private
+server. The question it answers: whether replacing a field's value is the same
+act as typing into it. For an empty field it is -- both leave the field
+holding exactly what was typed -- and for a field with something in it, it is
+not.
+
+Two runs into `gtk_probe_window.py`'s `Name` entry, in one recording:
+
+| run | field held before | `prior_text` read | generated |
+|-----|-------------------|-------------------|-----------|
+| typed `hello` | `''` | `'h'` | `gui.text_field("Name", within=…).set_text("hello")` |
+| typed `xy`, caret at the end | `'hello'` | `'hellox'` | `gui.type_text("xy")` |
+
+The entry ended holding `helloxy`, which the generated script reproduces;
+`set_text("xy")` -- what the generator wrote for that run before this change
+-- would have left it holding `xy`.
+
+Both reads caught the race the field's own docstring names: the read happens
+as the run opens and the application had already taken the first character
+(`'h'`, `'hellox'`). A re-run on Debian, where the recorder was running a
+second or so behind live input, read the *whole* post-run value instead
+(`'hello'` for the run that typed `hello`, `'helloxy'` for the run that typed
+`xy`) -- and both decisions still came out right, because "a prefix of what
+was typed" covers an equal string as well as a partial one, and a value
+*longer* than what was typed can only mean the field already held something.
+The prefix rule is therefore not only about the first character: it is what
+makes the answer independent of how far behind the read happened to be. That is why a value which is a *prefix* of what was
+typed reads as the empty case -- the first run is exactly that shape, and
+rendering it as a replacement is correct, since the field did end up holding
+`hello` and nothing else.
+
+**Two things this run measured about the harness rather than the recorder**,
+both worth knowing before the next live check is written here:
+
+- **A GTK toplevel under no window manager never takes keyboard focus.** On
+  this private server neither a pointer click into the entry nor typing over
+  it reached the widget at all (`Element.focused` stayed False, the entry
+  stayed empty), while `Element.focus()` through AT-SPI focused it and the
+  typing then landed. So the runs above were focused through AT-SPI, and the
+  caret-placing *click* -- the other half of the fix -- is covered by the
+  suite rather than by this run. `live-capture-check.py` types into its own
+  application the same way and is subject to the same limitation: its typed
+  text lands only where the toolkit focuses an entry on map, which zenity does
+  and this probe window does not.
+- **`Element.focus()` on a GTK entry selects the whole value**, so typing
+  straight after it replaces the text rather than appending -- which is a
+  whole-value replacement, correctly rendered as one. The append case above
+  needed an explicit `End` first, and that is the gesture a pointer click
+  makes.
 
 ## Wayland: the evdev backend run live on KDE Plasma 6 (2026-10-27)
 
@@ -1022,7 +1322,11 @@ are the other: both have legacy X keysyms of their own, and `xdotool`
 nevertheless sends them through the direct-Unicode block, so the same branch
 handles them.
 
-### A modal dialog: found, reproduced, and **not** fixed
+### A modal dialog: found, reproduced, and not fixed *then*
+
+**Fixed 2026-11-21** -- see "The modal dialog, fixed and measured both ways"
+above, which took exactly the cheaper route this entry describes at its end.
+What follows is the record of the run that found it, kept as written.
 
 The one finding of this run left open, and the most serious. Recording
 "click `Confirm`, then click `OK` in the modal dialog it raises" produces a
@@ -1358,12 +1662,14 @@ clicks there degrade to coordinates rather than to wrong elements.
   itself (`expect_window`, element lookups, the API floor); a richer
   end-state read against the zenity entry needs an element-level read-back
   the bare-server scenario does not reliably have.
-- **A click that dismisses a modal dialog is recorded as a click on whatever
-  is underneath it.** Found, reproduced and characterised on 2026-09-23 (see
-  the modal-dialog section above), with a replay that leaves the dialog open
-  to prove the consequence. Not fixed: detecting it cheaply needs the
-  resolver to remember toplevels it has already seen in resolved elements,
-  rather than taking a window list per click.
+- ~~**A click that dismisses a modal dialog is recorded as a click on whatever
+  is underneath it.**~~ **Fixed 2026-11-21**, by the route the entry asked for:
+  the resolver remembers the transient toplevels it has already seen over a
+  point, with their rectangles, and refuses to name an element from a
+  persistent window underneath one of them -- no window list per click. Found,
+  reproduced and characterised on 2026-09-23; fixed and measured both ways on
+  a real GTK modal, with the defect watched happening on the same desktop with
+  the fix switched off. Both runs are in their own sections above.
 - **No UI yet.** The design calls for a timeline, inspector and source preview;
   this is the CLI and the engine underneath it.
 - **Two recordings have been made of a real desktop application** — a file

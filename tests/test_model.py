@@ -152,6 +152,32 @@ def test_selectable_round_trips_through_to_dict_and_back():
     assert rebuilt.target.element.selectable is True
 
 
+def test_prior_text_round_trips_through_to_dict_and_back():
+    # What a field held decides how the run is rendered -- so a `prior_text`
+    # lost on the way back in is a `--regenerate` that silently replaces a
+    # field's value where the original generation typed into it.
+    typed = TextInput(text=" world", prior_text="Hello")
+    rebuilt = event_from_dict(typed.to_dict())
+    assert isinstance(rebuilt, TextInput)
+    assert rebuilt.prior_text == "Hello"
+
+
+def test_an_empty_prior_text_survives_as_empty_not_as_unknown():
+    # The two answers that must not be confused: "" is a field that was read
+    # and held nothing, None is one that was never read.
+    rebuilt = event_from_dict(TextInput(text="Ada", prior_text="").to_dict())
+    assert rebuilt.prior_text == ""
+    rebuilt = event_from_dict(TextInput(text="Ada").to_dict())
+    assert rebuilt.prior_text is None
+
+
+def test_a_prior_text_that_is_not_a_string_is_refused():
+    data = TextInput(text="Ada", prior_text="Hello").to_dict()
+    data["prior_text"] = 17
+    with pytest.raises(ValueError, match="prior_text"):
+        event_from_dict(data)
+
+
 def test_target_reason_round_trips_through_to_dict_and_back():
     # _rebuild lists Target's fields by hand (same hazard as expanded above),
     # so reason has to be reconstructed explicitly or it is silently dropped.

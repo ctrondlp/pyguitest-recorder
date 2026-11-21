@@ -37,12 +37,27 @@ system state a real event carries -- where `KBDLLHOOKSTRUCT` has a bit that says
 `win32` remains the one backend that can answer that question, and
 `recorder._injected_note` will simply never fire on a Mac.
 
-What has been run: the tap itself, on a granted macOS 26.7 VM, by a probe that
-created one, fed it nothing and released it -- which is also what settles the grant
-above. What has **not**: a recording session against a live desktop, and the Unicode
-string `CGEventKeyboardGetUnicodeString` is supposed to hand back. `_text` folds
-that to `""` on any failure rather than guessing, and a recording's typed text is
-therefore the part most likely to need a second pass.
+What has been run: the whole pipeline, twice, against a live window server --
+`docs/developers/status.md` has both runs in full. A 113-event sequence posted into
+an open TextEdit window was recorded, generated, replayed and recorded again, and
+both passes normalised to the same 35 events and the same 98-line script.
+`scripts/macos-live-capture-check.py` is the repeatable form of that, against this
+repo's own probe window, and it drove four named controls through record, generate,
+validate and replay. The first of those runs is where `_typed` comes from: the tap
+answers `CGEventKeyboardGetUnicodeString` for *every* key event, and what it answers
+for a special key is the window server's own control code, which reached the
+generator as typed text until that range was refused. The call itself is settled
+too -- the PyObjC marshalling is `(length, text)`, measured as a length of 1 and the
+character for `a`, and the same with the DEL code for the forward delete -- so
+`_text`'s unpacking is right, and its fold to `""` on failure is a belt for a
+binding that behaves otherwise on another build rather than cover for a call nobody
+has watched work.
+
+What has **not**: a person's own keyboard or pointer. Every event in both runs was
+posted, and posted by a *separate* process, because a tap skips the events of the
+process that installed it. Provenance and the order of the modifier flags within a
+chord are therefore posted-event measurements, and HID is exactly where they could
+differ.
 """
 
 from __future__ import annotations

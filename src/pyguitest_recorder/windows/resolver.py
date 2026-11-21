@@ -65,6 +65,58 @@ button in a Save dialog had no toplevel in its path to be scoped by or
 told apart from the main window's Cancel.
 """
 
+TRANSIENT_ROLES = frozenset({"dialog", "alert", "file chooser"})
+"""The window roles that mean "stacked over something else, and not for long".
+
+The three of `WINDOW_ROLES` a toolkit opens *over* its own window and takes
+away again -- GTK3's GtkMessageDialog is `alert`, Qt's QMessageBox too,
+GtkFileChooserDialog and Qt's QFileDialog on a GTK theme are `file chooser`,
+and an ordinary modal is `dialog`. `frame` and `window` are deliberately not
+here: they are the application's own toplevel, which the accessible tree names
+for every widget in it, and treating one as transient would make
+`_transient_over` refuse clicks into a dialog for as long as its parent was
+remembered -- the opposite of the mistake it exists to stop.
+
+**This is an AT-SPI vocabulary, and Windows does not share it.** Measured on
+Windows 11, both sides of the question: a standard dialog (`MessageBoxW`)
+publishes accessible role `window`, and so does an ordinary main window -- the
+role tells them apart on at-spi and cannot here. `DIALOG_CLASSES` is what does
+on that platform.
+"""
+
+DIALOG_CLASSES = frozenset({"#32770"})
+"""Window classes that mean "dialog" where the accessible role does not.
+
+Windows' own dialog class, and the one signal available there: UI Automation
+gives a modal the same `window` role it gives a main window (measured on
+Windows 11 -- a `MessageBoxW` and this repo's own probe window both resolved
+to `('window', <title>)`), while the window *class* is `#32770` for the dialog
+and the application's own for the frame. `Window.app_id` carries the class on
+that platform, which is the same field `_in_a_frame_host` reads to recognise a
+Store app's frame host.
+
+`#32770` is the class of the common dialogs too -- a message box, a file
+chooser, a print dialog -- so it covers the dialogs an application gets from
+the system. What it does not cover is a framework that builds its own toplevel
+(WPF's `HwndWrapper[...]`, WinUI's own classes), which publishes neither the
+role nor this class; UI Automation's `IsDialog` property is the signal that
+would, and pyguitest does not expose it today.
+
+Nothing matches this on at-spi (an `app_id` there is a WM_CLASS) or on macOS
+(a bundle identifier), so the check is inert off Windows rather than
+platform-gated.
+"""
+
+
+def _dialog_class(window: Any) -> bool:
+    """Whether this window's own class says it is a dialog.
+
+    Reads `app_id` off either a `WindowRef` or a live pyguitest window, which
+    both carry it, and answers False for anything without one.
+    """
+    return (getattr(window, "app_id", "") or "") in DIALOG_CLASSES
+
+
 MENU_OWNER_ROLES = frozenset({"menu", "combo box"})
 """Roles that open a popup when clicked -- a menu-bar entry, a drop-down.
 
@@ -379,6 +431,22 @@ class _Lookup:
 
 
 @dataclass(frozen=True)
+class _SeenToplevel:
+    """A transient toplevel the resolver has looked at, and where it was.
+
+    The memory `_transient_over` reads: a dialog that was over a point a moment
+    ago is the one thing that says a later element named at that same point --
+    cleanly, by a hit test that agrees with the window under it -- may be the
+    wrong answer, because the click that dismissed it is always consumed after
+    it has gone.
+    """
+
+    name: str
+    rect: tuple[int, int, int, int]
+    at: float
+
+
+@dataclass(frozen=True)
 class Observation:
     """What was under a point, and what it read at that moment.
 
@@ -569,6 +637,15 @@ class DesktopResolver:
     _menu_owner: Any = field(default=None, init=False)
     """The live menu or drop-down the pointer was last resolved to, whose popup a
     later point may be inside. See `_popup_at`."""
+    _transient: list[_SeenToplevel] = field(default_factory=list, init=False)
+    """The transient toplevels seen over a point lately -- see `_transient_over`.
+
+    The dialog counterpart of `_popup_layout`, and it exists for the same
+    reason that does: by the time a press is consumed, the thing it landed in
+    has usually closed. A popup's items can be remembered one by one because
+    the resolver watched the popup open; a dialog is an ordinary toplevel that
+    nothing was watching, so what is kept is only where it was.
+    """
     _popup_layout: list[tuple[Any, tuple[int, int, int, int], str]] | None = field(
         default=None, init=False
     )
@@ -1258,6 +1335,11 @@ class DesktopResolver:
         the bare coordinate it then emits (see `Target.reason`); the checks
         keep their own fuller footer warning as a side effect. A `None`
         element with a `None` reason means the hit-test simply found nothing.
+
+        The last check is the one that has nothing to do with this point's own
+        answer: an element the hit test and the window list agree about can
+        still be the wrong one, because the window that was really clicked has
+        gone. See `_transient_over`.
         """
         element = self._element(x, y) if self._resolves_elements else None
         if element is None:
@@ -1275,6 +1357,15 @@ class DesktopResolver:
             )
         if not self._belongs(element, window):
             return None, self._foreign_reason(element, window)
+        self._remember_transient(element, window)
+        gone = self._transient_over(element, x, y, window)
+        if gone is not None:
+            return None, (
+                f"a dialog ({gone!r}) was over this point a moment before "
+                "this click, and the click that dismisses a dialog is consumed "
+                "after it has gone -- so what is named here is whatever the "
+                "dialog was covering"
+            )
         return element, None
 
     def _focus_element_in(self, window: WindowRef | None) -> ElementRef | None:
@@ -1496,6 +1587,84 @@ class DesktopResolver:
             )
         except Exception:  # noqa: BLE001 - an unreadable state is no state
             return Observation(target=target)
+
+    def element_text(self, target: Target) -> str | None:
+        """What the element `target` names reads right now, or None.
+
+        One question, asked once per run of typing: did the field already hold
+        something? `TextInput.prior_text` is where the answer goes and
+        `_emit_textinput` is what it decides -- whether replacing a field's
+        value is the same act as typing into it, which it only is for a field
+        that was empty.
+
+        A second live lookup at the target's own point, like `_state`'s, and
+        checked against the element that was named there the same way: a tree
+        that changed between the two answers cannot have its reading
+        attributed to the element the run was attributed to. Unlike `inspect`
+        this resolves no window and reads no state beyond the text, because
+        the caller has the target already and the answer is wanted on a path
+        that runs while somebody is typing.
+
+        None for every uncertainty rather than an empty string: "could not
+        read" and "held nothing" are the two answers that must not be
+        confused, since one of them is what makes a whole-value replacement
+        exact.
+
+        Two routes, because a typed run's target arrives by two routes.
+        `_text_under` re-hit-tests the target's own point, which is the right
+        question for a run attributed to the field that was last *clicked*.
+        But `_text_target` asks keyboard focus first and on purpose -- it is
+        what the toolkit itself believes the keys are going into -- and a
+        focus-resolved target carries its *window's* origin as its point,
+        since focus has no coordinates of its own (see `focused`). A hit test
+        there answers for whatever is in the window's top-left corner, so the
+        role-and-name guard refuses it and `_text_of_focus` asks the question
+        the target was actually built from. Measured: without the second
+        route, every run on a desktop that publishes per-widget focus -- which
+        is the principled path and the common one -- read as unknown.
+        """
+        expected = target.element
+        if not self._resolves_elements or expected is None:
+            return None
+        under = self._text_under(target.x, target.y, expected)
+        return under if under is not None else self._text_of_focus(expected)
+
+    def _text_under(self, x: int, y: int, expected: ElementRef) -> str | None:
+        """`expected`'s text, read off the live element at this point."""
+        try:
+            found = self._live_at(x, y, spend=False)
+            element = found[0] if found is not None else None
+            if element is None or isinstance(element, _Frozen):
+                # A `_Frozen` snapshot is what a remembered Windows popup
+                # answers with, and it carries no text -- see `_live_item_for`.
+                return None
+            return self._matching_text(element, expected)
+        except Exception:  # noqa: BLE001 - an unreadable field is no answer
+            return None
+
+    def _text_of_focus(self, expected: ElementRef) -> str | None:
+        """`expected`'s text, read off whatever holds keyboard focus."""
+        try:
+            element = self.session.focused()
+            if element is None:
+                return None
+            return self._matching_text(element, expected)
+        except Exception:  # noqa: BLE001 - an unreadable field is no answer
+            return None
+
+    def _matching_text(self, element: Any, expected: ElementRef) -> str | None:
+        """`element`'s text, but only while it is still the element named.
+
+        The same guard `_state` makes before it reads a check's value, for the
+        same reason: a tree that changed between being named and being read is
+        one whose reading cannot be attributed to the element the run was
+        attributed to -- and here that reading decides how the run is
+        rendered.
+        """
+        if element.role != expected.role or (element.name or "") != expected.name:
+            return None
+        text = element.text
+        return text if isinstance(text, str) else None
 
     def focused(self) -> Target | None:
         """The element holding keyboard focus, or None if it cannot be trusted.
@@ -1831,6 +2000,7 @@ class DesktopResolver:
         if element.pid == window.pid:
             other = self._other_toplevel_of(element, window)
             if other is not None:
+                self._remember_transient_elsewhere(element, other)
                 self._warn(
                     f"ignored an accessible element whose own path names "
                     f"toplevel {other!r}, not {window.title!r}: the same "
@@ -1907,12 +2077,202 @@ class DesktopResolver:
         """
         if self._from_popup or not window.title or not window.title_stable:
             return None
+        named = self._path_toplevel(element)
+        if named is None or named[1] == window.title:
+            return None
+        return named[1]
+
+    def _path_toplevel(self, element: ElementRef) -> tuple[str, str] | None:
+        """The (role, name) of the nearest toplevel `element`'s ancestry names.
+
+        Nearest first, which is what `_other_toplevel_of` and `_best_owner`
+        both want and what the former's own docstring argues for: the toplevel
+        an element is *inside* is the one that says which window it belongs to.
+        The walk stops at the first named toplevel rather than carrying on past
+        one that matches, which is the one behaviour this centralising changed
+        -- an element whose nearest toplevel is the window under it was
+        previously still refused if some *outer* toplevel in its path was named
+        differently, so on a toolkit that nests a dialog under its parent frame
+        (Qt/KDE, where toplevels need not be the siblings GTK makes them) a
+        correctly resolved dialog element was rejected by its own parent's
+        name. Only a real disagreement should reject, which is the rule
+        everywhere else here.
+
+        An unnamed toplevel entry is skipped rather than answered with: a
+        toolkit that publishes an empty name for a frame says nothing about
+        which window this is, and the outer entry may still.
+        """
         for role, name in reversed(element.path):
             # Stripped the way `_identify` strips `window.title`: the same
             # trailing-whitespace disagreement between backends applies here.
             name = (name or "").strip()
-            if role in self._TOPLEVEL_ROLES and name and name != window.title:
-                return name
+            if role in self._TOPLEVEL_ROLES and name:
+                return role, name
+        return None
+
+    _TRANSIENT_MEMORY = 2.0
+    """How long a transient toplevel is remembered after it was last seen over a
+    point, in seconds -- the window `_transient_over` refuses inside.
+
+    Covers the gap between opening a dialog and dismissing it, which is one
+    interaction however long the person took over it: the measured case was a
+    scripted pair a fraction of a second apart, and a human reading a "Discard
+    changes?" takes a second or two. Short on purpose, because the cost of
+    being wrong runs the other way too -- a dialog closed by Escape rather than
+    by a click leaves a memory nothing will contradict, and every click where
+    it was comes out as a coordinate until this expires. A coordinate in the
+    same session lands correctly, so that trade is a locator for a wrong name;
+    2.5s is what the *effect* log allows one interaction
+    (`_EFFECT_WINDOW_FINAL`), and this is deliberately inside it.
+    """
+
+    def _remember_transient(
+        self, element: ElementRef, window: WindowRef | None
+    ) -> None:
+        """Note the dialog the resolve in progress is standing inside.
+
+        The free half of the memory: when the window under the point *is* the
+        dialog the element descends from, the window's own rectangle is the
+        dialog's, already read by `_describe`, and no further question has to be
+        asked of the desktop. Called on every resolved element, so a pointer
+        resting in a dialog keeps the memory alive for as long as it is there.
+
+        Transient by role *or* by the window's own class -- see
+        `DIALOG_CLASSES`, which is the only one of the two that answers on
+        Windows.
+
+        Only a *disagreement* between the element's toplevel and the window's
+        title stops this, not a missing one. The check is here to confirm that
+        the toplevel the element descends from is the window under the point,
+        and a window that publishes no title at all says nothing either way --
+        the rule `_other_toplevel_of` already follows from the other side.
+        Measured on macOS 15.8.1, which is the platform it matters on: a
+        dialog's window-list entry carries an **empty** title while the
+        element's own toplevel is named (`('dialog', 'alert')`), so requiring
+        them to match meant nothing was ever remembered there, however
+        correctly the dialog was recognised.
+        """
+        if window is None or window.geometry is None or self._from_popup:
+            return
+        named = self._path_toplevel(element)
+        if named is None:
+            return
+        role, name = named
+        title = (window.title or "").strip()
+        if title and name != title:
+            return
+        if role not in TRANSIENT_ROLES and not _dialog_class(window):
+            return
+        self._remember_rect(name, window.geometry)
+
+    def _remember_transient_elsewhere(self, element: ElementRef, other: str) -> None:
+        """Note a dialog that answered for a point the window list did not place it at.
+
+        The other half, and the one that catches the measured case. A click
+        that *opens* a modal is resolved after the modal has opened over it:
+        the window hit test answers the parent (it ran a moment earlier, or the
+        window backend has not caught up), the accessible hit test answers a
+        widget in the dialog, and `_other_toplevel_of` refuses the pair. That
+        refusal is the only time this resolver ever sees the dialog, and the
+        click after it -- the one that dismisses the dialog, consumed once it
+        has gone -- has nothing left to go on. So the dialog's rectangle is
+        asked for here, once, on a path a recording takes about as often as it
+        raises a dialog, rather than by listing windows on every click.
+        """
+        named = self._path_toplevel(element)
+        if named is None or named[1] != other:
+            return
+        found = self._transient_window(other, element)
+        if found is None:
+            return
+        if named[0] not in TRANSIENT_ROLES and not _dialog_class(found):
+            return
+        rect = self._geometry(found)
+        if rect is not None and _placed(rect):
+            self._remember_rect(other, rect)
+
+    def _remember_rect(self, name: str, rect: tuple[int, int, int, int]) -> None:
+        """Keep one rectangle per toplevel name, newest last."""
+        self._transient = [seen for seen in self._transient if seen.name != name]
+        self._transient.append(_SeenToplevel(name=name, rect=rect, at=_now()))
+
+    def _transient_window(self, name: str, element: ElementRef) -> Any:
+        """The window list's entry for the toplevel called `name`, or None.
+
+        Matched by title, and by pid where both sides publish one -- the same
+        pair `_window_owning` matches a focused element's own window by, and
+        for the same reason: a title alone cannot tell two instances of an
+        application apart, and a pid alone cannot tell one process's windows
+        apart.
+
+        The window rather than its rectangle, because the caller needs both:
+        the rectangle to remember, and the window's class to decide whether
+        there is anything to remember at all (`DIALOG_CLASSES`).
+        """
+        try:
+            windows = list(self.session.windows())
+        except Exception:  # noqa: BLE001 - a memory must not fail a recording
+            return None
+        for window in windows:
+            if (getattr(window, "title", "") or "").strip() != name:
+                continue
+            pid = getattr(window, "pid", None)
+            if element.pid is not None and pid is not None and pid != element.pid:
+                continue
+            return window
+        return None
+
+    def _transient_over(
+        self, element: ElementRef, x: int, y: int, window: WindowRef | None
+    ) -> str | None:
+        """The dialog that was over this point, where it is not what was named.
+
+        The structural half of the modal-dialog problem, which no delay can
+        fix: a click that dismisses a window is always consumed *after* that
+        window has gone -- the application processes the press, the dialog is
+        destroyed, and the recorder is reading a stream from another process --
+        so by resolve time there is no dialog left in the tree to resolve
+        against and the hit test answers with whatever it was covering. Both
+        halves then agree, confidently, about the wrong window. Reproduced
+        live: "click Confirm, then click OK in the dialog it raises" generated
+        a script that opened the dialog twice and never dismissed it, because
+        the second click was recorded as another click on `Confirm` -- the
+        parent's button at the same point.
+
+        Refusing is enough to fix that replay, and is all this does: the
+        coordinate the click falls back to is relative to the parent window,
+        the dialog opens in the same place, so a refused click lands on the
+        dialog's button where the confidently-named one did not.
+
+        Four things are left alone, each because the disagreement is not real:
+        an element whose own nearest toplevel is a transient one, a point whose
+        window is *itself* a dialog by its class (the two ways of saying "a
+        dialog is there *now*", and `_belongs` has already agreed it is the
+        window under the point -- the second is the one that answers on
+        Windows, where a modal's role is `window`; see `DIALOG_CLASSES`), an
+        element whose ancestry names no toplevel at all (nothing to disagree
+        with -- the rule the rest of this class follows), and a popup item,
+        which `_other_toplevel_of` exempts for the same reason.
+        """
+        now = _now()
+        self._transient = [
+            seen for seen in self._transient if now - seen.at <= self._TRANSIENT_MEMORY
+        ]
+        if self._from_popup or _dialog_class(window):
+            return None
+        named = self._path_toplevel(element)
+        if named is None or named[0] in TRANSIENT_ROLES:
+            return None
+        for seen in reversed(self._transient):
+            if seen.name != named[1] and _has_point(seen.rect, x, y):
+                self._warn(
+                    "ignored accessible elements under the rectangle a dialog "
+                    f"({seen.name!r}) had just been seen at: a click that dismisses a "
+                    "dialog is consumed after the dialog has gone, so the hit test "
+                    "answers for whatever it was covering -- those clicks carry "
+                    "coordinates instead"
+                )
+                return seen.name
         return None
 
     def _mismatch_reason(self, element: ElementRef) -> str:

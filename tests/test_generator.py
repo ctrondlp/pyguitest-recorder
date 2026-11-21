@@ -588,6 +588,134 @@ def test_text_into_a_named_field_sets_it_directly():
     assert 'gui.text_field("Name").set_text("Ada")' in source
 
 
+class TestTypingIntoAFieldThatAlreadyHeldText:
+    """`set_text` replaces a value; typing goes in at a caret.
+
+    Both are the right rendering of a run of typing, and which one depends on
+    something no locator can see: what the field held when the run began. For
+    an empty field the two end with it holding the same string and `set_text`
+    is the better call by a distance -- no caret, no rectangle, no click
+    action. For a field that already held something it is a *different act*,
+    and a recording of inserting a word into a sentence replayed as a field
+    holding the word alone: public API, perfect syntax, wrong outcome.
+    """
+
+    FIELD = ElementRef(
+        role="entry",
+        name="Body",
+        extents=(150, 200, 400, 120),
+        path=(("frame", "Example"),),
+    )
+
+    def _render(self, prior, text=" world", window=None, with_click=True):
+        target = Target(x=300, y=240, window=window, element=self.FIELD)
+        events = []
+        if with_click:
+            events.append(Click(timestamp=1.0, target=target))
+        events.append(
+            TextInput(timestamp=2.0, text=text, target=target, prior_text=prior)
+        )
+        return render(*events)
+
+    @pytest.mark.needs_ruff
+    def test_an_empty_field_is_still_set_by_value(self, window):
+        source = self._render("", window=window)
+        assert 'gui.text_field("Body", within=example).set_text(" world")' in source
+        assert "gui.type_text" not in source
+
+    def test_an_unread_field_renders_as_it_always_did(self, window):
+        # None is "not read": a recording made before this field existed, or a
+        # desktop whose bridge would not give the text up. Both keep the
+        # rendering five platforms' live runs measured.
+        source = self._render(None, window=window)
+        assert "set_text" in source
+        assert "gui.type_text" not in source
+
+    @pytest.mark.needs_ruff
+    def test_a_field_read_mid_keystroke_is_still_the_empty_case(self, window):
+        # The race on `prior_text`: the read happens as the run opens and the
+        # application may already have taken the first character, so a field
+        # reading as the beginning of what was typed was empty a moment
+        # earlier.
+        source = self._render("A", text="Ada", window=window)
+        assert 'gui.text_field("Body", within=example).set_text("Ada")' in source
+
+    def test_a_field_with_text_in_it_is_typed_into(self, window):
+        source = self._render("Hello", window=window)
+        assert "gui.type_text(' world')" in double_quoted(source).replace('"', "'")
+        assert "set_text" not in source
+
+    def test_the_click_that_placed_the_caret_keeps_its_point(self, window):
+        """The focus() rung is lossless only because set_text ignores the caret.
+
+        With the typing emitted as keystrokes, where in the text the click
+        landed is the whole question -- and neither `focus()` nor a named
+        `click()` can aim at it: one places no caret and the other lands in
+        the middle of the field.
+        """
+        source = self._render("Hello", window=window)
+        assert ".focus()" not in source
+        assert "gui.move_mouse(" in source
+        assert "gui.click()" in source
+        assert "the caret this click placed" in source
+
+    def test_an_empty_field_still_gets_the_focus_call(self, window):
+        source = self._render("", window=window)
+        assert ".focus()" in source
+        assert "gui.move_mouse(" not in source
+
+    def test_a_click_on_a_different_field_is_not_kept_as_a_point(self, window):
+        """Only the click that focused *this* field placed its caret.
+
+        A click elsewhere moved the caret out of the field, so it is not what
+        this run went in at, and it keeps whatever rendering it had earned.
+        """
+        other = ElementRef(role="push button", name="Save", actions=("click",))
+        target = Target(x=300, y=240, window=window, element=self.FIELD)
+        elsewhere = Target(x=10, y=10, window=window, element=other)
+        source = render(
+            Click(timestamp=1.0, target=elsewhere),
+            TextInput(timestamp=2.0, text=" world", target=target, prior_text="Hello"),
+        )
+        assert 'gui.button("Save").click()' in double_quoted(source)
+        assert "gui.type_text" in source
+
+    def test_a_run_reached_by_tab_needs_no_click(self, window):
+        # Nothing to keep and nothing to reproduce: the keystrokes that moved
+        # the focus are already in the script, so the caret is whatever the
+        # toolkit leaves.
+        source = self._render("Hello", window=window, with_click=False)
+        assert "gui.type_text" in source
+        assert "gui.move_mouse(" not in source
+
+    def test_what_the_field_held_is_never_written_into_the_script(self, window):
+        # Desktop content the person did not type during the recording -- the
+        # rest of a note, somebody else's name in a form. The comment needs
+        # the fact, not the text.
+        source = self._render("Mr Hyde, 14 Ransom Street", window=window)
+        assert "Ransom" not in source
+        assert "already held text" in source
+
+    def test_the_reason_reaches_the_warnings_as_well_as_the_line(self, window):
+        source = self._render("Hello", window=window)
+        warnings = [line for line in source.splitlines() if "WARNING:" in line]
+        assert any("already held text" in line for line in warnings), warnings
+
+    def test_it_is_not_reported_as_a_field_that_could_not_be_identified(self, window):
+        # The warning for text that went somewhere unnameable is about exactly
+        # that, and this field was named: a false claim there is worse than
+        # none, since what it exists to make a reader do is check the file for
+        # a secret the recorder could not have known about.
+        source = self._render("Hello", window=window)
+        assert "could not identify" not in source
+
+    def test_both_renderings_validate(self, window):
+        for prior in ("", "Hello", None):
+            source = self._render(prior, window=window)
+            assert validate(source) == [], prior
+            ast.parse(source)
+
+
 def test_sensitive_text_never_appears_as_a_literal():
     source = render(TextInput(text="hunter2", sensitive=True))
     assert "hunter2" not in source
@@ -2060,6 +2188,80 @@ def test_no_header_keeps_the_warnings_and_drops_the_rest(window):
     assert "recorded over ssh" in with_header
 
 
+class TestAScriptThatChecksNothingSaysSo:
+    """A recording of actions alone replays; it does not verify anything.
+
+    The distinction the README makes and the generated file never did: a
+    script that clicks Save and exits 0 is indistinguishable from one whose
+    application refused to save, and the person most likely to read "it ran"
+    as "it passed" is the one who has just made their first recording. Said
+    in the file, once, as a warning -- so `--no-header` cannot hide it and it
+    arrives ahead of the per-event notes.
+    """
+
+    PHRASE = "this script checks nothing"
+
+    def test_a_recording_with_no_check_says_so(self, window):
+        source = render(Click(target=Target(x=20, y=30, window=window)))
+        assert self.PHRASE in source
+
+    def test_a_check_that_rendered_a_call_silences_it(self):
+        source = render(check("text", "label", "Status", expected="Saved"))
+        assert "gui.expect_text(" in source
+        assert self.PHRASE not in source
+
+    def test_a_check_that_could_not_be_made_does_not_count_as_one(self):
+        """The five paths that record an `Assertion` and emit no call.
+
+        A `nothing` check is the clearest of them: the person asked for a
+        check over something the recorder could not identify, so the script
+        has an assertion event and verifies nothing. Counting events rather
+        than rendered calls would read that as a checked script.
+        """
+        source = render(check("nothing"))
+        assert self.PHRASE in source
+
+    def test_a_check_whose_element_could_not_be_named_does_not_either(self):
+        source = render(check("text", expected="Saved"))
+        assert "gui.expect_text(" not in source
+        assert self.PHRASE in source
+
+    def test_a_window_check_does_count(self):
+        window = WindowRef(title="Report", app_id="org.example.App")
+        source = render(check("window", window=window))
+        assert self.PHRASE not in source
+
+    def test_it_survives_no_header(self, window):
+        recording = Recording(
+            events=[Click(target=Target(x=20, y=30, window=window))],
+            environment=Environment(notes=["recorded over ssh"]),
+        )
+        without = generate(recording, GeneratorOptions(include_header=False))
+        assert self.PHRASE in without
+        assert "recorded over ssh" not in without
+
+    def test_it_is_the_first_warning(self, window):
+        """Ahead of the per-event notes, which is the point of the insert.
+
+        A reader scanning the block should meet "this verifies nothing"
+        before a note about which locator one click fell back to.
+        """
+        source = render(
+            Click(target=Target(x=20, y=30, window=window)),
+            TextInput(text="Ada", target=Target(x=10, y=10, window=window)),
+        )
+        # Each warning opens a wrapped bullet in the notes block; a line
+        # carrying "WARNING:" is the first line of one.
+        warnings = [line for line in source.splitlines() if "WARNING:" in line]
+        assert len(warnings) > 1, source
+        assert self.PHRASE in warnings[0]
+
+    def test_the_script_still_parses_and_validates(self, window):
+        source = render(Click(target=Target(x=20, y=30, window=window)))
+        ast.parse(source)
+        assert validate(source) == []
+
+
 def test_a_window_check_emits_its_title_unescaped():
     # expect_window forwards straight to wait_for_window, which now matches
     # a plain string literally -- see _title_pattern.
@@ -2103,7 +2305,11 @@ def test_a_check_that_resolved_to_nothing_is_reported_not_dropped():
     # not is the failure this whole feature exists to avoid.
     recording = Recording(events=[check("nothing")])
     source = generate(recording, GeneratorOptions(comments=False))
-    assert "expect_" not in source
+    # The call, not the string: the no-checks warning this same recording now
+    # earns names the `gui.expect_*` family in its prose, and a bare
+    # "expect_ is absent" would read that as the check it is telling the
+    # reader to go and write.
+    assert not re.search(r"^\s*gui\.expect_\w+\(", source, re.MULTILINE)
     # The note lives in the trailing comment block, wrapped, so match a
     # phrase short enough to survive the wrap.
     assert "neither an element nor" in source
@@ -3684,13 +3890,17 @@ class TestTheReplayAsksForTheOptInInputBackend:
 
     def test_a_macos_script_names_the_input_backend_first(self):
         assert self._connect_line("SessionType.DARWIN") == (
-            'with pyguitest.connect(backend=["macquartz", "macos"]) as gui:'
+            'with pyguitest.connect(backend=["macquartz", "macos"], '
+            "event_delay=0.15) as gui:"
         )
 
-    def test_every_other_platform_leaves_connect_alone(self):
+    def test_no_other_platform_names_a_backend(self):
+        # The delay belongs to every platform (see TestTheGeneratedSessionIsPaced);
+        # the backend list is the macOS-only part, and this is what says so.
         for session_type in ("SessionType.X11", "SessionType.WIN32", ""):
             assert (
-                self._connect_line(session_type) == "with pyguitest.connect() as gui:"
+                self._connect_line(session_type)
+                == "with pyguitest.connect(event_delay=0.15) as gui:"
             ), session_type
 
     def test_regenerating_a_macos_recording_on_linux_still_names_it(self, monkeypatch):
@@ -3698,6 +3908,348 @@ class TestTheReplayAsksForTheOptInInputBackend:
 
         monkeypatch.setattr(platforms.sys, "platform", "linux")
         assert "macquartz" in self._connect_line("SessionType.DARWIN")
+
+
+class TestTheClickThatOpensAWindow:
+    """It goes through the pointer, and the measurement says why.
+
+    Replaying a generated script against the GTK probe window on Debian 13
+    GNOME: `button("Confirm").click()` opened the modal through the accessible
+    action, and then *nothing else in that application answered an action* --
+    `button("OK", within=...).click()` left the dialog open, still open ten
+    seconds later, with the script exiting 0. A GTK dialog runs its own nested
+    loop inside the handler of the action that opened it, so the at-spi bridge
+    in that process never returns from that call. Driving the opener through
+    the pointer leaves no action handler on the stack, and both routes then
+    dismiss the dialog -- measured.
+    """
+
+    OPENER = ElementRef(
+        role="push button",
+        name="Confirm",
+        extents=(113, 340, 494, 34),
+        actions=("click",),
+        path=(("frame", "Example"),),
+    )
+    INSIDE = ElementRef(
+        role="push button",
+        name="OK",
+        extents=(362, 374, 86, 34),
+        actions=("click",),
+        path=(("dialog", "Confirm Action"),),
+    )
+
+    def _recording(self, window, opened=True, **options):
+        dialog = WindowRef(
+            title="Confirm Action",
+            app_id="org.example.App",
+            pid=99,
+            geometry=(340, 270, 200, 100),
+            title_stable=True,
+        )
+        events = [
+            Click(
+                timestamp=1.0,
+                target=Target(x=360, y=357, window=window, element=self.OPENER),
+            )
+        ]
+        if opened:
+            events.append(WaitForWindow(timestamp=2.0, window=dialog))
+        events.append(
+            Click(
+                timestamp=5.0,
+                target=Target(x=405, y=391, window=dialog, element=self.INSIDE),
+            )
+        )
+        return render(*events, **options)
+
+    @pytest.mark.needs_ruff
+    def test_the_opener_takes_the_pointer_and_the_rest_the_ladder(self, window):
+        source = self._recording(window)
+        assert 'gui.button("Confirm", within=example).click(via="pointer")' in source
+        assert 'gui.button("OK", within=confirm_action_2).click()' in source
+
+    def test_a_click_that_opened_nothing_keeps_the_ladder(self, window):
+        source = self._recording(window, opened=False)
+        assert 'via="pointer"' not in source
+
+    def test_it_requires_what_the_pointer_route_needs(self, window):
+        """Loud at line one rather than halfway down.
+
+        The pointer route reads a rectangle and moves the pointer, so a
+        desktop without those cannot replay this script -- and the preamble is
+        where that is said, instead of a `CapabilityUnsupported` from the
+        middle of a run.
+        """
+        source = self._recording(window)
+        for capability in (
+            "Capability.ELEMENT_GEOMETRY",
+            "Capability.POINTER_MOVE",
+            "Capability.POINTER_BUTTON",
+        ):
+            assert capability in source, capability
+
+    def test_the_reason_is_in_the_file(self, window):
+        source = self._recording(window)
+        assert "through the pointer, not the accessible action" in source
+
+    def test_an_explicit_route_is_not_overridden(self, window):
+        """A caller who asked for `action` gets it, deadlock included.
+
+        The override is this generator correcting its own default; it is not
+        a veto over a setting somebody chose, and `click_via` is documented as
+        the way to pin the route.
+        """
+        source = self._recording(window, click_via="action")
+        assert 'click(via="action")' in source
+        assert 'via="pointer"' not in source
+        pointed = self._recording(window, click_via="pointer")
+        assert pointed.count('via="pointer"') == 2  # both clicks, as asked
+
+    def test_the_window_has_to_follow_this_click_and_not_a_later_one(self, window):
+        """A window that appeared after some later input is that input's.
+
+        The search stops at the next real input, so a click, a drag or a
+        keystroke in between takes the attribution with it.
+        """
+        dialog = WindowRef(
+            title="Confirm Action",
+            app_id="org.example.App",
+            pid=99,
+            geometry=(340, 270, 200, 100),
+            title_stable=True,
+        )
+        source = render(
+            Click(
+                timestamp=1.0,
+                target=Target(x=360, y=357, window=window, element=self.OPENER),
+            ),
+            KeyStroke(timestamp=2.0, key="Return"),
+            WaitForWindow(timestamp=3.0, window=dialog),
+        )
+        assert 'via="pointer"' not in source
+
+    def test_a_selection_that_opened_a_window_is_a_pointer_click_too(self, window):
+        """`select()` is an accessible action, and carries the same deadlock.
+
+        The rung order used to give a selectable role `select()` before the
+        click route was consulted at all -- so a row whose selection opens a
+        dialog would have gone through the accessibility layer and left every
+        later call in that application unanswered, exactly as the click did.
+        """
+        row = ElementRef(
+            role="list item",
+            name="Report",
+            extents=(20, 60, 200, 22),
+            actions=(),
+            selectable=True,
+            path=(("frame", "Example"),),
+        )
+        dialog = WindowRef(
+            title="Confirm Action",
+            app_id="org.example.App",
+            pid=99,
+            geometry=(340, 270, 200, 100),
+            title_stable=True,
+        )
+        source = render(
+            Click(timestamp=1.0, target=Target(x=60, y=70, window=window, element=row)),
+            WaitForWindow(timestamp=2.0, window=dialog),
+        )
+        assert ".select()" not in source
+        assert 'via="pointer"' in source
+
+    def test_a_selection_that_opened_nothing_is_still_a_selection(self, window):
+        row = ElementRef(
+            role="list item",
+            name="Report",
+            extents=(20, 60, 200, 22),
+            actions=(),
+            selectable=True,
+            path=(("frame", "Example"),),
+        )
+        source = render(
+            Click(timestamp=1.0, target=Target(x=60, y=70, window=window, element=row))
+        )
+        assert ".select()" in source
+
+    def test_a_text_field_focus_click_that_opened_a_window_is_a_pointer_click(
+        self, window
+    ):
+        # `focus()` is an action as much as `select()` is.
+        field = ElementRef(
+            role="entry",
+            name="Search",
+            extents=(20, 60, 200, 24),
+            actions=(),
+            path=(("frame", "Example"),),
+        )
+        dialog = WindowRef(
+            title="Results",
+            app_id="org.example.App",
+            pid=99,
+            geometry=(340, 270, 200, 100),
+            title_stable=True,
+        )
+        source = render(
+            Click(
+                timestamp=1.0, target=Target(x=60, y=70, window=window, element=field)
+            ),
+            WaitForWindow(timestamp=2.0, window=dialog),
+        )
+        assert ".focus()" not in source
+        assert 'via="pointer"' in source
+
+    def test_a_double_click_keeps_its_own_rendering(self, window):
+        """`double_click()` is already a pointer gesture, so it is exempt.
+
+        pyguitest's double click moves the pointer and clicks twice -- there is
+        no accessible action in it to deadlock on -- and rendering it as a
+        single `click(via="pointer")` would lose the gesture.
+        """
+        row = ElementRef(
+            role="list item",
+            name="Report",
+            extents=(20, 60, 200, 22),
+            actions=("click",),
+            path=(("frame", "Example"),),
+        )
+        dialog = WindowRef(
+            title="Report",
+            app_id="org.example.App",
+            pid=99,
+            geometry=(340, 270, 200, 100),
+            title_stable=True,
+        )
+        source = render(
+            Click(
+                timestamp=1.0,
+                target=Target(x=60, y=70, window=window, element=row),
+                count=2,
+            ),
+            WaitForWindow(timestamp=2.0, window=dialog),
+        )
+        assert ".double_click()" in source
+
+    def test_the_script_still_validates(self, window):
+        source = self._recording(window)
+        assert validate(source) == []
+        ast.parse(source)
+
+
+class TestTheGeneratedSessionIsPaced:
+    """`connect()`'s zero `event_delay` loses events, and silently.
+
+    pyguitest documents two measurements of it, both in its own docs: a click
+    arriving before the move in front of it has been processed is dropped with
+    no exception (`connect()`'s docstring -- two driver scripts, a high silent-
+    miss rate turned clean by `event_delay=0.15`), and `send_keys("7*6~")`
+    against mate-calc losing its trailing Enter on a plain `connect()`
+    (`docs/validation.md`). A generated script is exactly the "script driving
+    real input against a real application" that docstring says should set
+    this, and it did not.
+    """
+
+    def _connect_line(self, *events, **options):
+        source = render(*events, **options)
+        return next(
+            line.strip() for line in source.splitlines() if "pyguitest.connect" in line
+        )
+
+    def test_the_session_default_is_still_zero_upstream(self):
+        """The reason this generator names the argument at all.
+
+        A cross-repository read, like `test_macos.py`'s keycode check: if
+        pyguitest ever changes the default, the number written here stops
+        being a correction of it and this is what says so.
+        """
+        import inspect
+
+        import pyguitest
+
+        parameters = inspect.signature(pyguitest.Session.__init__).parameters
+        assert "event_delay" in parameters, sorted(parameters)
+        assert parameters["event_delay"].default == 0.0
+
+    def test_a_coordinate_click_is_paced(self, window):
+        assert self._connect_line(Click(target=Target(x=20, y=30, window=window))) == (
+            "with pyguitest.connect(event_delay=0.15) as gui:"
+        )
+
+    def test_a_key_is_paced_too(self):
+        """`send_keys`/`tap_key` charge the delay, and lost the Enter without it."""
+        assert "event_delay=0.15" in self._connect_line(KeyStroke(key="Return"))
+        assert "event_delay=0.15" in self._connect_line(HotKey(keys=("ctrl", "s")))
+
+    def test_a_scroll_and_a_drag_are_paced(self, window):
+        scroll = Scroll(target=Target(x=50, y=50, window=window), dy=-1)
+        drag = Drag(
+            start=Target(x=40, y=40, window=window),
+            end=Target(x=90, y=120, window=window),
+        )
+        assert "event_delay=0.15" in self._connect_line(scroll)
+        assert "event_delay=0.15" in self._connect_line(drag)
+
+    def test_a_script_that_synthesises_nothing_is_left_alone(self):
+        """A named click, a check: no input event, so nothing to pace.
+
+        `Session` charges `event_delay` in `move_mouse`, the button and key
+        calls, `double_click`, `scroll`, `glide` and `move_mouse_naturally`
+        and nowhere else -- an element's own `click()`, `focus()` or an
+        `expect_*` synthesise nothing -- so a delay here would be a number
+        that does nothing but sit in the file.
+        """
+        button = ElementRef(
+            role="push button",
+            name="Save",
+            extents=(180, 80, 80, 30),
+            actions=("click",),
+        )
+        named = Click(target=Target(x=220, y=95, element=button))
+        assert self._connect_line(named) == "with pyguitest.connect() as gui:"
+        assert (
+            self._connect_line(check("text", "label", "Status", expected="Saved"))
+            == "with pyguitest.connect() as gui:"
+        )
+
+    def test_typing_alone_is_not_paced_by_this(self):
+        """`type_text` paces itself with `key_delay` and charges no event delay.
+
+        So a recording of typing into a named field would be handed a number
+        that changes nothing -- see `_PACED_CAPABILITIES`, which leaves
+        TEXT_ENTRY out for this reason.
+        """
+        field = ElementRef(role="text", name="Name")
+        source = render(TextInput(text="Ada", target=Target(x=10, y=10, element=field)))
+        assert "event_delay" not in source
+
+    def test_an_explicit_delay_is_written_as_given(self, window):
+        line = self._connect_line(
+            Click(target=Target(x=20, y=30, window=window)), event_delay=0.4
+        )
+        assert line == "with pyguitest.connect(event_delay=0.4) as gui:"
+
+    def test_an_explicit_delay_reaches_a_script_with_no_input_too(self):
+        assert self._connect_line(
+            check("text", "label", "Status", expected="Saved"), event_delay=0.2
+        ) == ("with pyguitest.connect(event_delay=0.2) as gui:")
+
+    def test_zero_is_the_unpaced_default_asked_for_deliberately(self, window):
+        """0.0 is a value, not an absence: it says the choice was made.
+
+        The old output's session, which is what it reproduces -- but written
+        down, so a reader of the file knows a zero-paced replay is what this
+        recording was rendered for rather than what it inherited.
+        """
+        line = self._connect_line(
+            Click(target=Target(x=20, y=30, window=window)), event_delay=0.0
+        )
+        assert line == "with pyguitest.connect(event_delay=0) as gui:"
+
+    def test_the_paced_script_still_validates(self, window):
+        source = render(Click(target=Target(x=20, y=30, window=window)))
+        assert validate(source) == []
+        ast.parse(source)
 
 
 def test_free_text_cannot_leave_its_comment():

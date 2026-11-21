@@ -269,6 +269,27 @@ rather than claiming a plain rounding. Both are settings too
 (`max_timeout`, `timeout_factor`), for setting them once in
 [config.example.toml](../config.example.toml) rather than on every invocation.
 
+## Pacing the replay's own input
+
+```sh
+pyguitest-recorder --event-delay 0.3   # a slower application
+pyguitest-recorder --event-delay 0     # pyguitest's unpaced default
+```
+
+A generated script that drives pointer or key input is written with
+`pyguitest.connect(event_delay=0.15)`, and that number is a correction of a
+default rather than a preference: pyguitest's session default is `0.0`, and
+its own `connect()` documents two ways a zero-paced session loses an event it
+sent — a click that arrives before the pointer move in front of it has been
+processed is dropped with no exception, and a key can arrive before the
+application has registered the key before it. Both are silent, which is why
+the generated script names the setting rather than inheriting it.
+
+Raise it for an application that needs longer to settle between events. A
+script of named element calls and checks gets no delay at all, because none of
+those synthesises an input event for the pause to apply to. `event_delay` is a
+setting too, for [config.example.toml](../config.example.toml).
+
 ## Putting your own header on the file
 
 ```sh

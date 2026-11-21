@@ -153,6 +153,30 @@ def test_a_non_finite_or_non_positive_timeout_setting_is_rejected(name, value):
         Settings(**{name: value})
 
 
+@pytest.mark.parametrize(
+    "value", [-0.1, -1.0, float("inf"), float("-inf"), float("nan")]
+)
+def test_a_non_finite_or_negative_event_delay_is_rejected(value):
+    # Written straight into the generated connect(...) as a literal, so a
+    # negative number reaches time.sleep at replay -- in somebody else's
+    # script, long after the flag that caused it -- and inf hangs the replay
+    # while nan sleeps for no time at all while looking like a setting.
+    with pytest.raises(ConfigError, match="event_delay"):
+        Settings(event_delay=value)
+
+
+def test_an_event_delay_of_zero_is_allowed():
+    # pyguitest's own unpaced default, asked for deliberately rather than
+    # inherited: a value, not a mistake.
+    assert Settings(event_delay=0.0).event_delay == 0.0
+
+
+def test_an_unset_event_delay_stays_unset():
+    # None is not zero here: it is "the measured default where the script
+    # drives input", which the generator decides, not this dataclass.
+    assert Settings().event_delay is None
+
+
 def test_a_max_timeout_below_default_timeout_is_rejected():
     # Below the floor, min(ceil(wanted), max_timeout) always returns
     # max_timeout -- every inferred wait comes out identical regardless of

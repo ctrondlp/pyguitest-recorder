@@ -268,6 +268,105 @@ def test_sensitive_option_marks_everything(key):
     assert events[0].sensitive is True
 
 
+class ReadingResolver(FakeResolver):
+    """A resolver that can also read a field's text, as the desktop one can.
+
+    `FakeResolver` deliberately cannot: the read is an optional method, the
+    way `resolve_hover` is, so a resolver without it leaves `prior_text` unset
+    and the generator renders what it always rendered.
+    """
+
+    def __init__(self, *args, field_text=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.field_text = field_text
+        self.reads = 0
+
+    def element_text(self, target):
+        self.reads += 1
+        return self.field_text
+
+
+def test_what_a_field_held_is_read_once_as_the_run_opens(key):
+    # Which decides whether the generator may replace the field's value or
+    # must type into it -- and one read per run, not per keystroke.
+    field = ElementRef(role="entry", name="Body")
+    resolver = ReadingResolver(
+        elements=[((0, 0, 1000, 1000), field)], field_text="Hello"
+    )
+    events = drain(
+        Normalizer(resolver=resolver),
+        [key(1.0, "a", "a"), key(1.1, "b", "b"), key(1.2, "c", "c")],
+    )
+    assert events[0].prior_text == "Hello"
+    assert resolver.reads == 1
+
+
+def test_an_empty_field_is_read_as_empty_not_as_unknown(key):
+    # "" and None are the two answers that must not be confused: one of them
+    # is what makes replacing the value an exact rendering of the run.
+    field = ElementRef(role="entry", name="Body")
+    resolver = ReadingResolver(elements=[((0, 0, 1000, 1000), field)], field_text="")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "a", "a")])
+    assert events[0].prior_text == ""
+
+
+def test_a_password_field_is_never_read(key):
+    # The run is withheld from the script; reading the field it is being typed
+    # into would carry the secret into the recording by the other hand.
+    secret = ElementRef(role="password text", name="Password")
+    resolver = ReadingResolver(
+        elements=[((0, 0, 1000, 1000), secret)], field_text="hunter2"
+    )
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "a", "a")])
+    assert events[0].sensitive is True
+    assert events[0].prior_text is None
+    assert resolver.reads == 0
+
+
+def test_nothing_is_read_under_the_sensitive_option_either(key):
+    field = ElementRef(role="entry", name="Body")
+    resolver = ReadingResolver(
+        elements=[((0, 0, 1000, 1000), field)], field_text="Hello"
+    )
+    options = NormalizerOptions(sensitive=True)
+    events = drain(Normalizer(resolver=resolver, options=options), [key(1.0, "a", "a")])
+    assert events[0].prior_text is None
+    assert resolver.reads == 0
+
+
+def test_text_with_no_field_under_it_is_not_read(key):
+    # Nothing to read, and the read is scoped to a text field deliberately:
+    # the answer only means anything for one.
+    resolver = ReadingResolver(field_text="Hello")
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "a", "a")])
+    assert events[0].prior_text is None
+    assert resolver.reads == 0
+
+
+def test_a_resolver_that_cannot_read_leaves_it_unknown(key):
+    field = ElementRef(role="entry", name="Body")
+    resolver = FakeResolver(elements=[((0, 0, 1000, 1000), field)])
+    events = drain(Normalizer(resolver=resolver), [key(1.0, "a", "a")])
+    assert events[0].prior_text is None
+
+
+def test_each_run_reads_the_field_again(key):
+    # Two runs into the same field are two questions: the first run is itself
+    # what the field holds by the time the second one starts.
+    field = ElementRef(role="entry", name="Body")
+    resolver = ReadingResolver(
+        elements=[((0, 0, 1000, 1000), field)], field_text="Hello"
+    )
+    options = NormalizerOptions(text_idle=0.5)
+    events = drain(
+        Normalizer(resolver=resolver, options=options),
+        [key(1.0, "a", "a"), key(5.0, "b", "b")],
+    )
+    typed = [event for event in events if isinstance(event, TextInput)]
+    assert len(typed) == 2
+    assert resolver.reads == 2
+
+
 def test_click_carries_the_element_under_it(press, release, save_button):
     resolver = FakeResolver(elements=[((150, 150, 100, 100), save_button)])
     events = drain(Normalizer(resolver=resolver), [press(1.0), release(1.02)])
