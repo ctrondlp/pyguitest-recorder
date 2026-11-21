@@ -265,6 +265,8 @@ class _Typed:
     last: float = 0.0
     sensitive: bool = False
     note: str = ""
+    prior_text: str | None = None
+    """What the field held when the run opened -- see `TextInput.prior_text`."""
 
 
 @dataclass
@@ -1023,11 +1025,12 @@ class Normalizer:
             else:
                 focused = self.resolver.focused()
                 target = self._text_target(raw, focused)
+                sensitive = self.options.sensitive or self._is_secret(target, focused)
                 self._typed = _Typed(
                     target=target,
                     timestamp=self._at(raw),
-                    sensitive=self.options.sensitive
-                    or self._is_secret(target, focused),
+                    sensitive=sensitive,
+                    prior_text=None if sensitive else self._prior_text(target),
                 )
         self._typed.text += raw.text
         self._typed.last = raw.timestamp
@@ -1105,6 +1108,30 @@ class Normalizer:
         # also failed to name the field. Found in review of this change.
         return self._target(raw)
 
+    def _prior_text(self, target: Target) -> str | None:
+        """What the field this run is going into holds, before it has anything.
+
+        Read here, as the run opens, and never for a sensitive one: the whole
+        point of withholding a password is that it does not reach the
+        recording, and reading the field it is being typed into would carry it
+        there by the other hand. The caller decides that -- this is only asked
+        where it has.
+
+        Costs one accessibility read per run of typing, not per keystroke, and
+        only on a desktop whose resolver can read an element at all: a resolver
+        without the method (the floor's, a test double's) answers None and the
+        generator renders exactly what it rendered before this existed.
+        """
+        if not _is_text_field(target.element):
+            return None
+        read = getattr(self.resolver, "element_text", None)
+        if read is None:
+            return None
+        # Narrowed rather than trusted: the method is reached through getattr,
+        # so its return type is whatever the resolver in use says it is.
+        text = read(target)
+        return text if isinstance(text, str) else None
+
     def _flush_text(self) -> list[Event]:
         """Emit the pending text run, if there is one."""
         if not self._typed.text:
@@ -1115,6 +1142,7 @@ class Normalizer:
             target=self._typed.target,
             sensitive=self._typed.sensitive,
             note=self._typed.note,
+            prior_text=self._typed.prior_text,
         )
         self._typed = _Typed()
         return [event]

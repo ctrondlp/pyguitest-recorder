@@ -324,9 +324,22 @@ dependencies = [
     # 0.26.1 taught `macquartz` the X11 spellings -- so a script recorded
     # on Linux and replayed on a Mac raised there and nowhere else, which
     # is exactly the cross-platform trap this floor exists to prevent.
-    # PROFILE stays `pyguitest-0.26`: it names the minor line, and a patch
-    # floor does not move it.
-    "pyguitest>=0.26.1",
+    # PROFILE moved with it to `pyguitest-0.27`, and that step is
+    # load-bearing in the same way: this generator now *emits*
+    # `click(via="pointer")` for the click that opens a window (a dialog
+    # that runs its own loop inside the action that opened it leaves every
+    # later action in that application unanswered -- measured, with the
+    # dialog still open at the end of the replay), and 0.26.1 gets that call
+    # wrong rather than lacking it. On AT-SPI it tried dogtail's own click
+    # first and fell back to the session's pointer only when dogtail
+    # *raised*; on a GNOME/Wayland session dogtail injected nothing and
+    # raised nothing, so the pointer never moved and the click landed
+    # nowhere -- silently, which `validate()` can never catch. 0.27.0 puts
+    # the session's own pointer first. It is also the release whose `macos`
+    # backend reads `AXSubrole`, which is what lets a Mac dialog report
+    # `dialog` at all and what the resolver's dialog memory recognises a
+    # modal by on that platform.
+    "pyguitest>=0.27.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

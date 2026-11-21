@@ -371,6 +371,29 @@ class TextInput(Event):
     text: str
     target: Target | None = None
     sensitive: bool = False
+    prior_text: str | None = None
+    """What the field held when this run began, where that could be read.
+
+    The one fact that decides whether replacing a field's value is the same
+    act as typing into it. A field that was empty ends up holding exactly what
+    was typed either way, so `Element.set_text` -- which needs no caret, no
+    rectangle and no key handling -- is an exact rendering of the run. A field
+    that already held something does not: the keys went in wherever the caret
+    was, and a whole-value replacement both loses the text that was there and
+    silently ignores where in it the person was typing.
+
+    `None` means "not read", and is treated as the empty case the way
+    `ElementRef.actions` being None is treated as unknown: a recording made
+    before this field existed renders exactly as it did, and so does a
+    sensitive run, where reading the field's own contents is the one thing
+    that would put the secret into the recording.
+
+    Read at the *start* of the run, which is the value the generator needs,
+    rather than at the end, which would have to wait for an application that
+    may be several keystrokes behind. The first character can race that read
+    and arrive inside it, so a value that is a prefix of `text` reads as the
+    empty case -- see the generator's `_replaces_the_value`.
+    """
 
 
 @dataclass(kw_only=True)

@@ -137,6 +137,17 @@ max_waypoints = 32          # cap on via points under "recorded"; 0 or less for
                             # not a budget: reaching a much smaller number
                             # means dropping corners, and a route made of
                             # corners (a zigzag) then comes out a straight line
+# event_delay for the generated script's own pyguitest.connect(...), in
+# seconds. Commented out is not "no delay": it is 0.15 for a script that
+# synthesises pointer or key input, and nothing for one of named element calls
+# and checks, which charges no event delay anyway. pyguitest's session default
+# is 0.0 and its connect() says a script driving real input should usually
+# override it -- both failures it prevents are silent ones: a click that
+# arrives before the move in front of it was processed and is simply dropped,
+# and a key that arrives before the key in front of it was registered. Raise it
+# for an application that needs longer to settle between events; set 0.0 to ask
+# for pyguitest's unpaced default deliberately.
+# event_delay = 0.15
 comments = true
 include_header = true       # the docstring naming versions and desktop
 # Your own text to open the file with, above that docstring -- a licence, a

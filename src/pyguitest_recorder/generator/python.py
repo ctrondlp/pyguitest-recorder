@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.26"
+PROFILE = "pyguitest-0.27"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.26.1"
+FLOOR = "0.27.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -275,6 +275,111 @@ _ELEMENT_FACTORIES = frozenset(_SUGAR.values()) | {
 }
 
 _TEXT_ROLES = frozenset({"entry", "text", "password text"})
+
+
+def _opening_clicks(recording: Recording) -> set[int]:
+    """`id()` of each Click the recording shows opened a window.
+
+    Which is a click that must not go through the accessible action -- see
+    `_effective_click_via` for the measurement. The evidence is already in the
+    recording by the time this runs: the synchronization analyzer puts a
+    `WaitForWindow` after a click whose window appeared, which is the same
+    observation ("a new toplevel showed up because of this") read for a
+    different purpose.
+
+    Only across events that cannot themselves have opened it: a pause, a
+    hover, an inferred wait. The search stops at the next *input*, so a window
+    that appeared after some later click is that click's, not this one's.
+    """
+    found: set[int] = set()
+    opener: Click | None = None
+    for event in recording.events:
+        if isinstance(event, Click):
+            opener = event
+            continue
+        if isinstance(event, WaitForWindow):
+            if opener is not None:
+                found.add(id(opener))
+                opener = None
+            continue
+        if isinstance(event, (KeyStroke, HotKey, TextInput, Drag, Scroll)):
+            opener = None
+    return found
+
+
+def _caret_clicks(recording: Recording) -> set[int]:
+    """The clicks that placed a caret a later run of typing went in at.
+
+    One pass over the recording, pairing each caret-sensitive `TextInput` with
+    the click that focused its field: the nearest preceding `Click` on that
+    same field, which is what the person used to put the caret where they
+    wanted it. Nothing between the two has to be skipped by kind -- a pause, a
+    hover, a wait all leave the caret alone -- so the search is simply
+    backwards for the first click on that element, and it stops at a click
+    elsewhere, which would have moved the caret out of this field.
+
+    A run with no such click (one reached by Tab, by an accelerator, or by the
+    application focusing the field) pairs with nothing, and needs nothing: the
+    keystrokes that moved the focus are already in the script, so whatever
+    caret the toolkit leaves is the caret the recording had.
+    """
+    found: set[int] = set()
+    for index, event in enumerate(recording.events):
+        if not isinstance(event, TextInput) or _replaces_the_value(event):
+            continue
+        element = event.target.element if event.target else None
+        if element is None:
+            continue
+        for earlier in reversed(recording.events[:index]):
+            if not isinstance(earlier, Click):
+                continue
+            clicked = earlier.target.element
+            if clicked is None:
+                break
+            if (clicked.role, clicked.name, clicked.path) != (
+                element.role,
+                element.name,
+                element.path,
+            ):
+                break
+            found.add(id(earlier))
+            break
+    return found
+
+
+def _replaces_the_value(event: TextInput) -> bool:
+    """Whether setting this field's value is the same act as the run recorded.
+
+    True for a field that was empty when the typing began, where the two end
+    with the field holding exactly the same string -- and `Element.set_text` is
+    then the better rendering by a distance: it needs no caret, no rectangle
+    and no click action, and it replays on a bridge that will not say whether
+    an entry can be clicked at all.
+
+    False for a field that already held something. `set_text` would throw that
+    text away and pay no attention to where in it the person was typing, so a
+    recording of inserting a word into a sentence replayed as a field holding
+    the word alone -- generated from a public API, syntactically perfect, and a
+    different act from the one recorded. Those runs are emitted as the
+    keystrokes they were.
+
+    `None` is the empty case deliberately: a recording made before
+    `prior_text` existed, a sensitive run (never read, so the secret cannot
+    reach the recording by this hand either), a field whose text the bridge
+    would not give up. Every one of them renders exactly as it did before this
+    existed, which is also the rendering five platforms' live runs measured.
+
+    The prefix test is the race named on `TextInput.prior_text`: the read
+    happens as the run opens and the application may already have taken the
+    first character or two, so a field that reads as the beginning of what was
+    typed is one that was empty a moment earlier. It costs the pathological
+    case of a field holding `Ad` typed into with `Ada`, which renders as a
+    replacement -- and buys every ordinary login form keeping the rendering
+    that was measured on it.
+    """
+    prior = event.prior_text
+    return prior is None or not prior or event.text.startswith(prior)
+
 
 # Roles whose click *is* a selection, so `select()` is tried ahead of
 # `click()` where the element offers both. Windows publishes `do default
@@ -451,6 +556,76 @@ belongs in the file: where the wait polls, the cadence is pyguitest's default
 to choose, and it chooses it per call.
 """
 
+_INPUT_EVENT_DELAY = 0.15
+"""Seconds the generated session pauses after each synthesised input event.
+
+`Session`'s own default is `0.0`, and pyguitest documents what that costs for
+a script that drives real input -- which is what every script generated here
+is. Two separate measurements, both in pyguitest's own docs:
+
+- A pointer click arriving before the move in front of it has been processed.
+  `connect()`'s docstring: the application gets the button event before it has
+  acted on the motion, the click is simply lost, no exception -- just a control
+  that never responds. Found on two driver scripts independently, both of which
+  "ran for a long time looking fine because nothing checked that each click
+  actually landed", and `event_delay=0.15` turned a high silent-miss rate into
+  a clean run. That is this number, and it is what the torture-test drivers
+  have carried since.
+- A key arriving before the one in front of it has been registered.
+  pyguitest's `docs/validation.md`: `gui.send_keys("7*6~")` against mate-calc
+  on a plain `connect()` left the entry reading `7x6` with no result -- the
+  trailing Enter visibly did nothing -- and the same call evaluated every time
+  under `connect(event_delay=0.05)`. Generated scripts emit `send_keys` for
+  chords and `tap_key` for single keys, both of which go through the calls that
+  charge this.
+
+So the generated `connect()` names it rather than taking the default. The cost
+where it is not needed is near zero by `Session`'s own design: only
+`move_mouse`, `press_button`, `release_button`, `double_click`, `scroll`,
+`glide`, `move_mouse_naturally`, `press_key` and `release_key` charge it. A
+drag or a shaped move pays once for the whole gesture, not once per
+interpolated point; `type_text` is paced by `key_delay` and does not charge it
+at all; and a named element's `click()`, `focus()`, `select()` or an `expect_*`
+charge nothing, because no input event is synthesised. `_connect` therefore
+emits it only for a script that actually drives one of those paths, which is
+also why a fully semantic script's `connect()` is unchanged.
+"""
+
+_NO_CHECKS = (
+    "this script checks nothing: it replays the interaction and passes as long "
+    "as nothing raises, which it will do just as happily against an "
+    "application that did none of what it was told. Record the run again, "
+    "holding the check key over whatever should have changed -- the title bar "
+    "that should say Saved, the row that should be gone -- or add a "
+    "gui.expect_* call by hand where the result matters"
+)
+"""The warning for a generated script that verifies nothing.
+
+The distinction a recorder cannot make for anybody, said in the file rather
+than left to the README: a recording of actions is a replay, and a replay is
+not a test. Everything else this generator warns about is a thing it could not
+do; this is the one that is about what the person recording did not ask for --
+and the cheapest of the lot to fix, since the check key is one chord during
+the next run.
+
+Deliberately no chord named here. `Settings.check_key` holds the default and
+the capture side owns it, so a chord written into this constant would be the
+copy that goes stale when a recording was made under a configured one.
+"""
+
+_PACED_CAPABILITIES = frozenset(
+    {"POINTER_MOVE", "POINTER_BUTTON", "POINTER_SCROLL", "KEY_EVENT"}
+)
+"""The capabilities whose calls charge `event_delay`, so a script that records
+one of them is a script `_INPUT_EVENT_DELAY` is for.
+
+Read off the `Session` methods that call `_after_event`, which is the only
+thing that spends the delay. `TEXT_ENTRY` is deliberately not here:
+`Session.type_text` paces itself with `key_delay` and charges no event delay at
+all, so a recording of typing alone would be given a number that does nothing.
+`TIMING`, `WINDOW_*`, `ELEMENT_*` and `INPUT_SYNC` are not input at all.
+"""
+
 _COORDINATE_CLICK_SETTLE = 0.5
 """Seconds inserted between two coordinate clicks `normalize.py` recorded as
 separate, back to back, with nothing rendered in between.
@@ -584,6 +759,20 @@ class GeneratorOptions:
     See `Settings.click_via` for the three routes and what each is for; this
     is the generator's own copy, so a caller building `GeneratorOptions`
     directly gets the same default without reaching for a `Settings`.
+    """
+
+    event_delay: float | None = None
+    """`event_delay` for the generated `pyguitest.connect(...)`, in seconds.
+
+    `None`, the default, is `_INPUT_EVENT_DELAY` for a script that synthesises
+    pointer or key input and nothing at all for one that does not -- see that
+    constant for the two measured races the number answers, and
+    `_PACED_CAPABILITIES` for what counts as driving input. A number is emitted
+    as given, including `0.0`, which is the old output's zero-paced session
+    asked for deliberately rather than inherited: `connect()`'s own default.
+
+    Raise it for an application that needs longer to settle between events;
+    the generated line is a plain literal, so a script can also just be edited.
     """
 
     max_waypoints: int = 32
@@ -783,6 +972,44 @@ class _State:
     """Ancestor (role, name) -> the variable it was bound to, so two elements
     needing the same scoping container share one lookup rather than
     searching for it twice."""
+
+    opening_clicks: set[int] = field(default_factory=set)
+    """`id()` of each Click that opened a window, for its click route.
+
+    Computed over the whole recording before rendering, like `caret_clicks`
+    and for the same reason: what decides it arrives *after* the click. See
+    `_opening_clicks` and `_effective_click_via`.
+    """
+
+    caret_clicks: set[int] = field(default_factory=set)
+    """`id()` of each Click whose point is what placed a caret.
+
+    Computed over the whole recording before rendering starts, like
+    `element_scopes`, because the fact that decides it arrives *after* the
+    click: a click into a text field is normally rendered as that field's
+    `focus()` -- no coordinate, no rectangle, no click action -- and that is
+    lossless only because the typing after it replaces the whole value and
+    does not care where the caret landed. Where the typing is emitted as
+    keystrokes instead (see `_replaces_the_value`), the caret is the whole
+    question and the point is the only thing that reproduces it.
+
+    Identity rather than index because the renderer is handed events, not
+    positions, and a recording holds no duplicate event objects.
+    """
+
+    checks: int = 0
+    """How many checks were rendered as an actual `expect_*` call.
+
+    Not how many `Assertion` events the recording holds: five paths record one
+    and emit no call -- a `text`, `checked` or `showing` check whose element
+    could not be named, a `window` check on a window with no title, the
+    `nothing` check the recorder writes when a check was asked for over
+    something it could not identify at all, and a check from a later version
+    of this package that this one has no renderer for. Each of those already
+    warns on its own, and each leaves the script verifying nothing, so it is
+    the call count and not the event count that answers "does this script
+    check anything" -- see `_no_checks_warning`.
+    """
 
     waited_scopes: set[tuple[str, str]] = field(default_factory=set)
     """The ancestors whose *presence* the script has already waited for.
@@ -1363,6 +1590,8 @@ class PythonGenerator:
         state = _State()
         state.natural_motion = _NATURAL_MOTION in _session_methods()
         state.session_type = recording.environment.session_type
+        state.caret_clicks = _caret_clicks(recording)
+        state.opening_clicks = _opening_clicks(recording)
         click_keywords = _element_keywords().get("click")
         state.via_supported = click_keywords is not None and "via" in click_keywords
         if self.options.click_via in ("pointer", "action") and not state.via_supported:
@@ -1404,6 +1633,13 @@ class PythonGenerator:
             # whether any scope was actually bound -- a coordinate-only
             # script has nothing the warning would be about.
             state.warnings.extend(_ambiguous_scope_warnings(recording))
+        if not state.checks:
+            # First, not last, and the only warning placed deliberately: every
+            # other one is about a single event and arrives in the order the
+            # events did, while this is about the finished file. A reader
+            # scanning the block should meet "this verifies nothing" before a
+            # note about which locator one click fell back to.
+            state.warnings.insert(0, _NO_CHECKS)
         source = self._assemble(recording, state)
         return _format(source) if self.options.format_output else source
 
@@ -1651,6 +1887,7 @@ class PythonGenerator:
             state.lines.append(f"gui.wait({_COORDINATE_CLICK_SETTLE:g})")
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON"})
         self._move(event.target, state)
+        self._note_caret_click(event, state)
         self._note_button_fallback(event, state)
         self._note_unclickable_fallback(event, state)
         self._note_pointer_fallback(event, state)
@@ -1678,13 +1915,53 @@ class PythonGenerator:
         button argument, so rendering a recorded right click that way would
         turn a context menu into an ordinary activation -- a script that runs
         cleanly and does the wrong thing, which is the worst outcome here.
+
+        A click that opened a window takes only the rungs that are *not* an
+        accessible action -- see the comment on `opening` below, and
+        `_effective_click_via` for the measurement.
+
+        A caret-placing click takes none of them either, and that is the whole
+        ladder rather than its `focus()` rung alone: every named rendering
+        here aims at an element rather than at a point -- `focus()` places no
+        caret and a named `click()` lands in the middle of the field -- while
+        the thing this click has to reproduce is *where in the text* it was.
+        See `_State.caret_clicks`.
+
+        Unless the route is `"action"`: that route must not inject a pointer,
+        and the coordinate a caret click falls to is exactly that. The click
+        stays on the ladder there -- the `focus()` rung puts the typing into
+        the right field with no pointer, which is the best the route offers;
+        where in the text the caret lands is the toolkit's choice, the
+        fidelity the caller gave up by asking for `action`.
         """
         if event.button != 1:
             return False
-        if event.count in (1, 2) and self._disclosure_click(event, state):
+        if (
+            id(event) in state.caret_clicks
+            and self._effective_click_via(state, event) != "action"
+        ):
+            return False
+        # A click that opened a window skips every rung that acts *through* the
+        # accessibility layer -- `expand()`, `collapse()`, `select()`,
+        # `focus()` -- and not only the plain `click()` whose route
+        # `_effective_click_via` changes. The deadlock measured there is a
+        # property of the accessible action, not of which action it was: a
+        # dialog running its own loop inside the handler leaves every later
+        # call in that application unanswered whether the handler was reached
+        # through a click, a selection or an expand. `double_click()` is
+        # exempt because pyguitest's double click *is* a pointer gesture.
+        opening = (
+            id(event) in state.opening_clicks
+            and self._effective_click_via(state, event) == "pointer"
+        )
+        if (
+            not opening
+            and event.count in (1, 2)
+            and self._disclosure_click(event, state)
+        ):
             state.bare_click_pending = False
             return True
-        if event.count == 2 and self._expand_click(event, state):
+        if not opening and event.count == 2 and self._expand_click(event, state):
             state.bare_click_pending = False
             return True
         if event.count == 2 and self._double_click(event, state):
@@ -1692,29 +1969,31 @@ class PythonGenerator:
             return True
         element = event.target.element
         if (
-            element is not None
+            not opening
+            and element is not None
             and element.role in _SELECT_ROLES
             and self._select_click(event, state)
         ):
             return True
-        if self._focus_click(event, state):
+        if not opening and self._focus_click(event, state):
             return True
-        call = self._click_call(element, state)
+        call = self._click_call(element, state, event)
         if call is not None:
+            self._note_opening_click(event, state)
             state.lines.extend([call] * event.count)
             state.pointer = None
             state.bare_click_pending = False
             self._note_element_repeat(event, state)
             return True
-        if self._select_click(event, state):
+        if not opening and self._select_click(event, state):
             return True
-        if self._effective_click_via(state) == "action":
+        if self._effective_click_via(state, event) == "action":
             self._note_action_unavailable(event, state)
             state.bare_click_pending = False
             return True
         return False
 
-    def _effective_click_via(self, state: _State) -> str:
+    def _effective_click_via(self, state: _State, event: Click | None = None) -> str:
         """The route the `click_via` option resolves to for this render.
 
         `"auto"` where the option is unset, unknown, or the installed pyguitest
@@ -1722,15 +2001,43 @@ class PythonGenerator:
         which it has already warned about. An unknown value falls back the way
         `motion` does: silently, to the recorded behaviour, rather than
         guessing one of the new routes a typo might have meant.
+
+        **A click the recording shows opened a window is the pointer's, not the
+        ladder's.** Measured on Debian 13 GNOME, replaying a generated script
+        against the GTK probe window: `button("Confirm").click()` opens the
+        modal through the accessible action, and then *nothing else in that
+        application answers an action* -- `button("OK", within=...).click()`
+        left the dialog open, still open ten seconds later, and the script
+        exited 0 having not dismissed it. The cause is the one
+        `docs/troubleshooting.md` names for the older, synchronous dispatch: a
+        GTK dialog runs its own nested loop inside the handler of the action
+        that opened it, so the at-spi bridge in that process never returns from
+        that call and every later action waits behind it. Driving the *opening*
+        click through the pointer instead leaves no action handler on the
+        stack, and the same two clicks then dismiss the dialog: measured both
+        routes, both passing, once the opener was a pointer click.
+
+        So only the opener changes, and only under `auto` -- a caller who asked
+        for `action` or `pointer` outright gets what they asked for, including
+        the deadlock, which is theirs to ask for.
         """
         via = self.options.click_via
         if via not in ("auto", "pointer", "action"):
-            return "auto"
+            via = "auto"
         if via != "auto" and not state.via_supported:
             return "auto"
+        if (
+            via == "auto"
+            and event is not None
+            and state.via_supported
+            and id(event) in state.opening_clicks
+        ):
+            return "pointer"
         return via
 
-    def _click_call(self, element: ElementRef | None, state: _State) -> str | None:
+    def _click_call(
+        self, element: ElementRef | None, state: _State, event: Click | None = None
+    ) -> str | None:
         """The named element's `click()`, or None where it has to stay a coordinate.
 
         The route changes not only the keyword written but what the element
@@ -1744,7 +2051,7 @@ class PythonGenerator:
         `_element_expr` can emit a disambiguating `within=` line a refused call
         must not leave behind.
         """
-        via = self._effective_click_via(state)
+        via = self._effective_click_via(state, event)
         if via == "pointer":
             if element is None or element.extents is None:
                 return None
@@ -2241,6 +2548,7 @@ class PythonGenerator:
         state.lines.append(
             f"gui.expect_window({_title_pattern(window.title)}, timeout={wait:g})"
         )
+        state.checks += 1
 
     def _check_nothing(self, event: Assertion, state: _State) -> None:
         """Record that a check was asked for where nothing could be identified.
@@ -2278,6 +2586,7 @@ class PythonGenerator:
             f"gui.{helper}({args}, name={_literal(element.name)}{tail}, "
             f"timeout={wait:g})"
         )
+        state.checks += 1
 
     def _check_comment(self, what: str, state: _State) -> None:
         """Label a check in the words of the person who will read it."""
@@ -2370,7 +2679,16 @@ class PythonGenerator:
         state.lines.append(f"gui.scroll({', '.join(parts)})")
 
     def _emit_textinput(self, event: TextInput, state: _State) -> None:
-        """Render typed text, into a named field where one was identified."""
+        """Render typed text, into a named field where one was identified.
+
+        Two renderings, and which one is right is decided by what the field
+        held when the run began rather than by what could be named. See
+        `_replaces_the_value`: `set_text` on a field that was empty is an exact
+        rendering of the run and the better one -- no caret, no rectangle, no
+        key handling, and a locator that survives the window moving -- while on
+        a field that already held text it is a different act from the one
+        recorded, and the keystrokes themselves are what reproduces it.
+        """
         if event.sensitive:
             text = self._secret(event, state)
             # Said at the point of use, not only in the binding block at the
@@ -2394,6 +2712,7 @@ class PythonGenerator:
             and element is not None
             and element.role in _TEXT_ROLES
             and element.name
+            and _replaces_the_value(event)
         ):
             state.capabilities.update({"ELEMENT_TREE", "ELEMENT_ACTION"})
             # Scoped like every other named lookup. This one was left
@@ -2409,10 +2728,89 @@ class PythonGenerator:
                 f"gui.text_field({_literal(element.name)}{within}).set_text({text})"
             )
             return
+        self._note_caret_typing(event, state)
         self._focus_before_typing(event.target, state)
         state.capabilities.add("TEXT_ENTRY")
         self._note_unidentified_text(event, state)
         state.lines.append(f"gui.type_text({text})")
+
+    def _note_opening_click(self, event: Click, state: _State) -> None:
+        """Say why the click that opens a window goes through the pointer.
+
+        Only where this generator *chose* the route: a caller who set
+        `click_via` asked for what they got and needs no explanation, while
+        this one is the generator overriding its own default ladder for one
+        click, which a reader comparing two clicks in the same file would
+        otherwise have to guess at.
+        """
+        if (
+            self.options.click_via != "auto"
+            or id(event) not in state.opening_clicks
+            or not state.via_supported
+        ):
+            return
+        self._comment(
+            "through the pointer, not the accessible action: this click opens a "
+            "window, and a dialog that runs its own loop inside the action that "
+            "opened it leaves every later action in that application unanswered "
+            "-- measured, with the dialog still open at the end of the script",
+            state,
+        )
+
+    def _note_caret_click(self, event: Click, state: _State) -> None:
+        """Say why a click this generator could have named is a point instead.
+
+        Emitted after the move it explains rather than before it, like every
+        other note on this path: the move renders the window binding and the
+        geometry read ahead of itself, so a comment written first ends up
+        several lines above the two calls it is about.
+        """
+        if id(event) not in state.caret_clicks:
+            return
+        self._comment(
+            "kept as a point: the typing after this goes in at the caret this "
+            "click placed, which no named call can aim at",
+            state,
+        )
+
+    def _note_caret_typing(self, event: TextInput, state: _State) -> None:
+        """Say that a named field was typed into rather than had its value set.
+
+        The one case where a field this generator *could* have named is typed
+        into instead, so the reason is said at the line and kept in the
+        warnings: this run went in at a caret, and a replay reproduces it only
+        if the caret lands where it did when this was recorded. The click that
+        put it there is kept as a coordinate for exactly that reason -- see
+        `_caret_clicks` -- and a run reached by Tab or by the application
+        focusing the field has whatever caret that leaves, which is the
+        toolkit's own convention and not something a recording can set.
+
+        What the field held is deliberately *not* written into the script.
+        `prior_text` is desktop content the person did not type during the
+        recording -- the rest of a note, somebody else's name in a form -- and
+        this comment needs only the fact that there was some: why the line is
+        keystrokes rather than a value does not depend on what they were. The
+        recording file keeps it, as it keeps a check's expected value, and
+        says at save time that it holds what was on screen.
+        """
+        element = event.target.element if event.target else None
+        if element is None or not element.name or _replaces_the_value(event):
+            return
+        self._comment(
+            f"{element.name!r} already held text when this was recorded, so this "
+            "typing went in at a caret rather than replacing the field. Typed "
+            "as keystrokes for that reason, not set as a value",
+            state,
+        )
+        warning = (
+            f"{element.name!r} already held text when it was typed into, so the "
+            "run is emitted as keystrokes at the caret the click before it "
+            "placed -- a replay reproduces it only where the field holds the "
+            "same text and the click lands in the same place in it. A field "
+            "that was empty is set by value instead, which needs neither"
+        )
+        if warning not in state.warnings:
+            state.warnings.append(warning)
 
     def _note_unidentified_text(self, event: TextInput, state: _State) -> None:
         """Say when typed text went somewhere the recording could not name.
@@ -2430,8 +2828,19 @@ class PythonGenerator:
         would redact most typing on a toolkit whose hit-testing does not work,
         and guessing from the text itself is worse. What it can do is stop
         being silent, so that `--sensitive` gets used where it matters.
+
+        A *named* field is not this warning's subject, and two paths now reach
+        `type_text` with one: a run at a caret (see `_note_caret_typing`) and
+        any run under `locators` other than `"element"`. Both used to collect a
+        warning saying the field could not be identified, which is the one
+        thing that was not true about them -- and a false claim here is worse
+        than none, since what this exists to make a reader do is check the file
+        for a secret the recorder could not have known about.
         """
         if event.sensitive or not self.options.redact_sensitive:
+            return
+        element = event.target.element if event.target else None
+        if element is not None and element.name:
             return
         warning = (
             "typed text went to a field this recording could not identify, so "
@@ -3109,7 +3518,7 @@ class PythonGenerator:
         out.append("")
         out.append(f"def {self.options.function_name}() -> None:")
         out.append('    """Replay the recorded interaction."""')
-        out.append(f"    with {_connect(state)} as gui:")
+        out.append(f"    with {_connect(state, self.options)} as gui:")
         body = _collapse_taps(_drop_unused_bindings(state.lines))
         if self.options.capability_preamble and state.capabilities:
             body = _require_lines(state.capabilities) + [""] + body
@@ -3495,7 +3904,7 @@ def _warnings_only(state: _State) -> list[str]:
     return [f"WARNING: {w}" for w in state.warnings]
 
 
-def _connect(state: _State) -> str:
+def _connect(state: _State, options: GeneratorOptions) -> str:
     """The `pyguitest.connect(...)` call a script for this recording needs.
 
     `pyguitest.connect()` on its own is right everywhere but one place. On a Mac
@@ -3528,10 +3937,34 @@ def _connect(state: _State) -> str:
     every generated script stop for a prompt -- including the unattended runs
     these scripts are written for. The header says what to connect with
     instead, and `_header` is where that is written.
+
+    `event_delay` is the other argument this can carry, and the reason it is
+    carried is in `_INPUT_EVENT_DELAY`: the session default of `0.0` has two
+    measured ways of losing an event that was sent, and a generated script is
+    exactly the "script driving real input against a real application" whose
+    `connect()` pyguitest's own docstring says should usually set this. Emitted
+    after any backend list, so the two read in the order they are decided.
+
+    Except under `motion = "verbatim"`, whose waits *are* the pacing: that
+    mode replays the recorded interval after every event, and `event_delay`
+    is charged on top of each wait -- two moves recorded 0.020 s apart would
+    replay 0.170 s apart, in the one mode that exists to preserve recorded
+    timing. The default steps aside there; an explicit `event_delay` is a
+    deliberate override and is written regardless.
     """
+    args = []
     if is_macos(state.session_type):
-        return 'pyguitest.connect(backend=["macquartz", "macos"])'
-    return "pyguitest.connect()"
+        args.append('backend=["macquartz", "macos"]')
+    delay = options.event_delay
+    if (
+        delay is None
+        and options.motion != "verbatim"
+        and state.capabilities & _PACED_CAPABILITIES
+    ):
+        delay = _INPUT_EVENT_DELAY
+    if delay is not None:
+        args.append(f"event_delay={delay:g}")
+    return f"pyguitest.connect({', '.join(args)})"
 
 
 def _footer(

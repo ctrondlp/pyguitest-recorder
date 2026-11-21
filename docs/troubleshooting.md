@@ -326,6 +326,18 @@ different position than when it was recorded. That is the failure mode
 coordinates have; the fix is making the target findable by name — see
 [Why is my script all coordinates?](#why-is-my-script-all-coordinates).
 
+**If a click seems not to have happened at all**, and the script carried on
+and exited 0, suspect the pacing rather than the target. A click sent before
+the application has processed the pointer move in front of it is dropped
+outright — no exception, just a control that never responded — and the same
+race can lose a keystroke behind the key before it. Generated scripts are
+written with `pyguitest.connect(event_delay=0.15)` wherever they drive
+pointer or key input, which is what answers both; a script generated before
+0.21.0 has a bare `connect()` and inherits pyguitest's zero-paced default.
+Regenerating from the saved session is the fix, or add the argument by hand.
+`--event-delay` raises it further for an application that needs longer —
+see [recipes.md](recipes.md#pacing-the-replays-own-input).
+
 **If it clicked a named element and got the wrong one**, two elements shared a
 role and a name — two "Remove" buttons, say — and the generator could not
 tell them apart. It tries to on its own first: when the elements' recorded
@@ -406,7 +418,7 @@ the generated script to the coordinate pair the recording carries —
 for a click that has no element at all — or act on the control as above.
 
 **With an `AttributeError` on `gui.something`**, your installed pyguitest is
-older than the recording expects. **pyguitest 0.26.1 or newer is required
+older than the recording expects. **pyguitest 0.27.0 or newer is required
 outright** — the floor the generated code is verified against. Generated scripts
 may call `Element.expand()`/`.collapse()` or read `.selectable` directly
 (0.12.0), call the `expect_` family as `Session` methods (0.9.0 and later),

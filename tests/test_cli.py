@@ -682,6 +682,32 @@ def test_a_non_finite_timeout_factor_flag_is_reported_not_crashed(tmp_path, caps
     assert "timeout_factor" in capsys.readouterr().err
 
 
+def test_a_negative_event_delay_flag_is_reported_not_crashed(tmp_path, capsys):
+    # The same shape as --timeout-factor above: argparse takes the number, and
+    # unrefused it would be written into a generated script as a literal and
+    # raise from time.sleep at replay rather than here.
+    code = main(
+        [
+            "--event-delay",
+            "-1",
+            "--config",
+            str(_empty(tmp_path)),
+            "--doctor",
+        ]
+    )
+    assert code == 2
+    assert "event_delay" in capsys.readouterr().err
+
+
+def test_the_event_delay_flag_reaches_the_generator():
+    # The flag exists so a run can pace its own generated script without
+    # hand-editing the file; that is only true if it reaches the options the
+    # generator reads.
+    assert _generator_options(Settings()).event_delay is None
+    assert _generator_options(Settings(event_delay=0.3)).event_delay == 0.3
+    assert _generator_options(Settings(event_delay=0.0)).event_delay == 0.0
+
+
 def test_doctor_reports_without_touching_the_desktop(tmp_path, capsys):
     main(["--doctor", "--config", str(_empty(tmp_path))])
     out = capsys.readouterr().out

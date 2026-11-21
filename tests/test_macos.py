@@ -208,7 +208,7 @@ def started(monkeypatch: pytest.MonkeyPatch, quartz: FakeQuartz, **kwargs: objec
     """A started backend over `quartz`, with its queue empty and held up to date.
 
     The fake's `CFRunLoopRun` returns immediately, so the capture thread finishes on
-    its own and leaves an end marker in the queue -- an artefact of a loop that never
+    its own and leaves an end marker in the queue -- an artifact of a loop that never
     ran. Joining the thread and draining that marker leaves a test with a queue it
     owns, and `_kinds` is populated by `start` before the thread is even made, which is
     all a translation test needs.

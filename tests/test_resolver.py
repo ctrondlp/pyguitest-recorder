@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from pyguitest_recorder.model import ElementRef, WindowRef
+from pyguitest_recorder.model import ElementRef, Target, WindowRef
 from pyguitest_recorder.platforms import (
     foreign_element_reason,
     foreign_focus_reason,
@@ -801,6 +801,557 @@ def test_the_nearest_toplevel_ancestor_is_checked_not_the_outermost():
     assert target.element is None
     (warning,) = made.warnings
     assert "'About'" in warning
+
+
+def test_the_nearest_toplevel_matching_the_window_ends_the_walk():
+    """The other half of the test above, and the behaviour it used to lack.
+
+    With the nearest toplevel naming the window under the point, the element
+    is in the window everything thinks it is -- so an *outer* toplevel named
+    differently is not a disagreement, and the walk used to carry on past the
+    match and refuse on it. On a toolkit that nests a dialog under its parent
+    frame that rejected every correctly resolved dialog element.
+    """
+    made = leak_resolver(
+        element_pid=77,
+        window_pid=77,
+        path=(("dialog", "About"), ("frame", "Target")),
+    )
+    target = made.resolve(100, 100)
+    assert target.element is not None
+    assert not made.warnings
+
+
+class ModalSession:
+    """A parent window with a modal dialog over it, and a lagging hit test.
+
+    The measured shape of the modal-dialog run: `window_at` answers the parent
+    for both presses -- for the first because it ran a moment before the dialog
+    mapped, for the second because by then the dialog has been dismissed -- so
+    the window list is the only thing that can say where the dialog was, and
+    only while it is open.
+    """
+
+    def __init__(self):
+        self.parent = FakeWindow(title="Probe Window", app_id="probe", pid=77)
+        self.dialog = FakeWindow(title="Confirm Action", app_id="probe", pid=77)
+        self.rects = {
+            self.parent: (100, 100, 420, 320),
+            self.dialog: (340, 270, 200, 100),
+        }
+        self.dialog_open = True
+        self.window_lists = 0
+
+    def window_at(self, x, y, screen=0):
+        return self.parent
+
+    def active_window(self):
+        return self.parent
+
+    def geometry(self, window):
+        return self.rects[window]
+
+    def windows(self):
+        self.window_lists += 1
+        return [self.parent, *([self.dialog] if self.dialog_open else [])]
+
+
+def modal_resolver():
+    made = DesktopResolver(session=ModalSession(), elements=False)
+    made._resolves_elements = True
+    return made
+
+
+OK_IN_DIALOG = ElementRef(
+    role="push button",
+    name="OK",
+    pid=77,
+    path=(("dialog", "Confirm Action"),),
+    extents=(362, 301, 86, 34),
+)
+CONFIRM_IN_PARENT = ElementRef(
+    role="push button",
+    name="Confirm",
+    pid=77,
+    path=(("frame", "Probe Window"),),
+    extents=(362, 301, 86, 34),
+)
+ELSEWHERE_IN_PARENT = ElementRef(
+    role="push button",
+    name="Reset",
+    pid=77,
+    path=(("frame", "Probe Window"),),
+    # Inside the parent window and clear of where the dialog opens, which the
+    # two buttons above deliberately share.
+    extents=(120, 130, 80, 30),
+)
+APPLY_IN_OUTER_DIALOG = ElementRef(
+    role="push button",
+    name="Apply",
+    pid=77,
+    path=(("dialog", "Options"),),
+    # Where the inner dialog sat, which is the point its dismissal hits.
+    extents=(362, 301, 86, 34),
+)
+
+
+class TestTheClickThatDismissesADialog:
+    """The modal-dialog misattribution: found live, reproduced, now refused.
+
+    Recording "click Confirm, then click OK in the dialog it raises" produced
+    a script that validated clean, ran clean and did the wrong thing: the
+    second click was recorded as another click on the parent's own `Confirm`
+    button, which sits at the same point, so the script opened the dialog
+    twice and never dismissed it.
+
+    The cause is structural rather than lag. A click that dismisses a window
+    is always consumed after that window has gone -- the application processes
+    the press, the dialog is destroyed, and the recorder is reading a stream
+    from another process -- so there is no dialog left to resolve against and
+    both halves agree about the wrong one. The only thing that knows better is
+    what the resolver saw a moment earlier, which is what it now keeps.
+    """
+
+    def _open_the_dialog(self, made):
+        """Press 1: the click that opens the modal, resolved after it opened.
+
+        Refused already, by the toplevel check -- the window hit test answers
+        the parent while the accessible hit test answers a widget in the
+        dialog. This is the only moment the resolver ever sees the dialog.
+        """
+        made._element = lambda x, y: OK_IN_DIALOG
+        first = made.resolve(360, 318)
+        assert first.element is None, "press 1 was already refused before this"
+        return first
+
+    def test_the_dismissing_click_is_refused_rather_than_misnamed(self):
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        made.session.dialog_open = False  # dismissed by the press below
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        second = made.resolve(405, 318)
+        assert second.element is None, "named the parent's button under the dialog"
+        assert second.window is not None and second.window.title == "Probe Window"
+        assert second.reason is not None
+        assert "'Confirm Action'" in second.reason
+        assert any("Confirm Action" in warning for warning in made.warnings)
+
+    def test_the_coordinate_it_falls_back_to_is_still_the_dialogs_button(self):
+        """Why refusing is enough to fix the replay, not just the recording.
+
+        The fallback coordinate is relative to the parent window, and the
+        dialog opens in the same place every time -- so the refused click
+        lands on the dialog's own button, which is what the confidently-named
+        one never did.
+        """
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        made.session.dialog_open = False
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        second = made.resolve(405, 318)
+        assert second.relative == (305, 218)
+
+    def test_a_click_inside_the_still_open_dialog_is_named(self):
+        """The memory must not refuse the dialog's own widgets.
+
+        A click on a widget whose nearest toplevel is itself transient is a
+        click into a dialog that is there *now* -- and `_belongs` has already
+        agreed it is the window under the point.
+        """
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: OK_IN_DIALOG
+        inside = made.resolve(405, 318)
+        assert inside.element is not None
+        assert inside.element.name == "OK"
+
+    def test_the_memory_expires(self, clock):
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        made.session.dialog_open = False
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        clock.advance(made._TRANSIENT_MEMORY + 0.1)
+        later = made.resolve(405, 318)
+        assert later.element is not None, "a dialog is not remembered forever"
+        assert later.element.name == "Confirm"
+
+    def test_a_dialog_still_open_outlasts_the_timeout(self, clock):
+        """A slow reader must not lose the protection the timeout exists for.
+
+        The timeout is "how long since this was last *seen*", and nothing
+        re-sees it while a person just reads it -- a hover is not a press, so
+        no resolve happens in between. A dialog that has not actually closed
+        must stay remembered regardless, which the window list -- consulted
+        only once the clock-based check would otherwise have dropped it --
+        can say for certain.
+        """
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        clock.advance(made._TRANSIENT_MEMORY + 0.1)  # a slow read, not a dismissal
+        # made.session.dialog_open stays True: nothing has closed it yet.
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        still_reading = made.resolve(405, 318)
+        assert still_reading.element is None, "dropped a dialog that never closed"
+        assert still_reading.reason is not None
+        assert "'Confirm Action'" in still_reading.reason
+
+    def test_the_window_list_is_not_consulted_for_an_unexpired_entry(self):
+        # The cost discipline `_remember_transient` already follows: nothing
+        # past the timeout means nothing to double-check, so the ordinary
+        # click -- the common case -- pays no window-list call for this.
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        asked = []
+        made._transient_window = lambda name, element: (
+            asked.append(name) or made.session.dialog
+        )
+        made.session.dialog_open = False
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        made.resolve(405, 318)
+        assert asked == [], "consulted the window list for an entry still fresh"
+
+    def test_a_point_the_dialog_never_covered_is_unaffected(self):
+        made = modal_resolver()
+        self._open_the_dialog(made)
+        made.session.dialog_open = False
+        made._element = lambda x, y: ELSEWHERE_IN_PARENT
+        # The dialog was at (340, 270, 200, 100); this is above and left of it.
+        elsewhere = made.resolve(150, 150)
+        assert elsewhere.element is not None
+        assert elsewhere.element.name == "Reset"
+
+    def test_a_dialog_clicked_into_is_remembered_without_a_window_list(self):
+        """The free half of the memory: the window under the point *is* the dialog.
+
+        Its rectangle is the one `_describe` already read, so a sequence that
+        clicks inside the dialog before dismissing it needs no second lookup
+        to be protected -- and is protected even once press 1 has aged out.
+        """
+        made = modal_resolver()
+        asked = []
+        made._transient_rect = lambda name, element: asked.append(name)
+
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: OK_IN_DIALOG
+        assert made.resolve(400, 300).element is not None
+
+        made.session.dialog_open = False
+        made.session.window_at = lambda x, y, screen=0: made.session.parent
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        after = made.resolve(405, 318)
+        assert after.element is None
+        assert asked == [], "looked the dialog up when the window already was it"
+
+    def test_an_ordinary_click_remembers_nothing(self):
+        """No memory, so no window list and nothing to refuse later.
+
+        The cost question: a frame is not transient, so the common click --
+        in an application's own window, resolving cleanly -- adds nothing and
+        asks nothing. A `frame` in the memory would be far worse than useless:
+        a parent window covers every point its dialogs open over, so it would
+        refuse the dialog clicks this exists to protect.
+        """
+        made = modal_resolver()
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        assert made.resolve(405, 318).element is not None
+        assert made._transient == []
+
+    def test_a_dialog_under_the_dismissed_one_is_refused_too(self):
+        """Nested modals: dismissing B must not name a button in dialog A.
+
+        With dialog B opened over dialog A, the click that dismisses B
+        hit-tests through to A's widgets -- a transient toplevel, and still
+        the wrong answer. Exempting every dialog-rooted element would skip
+        B's remembered rectangle exactly here; only the *same* still-open
+        dialog is exempt, which is the loop's name check. The cost -- a
+        chained wizard's next dialog opening over the last one's rectangle
+        within the memory window degrades to a coordinate -- lands in the
+        open dialog at replay, the refusal path's own argument.
+        """
+        made = modal_resolver()
+        self._open_the_dialog(made)  # B = 'Confirm Action', remembered
+        made.session.dialog_open = False  # B dismissed by the press below
+        outer = FakeWindow(title="Options", app_id="probe", pid=77)
+        made.session.rects[outer] = (330, 260, 220, 120)
+        made.session.window_at = lambda x, y, screen=0: outer
+        made._element = lambda x, y: APPLY_IN_OUTER_DIALOG
+        second = made.resolve(405, 318)
+        assert second.element is None, "named dialog A's button under dialog B"
+        assert second.reason is not None
+        assert "'Confirm Action'" in second.reason
+
+    def test_the_wayland_fallbacks_do_not_resurrect_the_refused_name(self):
+        """Native Wayland: the effect/focus fallbacks skip a dismissal refusal.
+
+        GNOME-Wayland resolves elements through `element_at(pid=)`, so this
+        memory engages there too -- and after a dismissal the parent's focus
+        is the very button that sat under the gone dialog, so the ordinary-
+        miss fallback would hand the refused name straight back and drop the
+        reason with it. A dismissed-dialog refusal keeps its coordinate and
+        its reason; an ordinary miss keeps the fallbacks (the Wayland focus
+        tests below).
+        """
+        session = ModalSession()
+        session.focused = lambda: FakeElement("push button", "Confirm", pid=77)
+        made = DesktopResolver(session=session, elements=False, wayland=True)
+        made._resolves_elements = True
+        made._element = lambda x, y: OK_IN_DIALOG
+        made.resolve(360, 318)  # press 1: the dialog is remembered
+        assert made._transient, "press 1 should have remembered the dialog"
+        session.dialog_open = False
+        made._element = lambda x, y: CONFIRM_IN_PARENT
+        second = made.resolve(405, 318)
+        assert second.element is None, "focus handed back the refused name"
+        assert second.reason is not None
+        assert "'Confirm Action'" in second.reason
+
+    def test_the_about_dialog_case_still_resolves_afterwards(self):
+        """A mismatch naming a *frame* must not poison the memory.
+
+        mate-calc's About dialog: the window list resolved the dialog and the
+        accessible hit test answered the Calculator's own '=' button, so the
+        toplevel named in the refusal is the persistent parent rather than
+        anything transient. Remembering that would refuse every subsequent
+        click in the About dialog -- the opposite of this feature.
+        """
+        made = modal_resolver()
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: CONFIRM_IN_PARENT  # path names the frame
+        assert made.resolve(400, 300).element is None  # refused, as it was before
+        assert made._transient == []
+
+        made._element = lambda x, y: OK_IN_DIALOG
+        assert made.resolve(400, 300).element is not None
+
+
+class WindowsModalSession(ModalSession):
+    """The same scene as Windows publishes it, measured on Windows 11.
+
+    UI Automation gives a modal the role it gives a main window -- both
+    resolved to `('window', <title>)` -- so the role cannot tell them apart
+    here. The window *class* can, and `Window.app_id` carries it on that
+    platform: `#32770` for a standard dialog, the application's own for its
+    frame.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.parent.app_id = "PyguitestRecorderProbeWindow"
+        self.dialog.app_id = "#32770"
+
+
+OK_IN_WINDOWS_DIALOG = ElementRef(
+    role="push button",
+    name="OK",
+    pid=77,
+    # The path a Windows modal's button really carries: a desktop panel, then
+    # the dialog as a plain `window`.
+    path=(("panel", "Desktop 1"), ("window", "Confirm Action")),
+    extents=(362, 301, 86, 34),
+)
+CONFIRM_IN_WINDOWS_PARENT = ElementRef(
+    role="push button",
+    name="Confirm",
+    pid=77,
+    path=(("panel", "Desktop 1"), ("window", "Probe Window")),
+    extents=(362, 301, 86, 34),
+)
+
+
+class TestTheSameDialogAsWindowsPublishesIt:
+    """The modal fix on the bridge whose role vocabulary does not have `dialog`.
+
+    Measured on Windows 11: a `MessageBoxW` and an ordinary application window
+    both publish accessible role `window`, so `TRANSIENT_ROLES` alone can
+    never fire there. The class is the signal, and these are the cases that
+    says it is read in the right places.
+    """
+
+    def _resolver(self):
+        made = DesktopResolver(session=WindowsModalSession(), elements=False)
+        made._resolves_elements = True
+        return made
+
+    def test_the_dismissing_click_is_refused_by_the_window_class(self):
+        made = self._resolver()
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: OK_IN_WINDOWS_DIALOG
+        # A resolve inside the dialog: the window under the point *is* the
+        # dialog, so its rectangle is remembered without a second lookup.
+        assert made.resolve(400, 320).element is not None
+        assert [seen.name for seen in made._transient] == ["Confirm Action"]
+
+        made.session.dialog_open = False
+        made.session.window_at = lambda x, y, screen=0: made.session.parent
+        made._element = lambda x, y: CONFIRM_IN_WINDOWS_PARENT
+        after = made.resolve(405, 318)
+        assert after.element is None, "named the parent's button under the dialog"
+        assert after.reason is not None and "Confirm Action" in after.reason
+
+    def test_a_click_inside_the_dialog_is_still_named(self):
+        """The exemption the role check cannot make here.
+
+        With both toplevels publishing `window`, "the element's own toplevel
+        is transient" is never true on Windows -- so what keeps a click into
+        the open dialog nameable is that the window under the point is itself
+        a dialog by class.
+        """
+        made = self._resolver()
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: OK_IN_WINDOWS_DIALOG
+        assert made.resolve(400, 320).element is not None
+        inside = made.resolve(405, 318)
+        assert inside.element is not None and inside.element.name == "OK"
+
+    def test_a_main_window_is_not_remembered_as_transient(self):
+        """The failure the role set was careful about, now on a second axis.
+
+        A parent window covers every point its dialogs open over, so if its
+        class read as transient every click into a dialog would be refused.
+        `PyguitestRecorderProbeWindow` is not `#32770`, and this is what says
+        the check is the class and not merely "has a class".
+        """
+        made = self._resolver()
+        made._element = lambda x, y: CONFIRM_IN_WINDOWS_PARENT
+        assert made.resolve(405, 318).element is not None
+        assert made._transient == []
+
+    def test_the_mismatch_path_asks_the_window_list_for_the_class(self):
+        """The other half of the memory, on this platform.
+
+        Where the dialog is only ever seen in a refused element's ancestry,
+        the class comes from the window list entry -- which is why
+        `_transient_window` hands the window back rather than its rectangle.
+        """
+        made = self._resolver()
+        # The window hit test lags behind the dialog opening, as it did in the
+        # measured Linux case: the parent answers while the element is in the
+        # dialog.
+        made._element = lambda x, y: OK_IN_WINDOWS_DIALOG
+        first = made.resolve(360, 318)
+        assert first.element is None, "the toplevel check refuses this one"
+        assert [seen.name for seen in made._transient] == ["Confirm Action"]
+
+        made.session.dialog_open = False
+        made._element = lambda x, y: CONFIRM_IN_WINDOWS_PARENT
+        assert made.resolve(405, 318).element is None
+
+    def test_nothing_is_remembered_when_the_class_says_nothing(self):
+        """A framework that rolls its own toplevel is the documented residual.
+
+        Neither the role nor the class marks a WPF or WinUI modal, so the fix
+        cannot fire for one -- and this pins that as a known limit rather than
+        something the tests quietly assume works.
+        """
+        made = self._resolver()
+        made.session.dialog.app_id = "HwndWrapper[MyApp;;abc]"
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: OK_IN_WINDOWS_DIALOG
+        assert made.resolve(400, 320).element is not None
+        assert made._transient == []
+
+
+class MacModalSession(ModalSession):
+    """The scene as macOS publishes it, measured on 15.8.1.
+
+    The dialog's window-list entry carries an **empty** title and the owning
+    process as its app id, while the element's own toplevel is named -- so the
+    memory's "the element's toplevel is the window under the point" test has
+    one named side and one empty one.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.parent.title = "Live Probe"
+        self.parent.app_id = "org.example.Probe"
+        self.dialog.title = ""
+        self.dialog.app_id = "UserNotificationCenter"
+
+
+ALLOW_IN_MAC_DIALOG = ElementRef(
+    role="push button",
+    name="Allow",
+    pid=77,
+    # What the live Mac answered, once `AXSubrole` was read: an application
+    # above, the dialog below it, named where its *window* is not.
+    path=(("application", "UserNotificationCenter"), ("dialog", "alert")),
+    extents=(362, 301, 86, 34),
+)
+BUTTON_IN_MAC_PARENT = ElementRef(
+    role="push button",
+    name="Confirm",
+    pid=77,
+    path=(("application", "Probe"), ("window", "Live Probe")),
+    extents=(362, 301, 86, 34),
+)
+
+
+class TestTheSameDialogAsMacosPublishesIt:
+    """An untitled window, which is what a Mac dialog is to the window list.
+
+    The role arrives correctly from pyguitest only once its `AXSubrole` is
+    read -- before that a Mac modal was a plain `window`, measured. With the
+    role right, the remaining obstacle was this: requiring the element's
+    toplevel name to equal the window's title means nothing is ever
+    remembered for a window whose title is empty.
+    """
+
+    def _resolver(self):
+        made = DesktopResolver(session=MacModalSession(), elements=False)
+        made._resolves_elements = True
+        return made
+
+    def test_an_untitled_dialog_is_remembered(self):
+        made = self._resolver()
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: ALLOW_IN_MAC_DIALOG
+        assert made.resolve(400, 320).element is not None
+        assert [seen.name for seen in made._transient] == ["alert"]
+
+    def test_the_dismissing_click_is_then_refused(self):
+        made = self._resolver()
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: ALLOW_IN_MAC_DIALOG
+        assert made.resolve(400, 320).element is not None
+
+        made.session.dialog_open = False
+        made.session.window_at = lambda x, y, screen=0: made.session.parent
+        made._element = lambda x, y: BUTTON_IN_MAC_PARENT
+        after = made.resolve(405, 318)
+        assert after.element is None
+        assert after.reason is not None and "alert" in after.reason
+
+    def test_a_real_disagreement_still_stops_it(self):
+        """The check is not dropped, only narrowed to a disagreement.
+
+        A window that *does* publish a title, naming a different toplevel from
+        the element's own, is the mate-calc About case -- the element is not in
+        the window under the point, and nothing about it should be remembered
+        as that window's dialog.
+        """
+        made = self._resolver()
+        made.session.dialog.title = "Some Other Dialog"
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: ALLOW_IN_MAC_DIALOG
+        made.resolve(400, 320)
+        assert made._transient == []
+
+    def test_an_untitled_window_that_is_not_transient_is_not_remembered(self):
+        # The relaxation is about the *title*, not about what counts as a
+        # dialog: an untitled frame is still a frame.
+        made = self._resolver()
+        made.session.dialog.title = ""
+        made.session.window_at = lambda x, y, screen=0: made.session.dialog
+        made._element = lambda x, y: ElementRef(
+            role="push button",
+            name="Allow",
+            pid=77,
+            path=(("application", "Probe"), ("frame", "untitled")),
+            extents=(362, 301, 86, 34),
+        )
+        made.resolve(400, 320)
+        assert made._transient == []
 
 
 def test_an_element_with_no_pid_is_kept_rather_than_lost():
@@ -2589,6 +3140,97 @@ def test_a_state_read_that_raises_leaves_the_check_at_showing():
     made.session.fail.add("element_at")
     observed = made.inspect(130, 130)
     assert observed.text is None and observed.checked is None
+
+
+# -- reading a field before it is typed into ---------------------------------
+
+
+class TestWhatAFieldHeldBeforeTheTyping:
+    """One read per run of typing, and what it is for.
+
+    `TextInput.prior_text`: whether replacing a field's value is the same act
+    as typing into it, which it only is for a field that was empty. Every
+    uncertainty answers None rather than an empty string, because "could not
+    read" and "held nothing" are the two answers that must not be confused --
+    one of them is what makes a whole-value replacement exact.
+    """
+
+    def test_it_reads_the_text_the_field_holds(self):
+        element = FakeElement("entry", "Body", pid=77, text="Hello")
+        made = element_resolver(element=element)
+        target = made.resolve(130, 130)
+        assert made.element_text(target) == "Hello"
+
+    def test_an_empty_field_reads_as_empty(self):
+        element = FakeElement("entry", "Body", pid=77, text="")
+        made = element_resolver(element=element)
+        target = made.resolve(130, 130)
+        assert made.element_text(target) == ""
+
+    def test_a_target_with_no_element_is_no_answer(self):
+        made = element_resolver()
+        assert made.element_text(Target(x=1, y=2)) is None
+
+    def test_an_element_that_changed_under_the_second_read_is_no_answer(self):
+        # The same guard `_state` makes, for the same reason: a reading that
+        # cannot be attributed to the element the run was attributed to is
+        # worse than no reading, because it decides how the run is rendered.
+        made = element_resolver()
+        target = made.resolve(130, 130)
+        made.session.element_at = lambda x, y: FakeElement(
+            "label", "Something else", pid=77, text="not the same widget"
+        )
+        assert made.element_text(target) is None
+
+    def test_a_read_that_raises_is_no_answer(self):
+        made = element_resolver()
+        target = made.resolve(130, 130)
+        made.session.fail.add("element_at")
+        assert made.element_text(target) is None
+
+    def test_a_resolver_with_no_element_half_is_no_answer(self):
+        element = FakeElement("entry", "Body", pid=77, text="Hello")
+        made = element_resolver(element=element)
+        target = made.resolve(130, 130)
+        made._resolves_elements = False
+        assert made.element_text(target) is None
+
+    def test_a_focus_resolved_target_reads_the_focused_field_not_the_corner(self):
+        """A target at its window's origin is focus's coordinate, not a click.
+
+        A focus-resolved target carries the window origin as its point (focus
+        has no coordinates of its own), so a same-role, same-name widget
+        sitting in that corner must not answer for the field -- least of all
+        with the empty string that turns the run into a whole-value
+        replacement.
+        """
+        corner = FakeElement("entry", "Body", pid=77, text="")
+        made = element_resolver(element=corner)
+        made.session.focused = lambda: FakeElement(
+            "entry", "Body", pid=77, text="Hello"
+        )
+        window = WindowRef(
+            title="Target", app_id="probe", pid=77, geometry=(100, 100, 400, 300)
+        )
+        expected = ElementRef(role="entry", name="Body", pid=77)
+        target = Target(x=100, y=100, window=window, element=expected)
+        assert made.element_text(target) == "Hello"
+
+    def test_a_same_named_twin_in_another_process_is_no_answer(self):
+        # Role and name alone cannot tell the field from another
+        # application's twin under an overlapping window -- the same
+        # session-scoped-bus problem `_mismatch_reason` documents -- and a
+        # twin that reads empty would turn typing into a whole-value
+        # `set_text` on a field that holds text.
+        twin = FakeElement("entry", "Body", pid=4242, text="")
+        made = element_resolver(element=twin)
+        made.session.focused = lambda: None
+        window = WindowRef(
+            title="Target", app_id="probe", pid=77, geometry=(100, 100, 400, 300)
+        )
+        expected = ElementRef(role="entry", name="Body", pid=77)
+        target = Target(x=130, y=130, window=window, element=expected)
+        assert made.element_text(target) is None
 
 
 # -- keyboard focus ----------------------------------------------------------

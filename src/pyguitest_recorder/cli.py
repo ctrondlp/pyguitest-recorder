@@ -282,6 +282,16 @@ def build_parser() -> argparse.ArgumentParser:
         '(via="action", the accessible action only)',
     )
     render.add_argument(
+        "--event-delay",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="pace the generated script's input with this pause after each "
+        "pointer and key event (0.15 for a script that drives either, nothing "
+        "for one that does not); 0 asks for pyguitest's unpaced default, which "
+        "can lose a click or a key silently",
+    )
+    render.add_argument(
         "--max-timeout",
         type=float,
         default=None,
@@ -435,6 +445,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         "locators",
         "motion",
         "click_via",
+        "event_delay",
         "max_waypoints",
         "max_timeout",
         "timeout_factor",
@@ -523,6 +534,7 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         locators=settings.locators,
         motion=settings.motion,
         click_via=settings.click_via,
+        event_delay=settings.event_delay,
         max_waypoints=settings.max_waypoints,
         comments=settings.comments,
         capability_preamble=settings.capability_preamble,
@@ -960,7 +972,7 @@ def _emit(
         ).save(settings.session_file)
         # Said where the file has just been written, for --no-redact's
         # reason: the flag was set at the start of a run that may have taken
-        # minutes, and this is the moment the artefact exists.
+        # minutes, and this is the moment the artifact exists.
         #
         # Unconditional, because a saved recording is sensitive whether or
         # not --record-raw was given: redaction is applied by the generator,

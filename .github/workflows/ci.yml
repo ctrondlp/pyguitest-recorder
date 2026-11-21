@@ -21,12 +21,15 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-  # Nightly, for the two pyguitest-axis jobs below: a break against the
-  # declared floor or against upstream git main is made upstream, so no
-  # push *here* is guaranteed to surface it before pyguitest releases it --
-  # the exact "red run the morning after" those jobs exist to pre-empt.
-  # Every other job skips on schedule: they test this repository's own
-  # code, which did not change overnight.
+  # Nightly, for the two pyguitest-axis jobs below and for `freebsd`. The
+  # first two watch a break that is made upstream: no push *here* is
+  # guaranteed to surface a failure against the declared floor or against
+  # pyguitest's git main before pyguitest releases it -- the exact "red run
+  # the morning after" they exist to pre-empt. `freebsd` is nightly for the
+  # opposite reason: it tests this repository's own code, but booting a BSD
+  # VM under QEMU costs several minutes before a single test runs, and `main`
+  # is covered the next night. Every other job skips on schedule, having
+  # nothing to re-check overnight.
   schedule:
     - cron: "17 5 * * *"
 
@@ -453,6 +456,87 @@ jobs:
             echo "::error::ruff-dependent tests skipped despite the dev extra"
             exit 1
           fi
+
+  freebsd:
+    name: FreeBSD, in a VM on the nightly schedule
+    runs-on: ubuntu-latest
+    # `pyproject.toml` claims FreeBSD in its classifiers and
+    # docs/developers/status.md records a live GhostBSD recording *and* a
+    # replay -- and until this job nothing in CI ran on it, while `windows`
+    # and `macos` both existed on precisely that reasoning. The sibling
+    # pyguitest repository has had this job for longer; it tests that package,
+    # not this one, so it cannot see a Linux-only assumption made here.
+    #
+    # GitHub has no BSD runners, so vmactions boots a FreeBSD VM under QEMU on
+    # an ubuntu one. Nightly and dispatch only, like pyguitest's: the VM takes
+    # several minutes to boot before a single test runs, and `main` is covered
+    # the next night. Deliberately NOT in `publish`'s `needs` -- a job that
+    # does not run on a tag push would leave publish waiting on a skip.
+    #
+    # What it catches is the class of bug that has shipped before on this
+    # platform: a /proc read, a Linux-only import, a `ps` spelling -- on the
+    # platform where it breaks, without waiting for someone to think of
+    # bringing up a BSD box.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run the test suite on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          # Tracks what the live box runs: GhostBSD sits on FreeBSD 15.
+          release: "15.0"
+          usesh: true
+          # pip through `ensurepip` where the port ships it and through the
+          # package where it does not -- two mechanisms for one prerequisite,
+          # in this order because the first needs no guess about anything.
+          # Measured on a FreeBSD 15.1 box: `python3` there is 3.12 (not the
+          # 3.11 that `py311-*` would name) and `ensurepip` answers pip 25.0.1,
+          # so the fallback asks the interpreter for its own version rather
+          # than hard-coding a `py3NN-` prefix that is right on one release
+          # and silently installs pip for a *different* Python on the next.
+          prepare: |
+            pkg install -y python3
+            python3 -m ensurepip --upgrade || pkg install -y "py$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')-pip"
+          # `x11` because that is how a recording is made here -- XRecord
+          # against this platform's own X server, as the live GhostBSD run
+          # did. pytest for the runner. Deliberately NOT the `dev` extra: it
+          # pulls ruff, which publishes no FreeBSD wheel and would have to
+          # build a Rust toolchain to install, and the rendering assertions
+          # that need it skip loudly rather than fail (see the `windows` job's
+          # guard, which is what asserts they ran where ruff *is* installed).
+          #
+          # pyguitest resolves from PyPI, like every other job here: the floor
+          # in pyproject.toml is the release this generator's output was last
+          # validated against, and `pyguitest-floor` is the job that installs
+          # exactly it. So this job's install step fails while that floor is
+          # ahead of its release, the same way every other job's does -- see
+          # the `windows` job, which explains why that is the ordering rather
+          # than a regression.
+          run: |
+            set -e
+            # vmactions syncs the workspace into the VM at the same path and
+            # starts `run` in it; the fallback covers a VM where the GITHUB_
+            # variables are not exported.
+            cd "${GITHUB_WORKSPACE:-.}"
+            python3 -m pip install -e '.[x11]' pytest
+            python3 -c "import pyguitest, pyguitest_recorder; print(pyguitest.__version__, pyguitest_recorder.__version__)"
+            # `-rs` so the log says which tests skipped and why, and a floor on
+            # the count so a mass import failure cannot read as a quietly tiny
+            # green suite -- the same two things pyguitest's FreeBSD job
+            # asserts. A floor rather than an exact number: the suite grows.
+            #
+            # Redirected rather than piped: this is FreeBSD's /bin/sh, where
+            # `pipefail` cannot be relied on, and a pipe would hand `set -e`
+            # tee's exit status instead of the suite's.
+            python3 -m pytest -q -rs > run.txt 2>&1 || { cat run.txt; exit 1; }
+            cat run.txt
+            ran=$(sed -n 's/^\([0-9]\{1,\}\) passed.*/\1/p' run.txt | tail -1)
+            echo "passed: ${ran:-0}"
+            if [ "${ran:-0}" -lt 1200 ]; then
+              echo "only ${ran:-0} tests passed -- something did not import"
+              exit 1
+            fi
 
   build:
     name: build sdist and wheel
