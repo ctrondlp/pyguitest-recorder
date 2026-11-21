@@ -663,6 +663,17 @@ class DesktopResolver:
     popup. Carried the same way, and for the same reason, as `_spending`; read
     by `_other_toplevel_of`, which must not treat a popup item as belonging to
     the wrong window."""
+    _dismissed_dialog: bool = field(default=False, init=False)
+    """Whether `_coordinate_element` refused this point because a dialog that
+    covered it has since gone -- `_transient_over`'s rejection, which is a
+    different kind of `None` from an ordinary coordinate miss.
+
+    Carried the same way as `_from_popup`, and read in `_resolve` so the
+    native-Wayland effect/focus fallbacks are *not* run for it: those name a
+    press from what the toolkit published, and on a dialog dismissal what the
+    parent still publishes is the very button under the gone dialog -- the
+    attribution this refusal exists to prevent. An ordinary miss keeps both
+    fallbacks; only a dialog dismissal skips them and keeps its coordinate."""
     _click_pid: int | None = field(default=None, init=False)
     """The process of the window the resolve in progress landed in, carried the
     same way as `_spending` so `_live_at` can scope a native-Wayland
@@ -1053,6 +1064,7 @@ class DesktopResolver:
         """The window and element under a point; see `resolve`."""
         self._spending = spend
         self._from_popup = False
+        self._dismissed_dialog = False
         window = self._window(x, y, screen)
         # The window's process scopes a native-Wayland coordinate lookup (see
         # `_live_at`); carried as state because `_element` is a replaceable,
@@ -1075,7 +1087,13 @@ class DesktopResolver:
         # focus is stale) is a documented limitation. The click keeps its own
         # coordinates; only the name is borrowed. Off on every other backend,
         # unchanged there.
-        if self.wayland and spend:
+        #
+        # Never run for a dismissed-dialog refusal: what the parent window
+        # publishes after a dismissal -- its focus most of all -- is the very
+        # element under the gone dialog, so these fallbacks would hand back
+        # exactly the name `_transient_over` just refused. That refusal keeps
+        # its coordinate and its reason.
+        if self.wayland and spend and not self._dismissed_dialog:
             named = self._effect_element_in(window, when) or self._focus_element_in(
                 window
             )
@@ -1360,6 +1378,7 @@ class DesktopResolver:
         self._remember_transient(element, window)
         gone = self._transient_over(element, x, y, window)
         if gone is not None:
+            self._dismissed_dialog = True
             return None, (
                 f"a dialog ({gone!r}) was over this point a moment before "
                 "this click, and the click that dismisses a dialog is consumed "
@@ -1622,10 +1641,24 @@ class DesktopResolver:
         the target was actually built from. Measured: without the second
         route, every run on a desktop that publishes per-widget focus -- which
         is the principled path and the common one -- read as unknown.
+
+        A target whose point *is* its window's origin is asked focus-first for
+        that reason: that point is the coordinate `focused` stamps, not a
+        place anybody clicked, and a widget sitting in the corner that happens
+        to share the field's role and name would otherwise answer for it --
+        with an empty string where the real field holds text, the one reading
+        `_emit_textinput` must not act on. Both routes still run either way;
+        only which is believed first changes.
         """
         expected = target.element
         if not self._resolves_elements or expected is None:
             return None
+        geometry = target.window.geometry if target.window is not None else None
+        if geometry is not None and (target.x, target.y) == (geometry[0], geometry[1]):
+            focus = self._text_of_focus(expected)
+            if focus is not None:
+                return focus
+            return self._text_under(target.x, target.y, expected)
         under = self._text_under(target.x, target.y, expected)
         return under if under is not None else self._text_of_focus(expected)
 
@@ -1660,8 +1693,20 @@ class DesktopResolver:
         one whose reading cannot be attributed to the element the run was
         attributed to -- and here that reading decides how the run is
         rendered.
+
+        The process is part of that identity where both sides state one: role
+        and name alone cannot tell the field from another application's
+        same-named twin (the accessibility bus is session-scoped, and two
+        overlapping windows put foreign elements under this point -- see
+        `_mismatch_reason`), and a wrong element that happens to read empty is
+        the costly answer here, turning typing into a whole-value `set_text`
+        on a field that holds text. Either side missing a pid says nothing,
+        the rule `_belongs` follows.
         """
         if element.role != expected.role or (element.name or "") != expected.name:
+            return None
+        pid = getattr(element, "pid", None)
+        if pid is not None and expected.pid is not None and pid != expected.pid:
             return None
         text = element.text
         return text if isinstance(text, str) else None
@@ -2245,23 +2290,50 @@ class DesktopResolver:
         dialog's button where the confidently-named one did not.
 
         Four things are left alone, each because the disagreement is not real:
-        an element whose own nearest toplevel is a transient one, a point whose
-        window is *itself* a dialog by its class (the two ways of saying "a
-        dialog is there *now*", and `_belongs` has already agreed it is the
-        window under the point -- the second is the one that answers on
-        Windows, where a modal's role is `window`; see `DIALOG_CLASSES`), an
-        element whose ancestry names no toplevel at all (nothing to disagree
-        with -- the rule the rest of this class follows), and a popup item,
-        which `_other_toplevel_of` exempts for the same reason.
+        an element whose own nearest toplevel is the *same* dialog remembered
+        at this point (still open, still what the click is in -- the loop's
+        name check), a point whose window is *itself* a dialog by its class
+        (the way "a dialog is there now" is said on Windows, where a modal's
+        role is `window` and `_belongs` has already agreed; see
+        `DIALOG_CLASSES`), an element whose ancestry names no toplevel at all
+        (nothing to disagree with -- the rule the rest of this class follows),
+        and a popup item, which `_other_toplevel_of` exempts for the same
+        reason.
+
+        An element whose toplevel is a *different* dialog is deliberately not
+        exempted: with dialog B opened over dialog A, the click that dismisses
+        B hit-tests through to A's button -- a transient toplevel, and still
+        the wrong answer. The cost is a click inside a dialog that opened,
+        within the memory window, over the rectangle of another one just
+        dismissed (a chained wizard): structurally identical from here, so it
+        degrades to a coordinate -- which lands in the open dialog at replay
+        exactly as the refusal path's own rationale above says.
+
+        An entry past `_TRANSIENT_MEMORY` is not dropped on elapsed time
+        alone: it is kept, and its clock reset, for as long as the window
+        list still carries that dialog open. A person reading a confirmation
+        dialog for longer than the timeout is not a rare case the timeout
+        exists to cover -- a hover never reaches here to refresh it on its
+        own -- and dropping the memory under a dialog that has not actually
+        closed reintroduces the exact defect this class exists to prevent.
+        The window-list call this costs is paid only for an entry already
+        past the timeout, which keeps the ordinary click -- nothing expiring
+        -- free of it, the same discipline `_remember_transient` follows.
+        Once the window is confirmed gone (closed by `Escape`, say, where
+        nothing else here would have noticed) it expires exactly as before.
         """
         now = _now()
-        self._transient = [
-            seen for seen in self._transient if now - seen.at <= self._TRANSIENT_MEMORY
-        ]
+        kept = []
+        for seen in self._transient:
+            if now - seen.at <= self._TRANSIENT_MEMORY:
+                kept.append(seen)
+            elif self._transient_window(seen.name, element) is not None:
+                kept.append(replace(seen, at=now))
+        self._transient = kept
         if self._from_popup or _dialog_class(window):
             return None
         named = self._path_toplevel(element)
-        if named is None or named[0] in TRANSIENT_ROLES:
+        if named is None:
             return None
         for seen in reversed(self._transient):
             if seen.name != named[1] and _has_point(seen.rect, x, y):

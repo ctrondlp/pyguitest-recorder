@@ -7,8 +7,11 @@ was released.
 
 A minor, for `event_delay`: new command-line and configuration surface, plus
 a new field on a recorded run of typing (`TextInput.prior_text`, optional, so
-every older session still loads and regenerates). The pyguitest floor does
-not move -- nothing emitted here is new API over there.
+every older session still loads and regenerates). The pyguitest floor rises
+to 0.27.0: a window-opening click is now replayed as `click(via="pointer")`,
+and the route keyword only *routes* -- rather than silently doing nothing on
+an AT-SPI desktop -- as of that release (its pointer-ordering and macOS
+dialog-role fixes, see below).
 
 What the release is actually about is the whole generated artifact: what a
 script *does* when it replays, rather than whether it renders. Four of the
@@ -65,6 +68,27 @@ happen, before being fixed.
   because press 2 was consumed before GTK had destroyed the dialog. This is
   the safety net for the losing case, and it costs nothing in the winning one.
 
+  Two holes the first cut left are closed with it. A dialog dismissed over
+  *another dialog* is refused too: only the same still-open dialog is exempt
+  from the memory rather than every dialog-rooted element, so dismissing the
+  inner one of a nested pair no longer names the outer dialog's button. And
+  on native Wayland the effect/focus fallbacks do not run for this refusal:
+  after a dismissal the parent's focus is the very button the dialog was
+  covering, so they would have handed back exactly the name the memory had
+  just refused -- an ordinary coordinate miss keeps both fallbacks.
+
+  A third hole: the memory is kept by how long since it was last *seen*, and
+  nothing re-sees it while a person just reads it -- a hover is not a press,
+  so it never refreshes the clock on its own. A dialog read for longer than
+  the two-second timeout, still open, used to lose its protection exactly
+  when someone finally dismissed it. An entry past the timeout is no longer
+  dropped on elapsed time alone: it is kept, and its clock reset, for as long
+  as the window list still carries that dialog open, and the window-list call
+  this costs is paid only for an entry already past the timeout -- so the
+  ordinary click, nothing expiring, remains free of it. A dialog actually
+  closed (by `Escape`, say, where nothing else here would have noticed)
+  expires exactly as before.
+
 - **A click that opens a window is emitted through the pointer, which is what
   lets the script that follows it work at all.** Replaying a generated script
   against the GTK probe window on Debian 13/GNOME: `button("Confirm").click()`
@@ -116,7 +140,11 @@ happen, before being fixed.
   still renders `set_text("hello")`, and typing `xy` at the end of it renders
   `gui.type_text("xy")`, leaving `helloxy` where `set_text("xy")` would have
   left `xy`. A recording made before this field existed, or on a desktop whose
-  bridge will not give the text up, renders exactly as it did.
+  bridge will not give the text up, renders exactly as it did. Under
+  `click_via = "action"` the caret click stays on the ladder instead of
+  falling to a coordinate: that route must not inject a pointer, so `focus()`
+  puts the typing into the right field and where in the text the caret lands
+  is the fidelity the route trades away.
 
 - **A generated script paces its own input.** `Session`'s `event_delay`
   defaults to `0.0` and pyguitest's own `connect()` says a script driving real
@@ -131,9 +159,14 @@ happen, before being fixed.
   The generated `connect()` now names 0.15 where the script synthesises
   pointer or key input and nothing where it does not -- a named element's
   `click()`, `focus()` or an `expect_*` charges no event delay at all, so a
-  fully semantic script is unchanged. `event_delay` is a setting and
+  fully semantic script is unchanged. `motion = "verbatim"` is also left
+  unpaced by default -- its waits replay the recorded interval after every
+  event, and the delay is charged on top of each of them, in the one mode
+  that exists to preserve recorded timing. `event_delay` is a setting and
   `--event-delay` a flag; `0` asks for pyguitest's unpaced default
-  deliberately rather than inheriting it.
+  deliberately rather than inheriting it, an explicit value is written under
+  every mode, and a non-numeric one in the TOML (a quoted `"0.3"`) is a
+  `ConfigError` with the normal exit-2 diagnostic rather than a traceback.
 
 - **A script with no check in it says so.** The README has always explained
   that actions alone are not a test -- a script can click Save, exit 0, and

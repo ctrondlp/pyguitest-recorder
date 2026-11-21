@@ -607,7 +607,7 @@ class TestTypingIntoAFieldThatAlreadyHeldText:
         path=(("frame", "Example"),),
     )
 
-    def _render(self, prior, text=" world", window=None, with_click=True):
+    def _render(self, prior, text=" world", window=None, with_click=True, **options):
         target = Target(x=300, y=240, window=window, element=self.FIELD)
         events = []
         if with_click:
@@ -615,7 +615,7 @@ class TestTypingIntoAFieldThatAlreadyHeldText:
         events.append(
             TextInput(timestamp=2.0, text=text, target=target, prior_text=prior)
         )
-        return render(*events)
+        return render(*events, **options)
 
     @pytest.mark.needs_ruff
     def test_an_empty_field_is_still_set_by_value(self, window):
@@ -663,6 +663,28 @@ class TestTypingIntoAFieldThatAlreadyHeldText:
         source = self._render("", window=window)
         assert ".focus()" in source
         assert "gui.move_mouse(" not in source
+
+    def test_under_the_action_route_the_caret_click_injects_no_pointer(self, window):
+        """`click_via = "action"` must not inject a pointer -- not even a caret.
+
+        The route exists for a replay that must not synthesise input, and the
+        coordinate a caret click falls to is exactly that. It stays on the
+        ladder there: `focus()` puts the typing into the right field with no
+        pointer, and where in the text the caret lands is the fidelity the
+        caller gave up by asking for the route.
+        """
+        source = self._render("Hello", window=window, click_via="action")
+        assert "gui.move_mouse(" not in source
+        assert "gui.click()" not in source
+        assert ".focus()" in source
+        assert "gui.type_text" in source
+
+    def test_under_the_pointer_route_the_caret_click_keeps_its_point(self, window):
+        # The route that *is* the caret click's own rendering: unchanged.
+        source = self._render("Hello", window=window, click_via="pointer")
+        assert "gui.move_mouse(" in source
+        assert "gui.click()" in source
+        assert ".focus()" not in source
 
     def test_a_click_on_a_different_field_is_not_kept_as_a_point(self, window):
         """Only the click that focused *this* field placed its caret.
@@ -4245,6 +4267,29 @@ class TestTheGeneratedSessionIsPaced:
             Click(target=Target(x=20, y=30, window=window)), event_delay=0.0
         )
         assert line == "with pyguitest.connect(event_delay=0) as gui:"
+
+    def test_verbatim_motion_is_not_paced_on_top_of_its_waits(self, window):
+        """Verbatim's waits *are* the pacing; the default must not stack on them.
+
+        `event_delay` is charged after every synthesised event, on top of the
+        recorded interval verbatim replays -- two moves recorded 0.020 s apart
+        would replay 0.170 s apart, in the one mode that exists to preserve
+        recorded timing.
+        """
+        line = self._connect_line(
+            Click(target=Target(x=20, y=30, window=window)), motion="verbatim"
+        )
+        assert line == "with pyguitest.connect() as gui:"
+
+    def test_an_explicit_delay_survives_verbatim(self, window):
+        # Asked for outright, so it is a deliberate override of the recorded
+        # timing, written exactly as any other explicit value is.
+        line = self._connect_line(
+            Click(target=Target(x=20, y=30, window=window)),
+            motion="verbatim",
+            event_delay=0.3,
+        )
+        assert line == "with pyguitest.connect(event_delay=0.3) as gui:"
 
     def test_the_paced_script_still_validates(self, window):
         source = render(Click(target=Target(x=20, y=30, window=window)))

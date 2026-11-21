@@ -1926,8 +1926,20 @@ class PythonGenerator:
         caret and a named `click()` lands in the middle of the field -- while
         the thing this click has to reproduce is *where in the text* it was.
         See `_State.caret_clicks`.
+
+        Unless the route is `"action"`: that route must not inject a pointer,
+        and the coordinate a caret click falls to is exactly that. The click
+        stays on the ladder there -- the `focus()` rung puts the typing into
+        the right field with no pointer, which is the best the route offers;
+        where in the text the caret lands is the toolkit's choice, the
+        fidelity the caller gave up by asking for `action`.
         """
-        if event.button != 1 or id(event) in state.caret_clicks:
+        if event.button != 1:
+            return False
+        if (
+            id(event) in state.caret_clicks
+            and self._effective_click_via(state, event) != "action"
+        ):
             return False
         # A click that opened a window skips every rung that acts *through* the
         # accessibility layer -- `expand()`, `collapse()`, `select()`,
@@ -3932,12 +3944,23 @@ def _connect(state: _State, options: GeneratorOptions) -> str:
     exactly the "script driving real input against a real application" whose
     `connect()` pyguitest's own docstring says should usually set this. Emitted
     after any backend list, so the two read in the order they are decided.
+
+    Except under `motion = "verbatim"`, whose waits *are* the pacing: that
+    mode replays the recorded interval after every event, and `event_delay`
+    is charged on top of each wait -- two moves recorded 0.020 s apart would
+    replay 0.170 s apart, in the one mode that exists to preserve recorded
+    timing. The default steps aside there; an explicit `event_delay` is a
+    deliberate override and is written regardless.
     """
     args = []
     if is_macos(state.session_type):
         args.append('backend=["macquartz", "macos"]')
     delay = options.event_delay
-    if delay is None and state.capabilities & _PACED_CAPABILITIES:
+    if (
+        delay is None
+        and options.motion != "verbatim"
+        and state.capabilities & _PACED_CAPABILITIES
+    ):
         delay = _INPUT_EVENT_DELAY
     if delay is not None:
         args.append(f"event_delay={delay:g}")

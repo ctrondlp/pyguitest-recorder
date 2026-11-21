@@ -450,10 +450,20 @@ class Settings:
         a number, either hang the replay forever or sleep for no time while
         looking like a setting. `0` is allowed and meaningful: it is pyguitest's
         own unpaced default, asked for deliberately.
+
+        The type is checked first because the TOML route, unlike argparse's
+        `type=float`, delivers whatever the file says: `event_delay = "0.3"`
+        is a string by the time it reaches here, and `math.isfinite` raises
+        `TypeError` on it -- a traceback where the CLI's `ConfigError` handler
+        would have printed the diagnostic and exited 2. A bool is refused too:
+        TOML's `true` is not one second.
         """
         if self.event_delay is None:
             return
-        if not math.isfinite(self.event_delay) or self.event_delay < 0:
+        numeric = isinstance(self.event_delay, (int, float)) and not isinstance(
+            self.event_delay, bool
+        )
+        if not numeric or not math.isfinite(self.event_delay) or self.event_delay < 0:
             raise ConfigError(
                 f"event_delay must be a finite number of seconds, 0 or more, "
                 f"got {self.event_delay!r}"

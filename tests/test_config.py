@@ -165,6 +165,17 @@ def test_a_non_finite_or_negative_event_delay_is_rejected(value):
         Settings(event_delay=value)
 
 
+@pytest.mark.parametrize("value", ["0.3", True])
+def test_a_nonnumeric_event_delay_is_a_config_error_not_a_traceback(value):
+    # The TOML route, unlike argparse's type=float, delivers whatever the file
+    # says: `event_delay = "0.3"` arrives as a string, and `math.isfinite`
+    # raises TypeError on it -- a traceback where the CLI's ConfigError
+    # handler prints the diagnostic and exits 2. And TOML's `true` is not one
+    # second.
+    with pytest.raises(ConfigError, match="event_delay"):
+        Settings(event_delay=value)
+
+
 def test_an_event_delay_of_zero_is_allowed():
     # pyguitest's own unpaced default, asked for deliberately rather than
     # inherited: a value, not a mistake.

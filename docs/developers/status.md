@@ -271,6 +271,16 @@ The macOS shape is covered by `tests/test_resolver.py`'s
 `TestTheSameDialogAsMacosPublishesIt`, built from the live measurements
 above.
 
+Two holes the review round closed are verified at the unit level, not live:
+the nested-dialog case (dismissing dialog B over dialog A no longer names A's
+button -- only the *same* still-open dialog is exempt from the memory) and
+the native-Wayland one (the effect/focus fallbacks no longer run for a
+dismissed-dialog refusal, which would have handed back the very name the
+memory refused -- reachable on GNOME Shell, where `element_at(pid=)` lets the
+memory engage on native Wayland). Both regression tests fail with the
+respective guard removed; the Wayland one is worth a live pass on a GNOME
+Wayland session when one is next up.
+
 ### FreeBSD 15.1
 
 The new nightly CI job's own steps, run on a real box rather than trusted:
