@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.27"
+PROFILE = "pyguitest-0.28"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.27.0"
+FLOOR = "0.28.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -241,7 +241,10 @@ asked for "0.26" would therefore have passed its own floor on a Mac and
 raised on the first page key. So the floor carries the patch, and it moves
 only when a patch release fixes what an emitted call *gets wrong*; a patch
 that fixes nothing a script replays leaves it where it is. It always lies on
-PROFILE's line, which the test suite also holds.
+PROFILE's line, which the test suite also holds -- so when that line
+advances with a pyguitest minor, the floor follows to its `.0` as a pairing
+step (0.28.0 is one: nothing emitted is new API over there), because a
+header must not claim a profile its own floor predates.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached

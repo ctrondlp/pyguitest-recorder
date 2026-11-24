@@ -8,7 +8,9 @@ was released.
 A patch, from a cross-platform review of both repositories. Nothing about
 what a generated script *does*: two recordings that were honest about a
 limitation in the file and silent about it where somebody could still act on
-it. The pyguitest floor is unchanged at 0.27.0.
+it. The profile and floor follow pyguitest 0.28.0 as a pairing step -- the
+header names the line the output is checked against, and the floor must lie
+on it; nothing emitted here is new API over there.
 
 ### Fixed
 
