@@ -575,7 +575,9 @@ def describe_environment(
     if environment.xwayland:
         environment.notes.append(
             "recorded through XWayland: native Wayland clients are invisible "
-            "to XRecord and nothing they received appears in this recording"
+            "to XRecord and nothing they received appears in this recording "
+            "-- record with `--backend wayland` to capture every client from "
+            "evdev below the compositor instead"
         )
     if wayland_native:
         # What capture could do and replay cannot. Said in the session file as

@@ -1358,6 +1358,21 @@ class TestGeneratedScriptPermissions:
             session.stat().st_mode
         )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_a_session_file_is_owner_only_on_its_own(self, tmp_path, recording):
+        """Pinned directly, not only against the script's mode.
+
+        `Recording.save` gets 0600 from `mkstemp`, which the test above
+        reaches only transitively -- both files widening together would still
+        agree. A session file is the credential-bearing one of the pair (raw
+        keystrokes, unredacted), so the mode is load-bearing rather than
+        incidental, and the obvious simplification to `write_text` would
+        quietly hand it the 0644 umask default.
+        """
+        session = tmp_path / "session.json"
+        recording.save(session)
+        assert stat.S_IMODE(session.stat().st_mode) == 0o600
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
     def test_a_symlinked_output_is_written_through_not_replaced(
         self, tmp_path, recording

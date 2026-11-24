@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.27"
+PROFILE = "pyguitest-0.28"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.27.0"
+FLOOR = "0.28.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -241,7 +241,10 @@ asked for "0.26" would therefore have passed its own floor on a Mac and
 raised on the first page key. So the floor carries the patch, and it moves
 only when a patch release fixes what an emitted call *gets wrong*; a patch
 that fixes nothing a script replays leaves it where it is. It always lies on
-PROFILE's line, which the test suite also holds.
+PROFILE's line, which the test suite also holds -- so when that line
+advances with a pyguitest minor, the floor follows to its `.0` as a pairing
+step (0.28.0 is one: nothing emitted is new API over there), because a
+header must not claim a profile its own floor predates.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -589,6 +592,17 @@ at all; and a named element's `click()`, `focus()`, `select()` or an `expect_*`
 charge nothing, because no input event is synthesised. `_connect` therefore
 emits it only for a script that actually drives one of those paths, which is
 also why a fully semantic script's `connect()` is unchanged.
+"""
+
+_DROPPED = "dropped"
+"""`_emit_named_click`'s third answer: handled, and nothing replays.
+
+Truthy on purpose -- the caller's `if` must still keep the coordinate
+fallback from running -- but distinguishable from True, because the
+targeting summary counts what is *in* the file and a click that rendered
+only a comment is not in it. Two paths answer this: a double-click on a
+disclosure triangle, whose pair cancels out, and the action route refusing
+a click whose element offers it no action.
 """
 
 _NO_CHECKS = (
@@ -1009,6 +1023,25 @@ class _State:
     warns on its own, and each leaves the script verifying nothing, so it is
     the call count and not the event count that answers "does this script
     check anything" -- see `_no_checks_warning`.
+    """
+
+    aimed_semantic: int = 0
+    aimed_relative: int = 0
+    aimed_absolute: int = 0
+    """How the pointer actions that *act* on something were aimed.
+
+    One count per rendered action rather than per coordinate pair: a drag
+    renders two points and a route of several more, and counting those would
+    report a file as mostly-coordinates on the strength of one gesture. Only
+    clicks, drags and scrolls are tallied -- a motion run is travel between
+    the actions rather than an action, and `_move`'s own positioning calls
+    belong to the click or scroll that asked for them, which is already
+    counted.
+
+    Kept because the proportion is a fact about the finished file that none of
+    the per-event comments carry: each of those says why *one* click fell to a
+    coordinate, while what decides whether this script survives a layout
+    change is how much of it is named at all. See `_targeting_summary`.
     """
 
     waited_scopes: set[tuple[str, str]] = field(default_factory=set)
@@ -1874,8 +1907,17 @@ class PythonGenerator:
         harder to read than it is, and the ladder's own rungs are listed in
         `_emit_named_click` in the order they are tried.
         """
-        if self._emit_named_click(event, state):
+        handled = self._emit_named_click(event, state)
+        if handled:
+            # `_DROPPED` is handled too -- the coordinate fallback must not
+            # run for it -- but it is not *aimed*: nothing of that click is
+            # in the file, so the targeting summary must not count it as a
+            # named action (it counted a refused action-route click and a
+            # cancelled disclosure pair as "named" before this).
+            if handled is True:
+                self._tally_aim(event.target, state, semantic=True)
             return
+        self._tally_aim(event.target, state)
         if state.bare_click_pending:
             state.capabilities.add("TIMING")
             self._comment(
@@ -1900,8 +1942,15 @@ class PythonGenerator:
             self._note_repeat(event, state)
         state.bare_click_pending = True
 
-    def _emit_named_click(self, event: Click, state: _State) -> bool:
+    def _emit_named_click(self, event: Click, state: _State) -> bool | str:
         """Try each named rendering in turn; True once one has been emitted.
+
+        `_DROPPED` -- truthy, so the coordinate fallback still stands down --
+        is the answer for a click that was *consumed* without anything
+        reaching the file: a cancelled disclosure pair, or the action route
+        refusing a click its element gives it no action for. The caller
+        counts a True toward the targeting summary and a `_DROPPED` toward
+        nothing, since the summary describes the calls the file holds.
 
         The ladder, in order: a disclosure gutter, an expand/collapse, a
         double click, a selection, a plain `click()`, a selection again for a
@@ -1954,13 +2003,14 @@ class PythonGenerator:
             id(event) in state.opening_clicks
             and self._effective_click_via(state, event) == "pointer"
         )
-        if (
+        disclosed = (
             not opening
             and event.count in (1, 2)
             and self._disclosure_click(event, state)
-        ):
+        )
+        if disclosed:
             state.bare_click_pending = False
-            return True
+            return disclosed
         if not opening and event.count == 2 and self._expand_click(event, state):
             state.bare_click_pending = False
             return True
@@ -1990,7 +2040,7 @@ class PythonGenerator:
         if self._effective_click_via(state, event) == "action":
             self._note_action_unavailable(event, state)
             state.bare_click_pending = False
-            return True
+            return _DROPPED
         return False
 
     def _effective_click_via(self, state: _State, event: Click | None = None) -> str:
@@ -2208,7 +2258,7 @@ class PythonGenerator:
             return False
         return self._render_toggle(element, state)
 
-    def _disclosure_click(self, event: Click, state: _State) -> bool:
+    def _disclosure_click(self, event: Click, state: _State) -> bool | str:
         """Render a click on a disclosure gutter as the gesture it was.
 
         The mouse path onto the same control `_expand_click` handles, and the
@@ -2261,7 +2311,7 @@ class PythonGenerator:
                 " it was, so the pair cancels out and nothing is replayed",
                 state,
             )
-            return True
+            return _DROPPED
         return self._render_toggle(element, state)
 
     def _render_toggle(self, element: ElementRef, state: _State) -> bool:
@@ -2608,6 +2658,7 @@ class PythonGenerator:
         state.capabilities.update({"POINTER_MOVE", "POINTER_BUTTON", "TIMING"})
         button = "" if event.button == 1 else f", button={event.button}"
         if _dragged_its_own_window(event):
+            self._tally_aim(None, state)
             self._comment(
                 "this drag moved the window it began in, so its endpoints are "
                 "screen coordinates rather than offsets into a window that "
@@ -2617,19 +2668,38 @@ class PythonGenerator:
             start = f"{event.start.x}, {event.start.y}"
             end = f"{event.end.x}, {event.end.y}"
             state.pointer = None
-            route = self._drag_route(event, state, screen_coordinates=True)
+            route, _ = self._drag_route(event, state, screen_coordinates=True)
             state.lines.append(f"gui.drag(({start}), ({end}){button}{route})")
             return
         start = self._point(event.start, state)
         end = self._point(event.end, state)
-        route = self._drag_route(event, state, screen_coordinates=False)
+        route, route_screen = self._drag_route(event, state, screen_coordinates=False)
+        # One gesture, classified by its weakest point: a drag whose start
+        # survives the window moving still breaks if its end landed on the
+        # desktop or its route crossed a frame and got pinned to the screen
+        # -- counting it by where it began reported a file as free of screen
+        # coordinates while `gui.drag(...)` right here carried them.
+        relative = (
+            self._renders_window_relative(event.start)
+            and self._renders_window_relative(event.end)
+            and not route_screen
+        )
+        self._tally_aim(event.start if relative else None, state)
         state.lines.append(f"gui.drag(({start}), ({end}){button}{route})")
         state.pointer = end
 
     def _drag_route(
         self, event: Drag, state: _State, *, screen_coordinates: bool
-    ) -> str:
-        """The `via=` argument for a drag's recorded route, or nothing.
+    ) -> tuple[str, bool]:
+        """The `via=` argument for a drag's recorded route, and how it aims.
+
+        The second half of the answer is whether the rendered points are raw
+        screen pairs, because the drag's own classification in the targeting
+        summary has to count the whole gesture: endpoints that survive a
+        window move mean nothing if the route between them is pinned to the
+        screen. Returned from here rather than re-derived by the caller, so
+        the tally and the rendering cannot disagree -- the same reasoning as
+        `_renders_window_relative`.
 
         The route *is* the gesture, and pyguitest's `drag` glides between one
         end and the other: without this a recorded curve replays as a straight
@@ -2650,7 +2720,7 @@ class PythonGenerator:
         one_frame = all(_same_frame(point, event.end) for point in event.route)
         points = list(event.route)
         if not points or _straight([*points, event.end]):
-            return ""
+            return "", False
         kept = _thin(points, self.options.max_waypoints)
         rendered = []
         for point in kept:
@@ -2658,7 +2728,7 @@ class PythonGenerator:
                 rendered.append(f"({point.x}, {point.y})")
             else:
                 rendered.append(f"({self._point(point, state)})")
-        return f", via=[{', '.join(rendered)}]"
+        return f", via=[{', '.join(rendered)}]", screen_coordinates or not one_frame
 
     def _emit_scroll(self, event: Scroll, state: _State) -> None:
         """Render wheel movement in detents, at the point it was recorded at.
@@ -2670,6 +2740,7 @@ class PythonGenerator:
         if not event.dx and not event.dy:
             return
         state.capabilities.update({"POINTER_MOVE", "POINTER_SCROLL"})
+        self._tally_aim(event.target, state)
         self._move(event.target, state)
         parts = []
         if event.dx:
@@ -3302,12 +3373,46 @@ class PythonGenerator:
         state.roles.add(constant)
         return f"role=Role.{constant}"
 
+    def _renders_window_relative(self, target: Target) -> bool:
+        """Whether `_point` can offset this target against its own window.
+
+        The condition `_point` applies, asked separately so the tally and the
+        rendering cannot disagree about what a point came out as -- a summary
+        that counted these itself would be a second copy of this rule, and the
+        copy is what goes stale.
+        """
+        if self.options.locators == "absolute":
+            return False
+        return (
+            target.relative is not None
+            and target.window is not None
+            and target.window.addressable
+        )
+
+    def _tally_aim(
+        self, target: Target | None, state: _State, *, semantic: bool = False
+    ) -> None:
+        """Record how one pointer action was aimed. See `_State.aimed_semantic`.
+
+        `semantic` is the caller's own answer -- only it knows whether the
+        named ladder rendered -- and `screen_coordinates` is implied by
+        `_renders_window_relative` for everything else, including the drag
+        that moved its own window (no window left to offset against, so it
+        renders in screen coordinates and counts as one).
+        """
+        if semantic:
+            state.aimed_semantic += 1
+        elif target is not None and self._renders_window_relative(target):
+            state.aimed_relative += 1
+        else:
+            state.aimed_absolute += 1
+
     def _point(self, target: Target, state: _State) -> str:
         """Render a coordinate pair, window-relative where that is possible."""
-        if self.options.locators == "absolute":
+        if not self._renders_window_relative(target):
             return f"{target.x}, {target.y}"
         relative = target.relative
-        if relative is None or target.window is None or not target.window.addressable:
+        if relative is None or target.window is None:  # pragma: no cover - narrowing
             return f"{target.x}, {target.y}"
         name = self._window_var(target.window, state)
         geometry = target.window.geometry
@@ -3894,9 +3999,108 @@ def _docstring_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _screen_geometry(recording: Recording) -> str:
+    """The recorded screen geometry, for a note about screen coordinates.
+
+    Rendered from what the session reported rather than from the events, and
+    omitted entirely where it reported nothing -- a recording made before
+    `screens` existed, or on a backend that could not ask. Scale is named
+    only when it is not 1, because that is the case a replay machine can
+    differ on without anybody thinking to check.
+    """
+    screens = recording.environment.screens
+    if not screens:
+        return ""
+    parts = []
+    for _index, width, height, scale in screens:
+        size = f"{width}x{height}"
+        parts.append(f"{size}@{scale:g}x" if scale != 1 else size)
+    return ", ".join(parts)
+
+
+def _targeting_summary(recording: Recording, state: _State) -> str:
+    """How much of this script aims at elements rather than at points.
+
+    The fact none of the per-event comments carry. Each of those explains why
+    *one* click fell back to a coordinate; this is the proportion over the
+    finished file, which is what decides whether the script survives the
+    application being laid out differently -- a named element is found
+    wherever it moved to, a window-relative point survives the window moving
+    and nothing else, and a screen coordinate survives neither.
+
+    Empty for a script with no pointer action in it at all (a recording of
+    typing and checks), which has no proportion to report.
+    """
+    semantic = state.aimed_semantic
+    relative = state.aimed_relative
+    absolute = state.aimed_absolute
+    total = semantic + relative + absolute
+    if not total:
+        return ""
+
+    def _share(count: int) -> str:
+        return f"{count} ({round(100 * count / total)}%)"
+
+    # Past tense throughout, and the later clauses elide the verb: "1 named"
+    # and "2 named" both read, where a present-tense "name" has to agree with
+    # a count nobody knows in advance. The denominator carries its own
+    # definition in a parenthetical rather than in its noun, which is what
+    # kept "of 1 click, drag and scroll" from happening -- and a motion run is
+    # deliberately not in it.
+    summary = (
+        f"targeting: of {total} pointer action{'s' if total != 1 else ''} "
+        f"(clicks, drags and scrolls), {_share(semantic)} named an element, "
+        f"{_share(relative)} a window-relative point and {_share(absolute)} a "
+        f"screen coordinate"
+    )
+    # Only the kinds actually present are explained. A file with no screen
+    # coordinate in it does not need to be told what one would not survive,
+    # and a reader who has to sort the relevant half out of the irrelevant
+    # one stops reading these.
+    costs = []
+    if relative:
+        costs.append(
+            "a window-relative point survives the window moving but not a "
+            "relayout, a resize, a different scale or a control that moved "
+            "within its window"
+        )
+    if absolute:
+        geometry = _screen_geometry(recording)
+        measured = f" (recorded at {geometry})" if geometry else ""
+        # "none of those" needs the clause above to point at. Standing alone
+        # it pointed at nothing, so the list is spelled out in that case --
+        # with a colon rather than a dash, which the sentence already spends
+        # on the clause separator.
+        survives = (
+            "none of those and not a different display geometry either"
+            if relative
+            else (
+                "none of that: not the window moving, a relayout, a resize, "
+                "a different scale, nor a different display geometry"
+            )
+        )
+        costs.append(f"a screen coordinate survives {survives}{measured}")
+    if not costs:
+        return f"{summary} -- every one of them survives the window moving"
+    return f"{summary} -- {'; '.join(costs)}"
+
+
 def _notes(recording: Recording, state: _State) -> list[str]:
-    """Everything the recording has to say about how it went."""
-    return [*recording.environment.notes, *_warnings_only(state)]
+    """Everything the recording has to say about how it went.
+
+    The targeting summary goes last on purpose. It is the one line here that
+    is about the file as a whole rather than about a moment in the recording,
+    which reads as a conclusion -- and `_NO_CHECKS` says a reader should meet
+    "this script verifies nothing" *before* commentary about which locator
+    things fell back to, which putting the summary ahead of the warnings
+    would have reversed.
+    """
+    summary = _targeting_summary(recording, state)
+    return [
+        *recording.environment.notes,
+        *_warnings_only(state),
+        *([summary] if summary else []),
+    ]
 
 
 def _warnings_only(state: _State) -> list[str]:

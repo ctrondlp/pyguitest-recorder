@@ -1051,7 +1051,10 @@ class TestWindowsEnvironmentSnapshot:
         )
         assert env.xwayland is True
         assert env.session_type == "xwayland"
-        assert any("XWayland" in note for note in env.notes)
+        (note,) = [n for n in env.notes if "XWayland" in n]
+        # Naming the gap without naming the way out leaves the reader to
+        # search for it: the note carries the override verbatim.
+        assert "--backend wayland" in note
 
     def test_a_stray_display_is_not_recorded_on_windows(self):
         env = self._describe("win32", {"DISPLAY": ":0"})

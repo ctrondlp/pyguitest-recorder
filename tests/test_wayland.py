@@ -20,6 +20,7 @@ import selectors
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 
 import pytest
@@ -529,6 +530,9 @@ class _FakeDevice:
     def fileno(self):
         return self._fd
 
+    def close(self):
+        pass
+
 
 class TestTouchpadAbs:
     def _pad_caps(self):
@@ -594,6 +598,184 @@ class TestTouchpadAbs:
         b._decode(e, _FakeEvent(e.EV_ABS, e.ABS_Y, 12000), 9)
         b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
         assert _drain(b) == []
+
+
+class TestPointerConfidenceNote:
+    """`_has_untracked_relative_pointer`: when `start()` warns about tracking.
+
+    No absolute device and no `screencast_cursor` opt-in means every click's
+    position is a delta-tracked seed whose offset from the real cursor never
+    self-corrects -- the module docstring's own account of the gap. The
+    classifier is what `start()` asks before deciding whether to say so.
+    """
+
+    def _mouse_caps(self):
+        return {e.EV_KEY: [e.BTN_LEFT], e.EV_REL: [e.REL_X, e.REL_Y]}
+
+    def _tablet_caps(self):
+        return {
+            e.EV_KEY: [e.BTN_LEFT],
+            e.EV_ABS: [
+                (e.ABS_X, _FakeAbsInfo(500, 0, 32767)),
+                (e.ABS_Y, _FakeAbsInfo(300, 0, 32767)),
+            ],
+        }
+
+    def test_a_bare_relative_mouse_is_untracked(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice(self._mouse_caps(), fd=9)]
+        assert b._has_untracked_relative_pointer(e)
+
+    def test_a_true_absolute_device_needs_no_warning(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        dev = _FakeDevice(self._tablet_caps(), fd=9)
+        b._learn_abs_range(e, dev)
+        b._devices = [dev]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_keyboard_with_no_pointer_at_all_needs_no_warning(self):
+        # Nothing a tracked seed could mis-stamp: no pointer device was
+        # opened, so there is no click for the warning to be about.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice({e.EV_KEY: [e.KEY_A, e.KEY_B]}, fd=9)]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_touchpad_counts_as_an_untracked_pointer(self):
+        # Pad-local ABS axes never enter `_abs_ranges` (see `TestTouchpadAbs`),
+        # and the touchpad is tracked exactly like a relative mouse.
+        caps = {
+            e.EV_KEY: [e.BTN_LEFT, e.BTN_TOUCH, e.BTN_TOOL_FINGER],
+            e.EV_ABS: [
+                (e.ABS_X, _FakeAbsInfo(500, 0, 1215)),
+                (e.ABS_Y, _FakeAbsInfo(300, 0, 680)),
+            ],
+        }
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        dev = _FakeDevice(caps, fd=9)
+        b._learn_abs_range(e, dev)
+        b._devices = [dev]
+        assert b._has_untracked_relative_pointer(e)
+
+    def test_a_device_that_vanished_is_not_counted_either_way(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice(OSError(19, "No such device"), fd=9)]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_relative_mouse_beside_an_absolute_device_is_silent(self):
+        """The false positive a live run caught, on two boxes.
+
+        Every VM in the test fleet presents a relative PS/2 mouse *beside*
+        its absolute integration tablet, and the first cut asked the question
+        per device -- "any pointer with no range of its own" -- so the note
+        went onto recordings whose coordinates came from the tablet and were
+        exact. One shared `_pos` serves every device, so one absolute device
+        in the set is enough to re-stamp it from a reported value.
+        """
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        mouse = _FakeDevice(self._mouse_caps(), fd=9)
+        tablet = _FakeDevice(self._tablet_caps(), fd=10)
+        b._learn_abs_range(e, mouse)  # contributes no range
+        b._learn_abs_range(e, tablet)  # registers fd 10
+        b._devices = [mouse, tablet]
+        assert b._abs_ranges, "the tablet should have registered a range"
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_start_wires_the_classifier_into_a_note(self, monkeypatch):
+        """`start()` asks the classifier and only the classifier decides.
+
+        Stubs `_open`, the thread spawn and the clock/xkb setup that `start()`
+        also does, so this is a test of the wiring -- one `if` -- and not a
+        second exercise of `_has_untracked_relative_pointer`, which the tests
+        above already cover without any device-I/O risk.
+        """
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: True)
+        b.start()
+        (note,) = [n for n in b.notes if "tracked from a screen-centre" in n]
+        assert "screencast_cursor" in note
+
+    def test_start_is_silent_when_the_classifier_says_no(self, monkeypatch):
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: False)
+        b.start()
+        assert not any("tracked from a screen-centre" in n for n in b.notes)
+
+    def _started(self, monkeypatch, cursor, classifier):
+        """Run start() with every device-touching step stubbed."""
+        b = WaylandCaptureBackend(["/dev/input/event0"], cursor_source=cursor)
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: classifier)
+        b.start()
+        # The reader Thread was created but `Thread.start` is stubbed, so it
+        # was never started and `stop()`'s join would reject it; the reader
+        # is not what these tests exercise.
+        b._thread = None
+        return b
+
+    def test_start_is_silent_while_a_cursor_source_is_believed(self, monkeypatch):
+        # The classifier now runs even with a cursor source -- stop() needs
+        # its answer -- but start() still raises no note while the source is
+        # believed: a spawned source may yet deliver, and only stop() knows.
+        b = self._started(monkeypatch, _FakeCursor(pos=(10, 10)), classifier=True)
+        assert not any("tracked from a screen-centre" in n for n in b.notes)
+
+    def test_a_cursor_source_that_cannot_spawn_warns_at_start(self, monkeypatch):
+        # start() catches the one failure it can see -- a helper that will not
+        # even spawn (CursorSource.start() returns False) -- when there is no
+        # absolute device to stand in.
+        b = self._started(monkeypatch, _UnspawnableCursor(), classifier=True)
+        assert any("could not be spawned" in n for n in b.notes)
+
+    def test_a_spawn_failure_with_an_absolute_device_stays_silent(self, monkeypatch):
+        # classifier=False means an absolute device is present, so even a
+        # dead cursor helper leaves the position corrected.
+        b = self._started(monkeypatch, _UnspawnableCursor(), classifier=False)
+        assert not any("could not be spawned" in n for n in b.notes)
+
+    def test_a_cursor_source_that_never_delivers_warns_at_stop(self, monkeypatch):
+        # Spawned fine, so start() is silent; but no position ever arrived,
+        # so every stamp fell back to the track -- stop() raises the note.
+        b = self._started(monkeypatch, _FakeCursor(pos=None), classifier=True)
+        assert not any("screen-centre" in n for n in b.notes)  # silent at start
+        b.stop()
+        assert any("no cursor position" in n for n in b.notes)
+
+    def test_a_cursor_source_that_delivered_then_died_stays_silent(self, monkeypatch):
+        # It stamped a real position at least once, so the early track was
+        # corrected; a later clear does not retroactively doom the recording.
+        cursor = _FakeCursor(pos=(10, 10))
+        b = self._started(monkeypatch, cursor, classifier=True)
+        b._stamp()  # takes the cursor's position -> _cursor_stamped
+        cursor._pos = None  # stream dies
+        b._stamp()  # falls back to the track
+        b.stop()
+        assert not any("no cursor position" in n for n in b.notes)
+
+    def test_no_cursor_and_no_absolute_device_still_warns_at_start(self, monkeypatch):
+        # The original path is unchanged: no source, untracked pointer -> the
+        # start-time note, and stop() must not double it.
+        b = self._started(monkeypatch, None, classifier=True)
+        assert any("no absolute pointer device" in n for n in b.notes)
+        before = len(b.notes)
+        b.stop()
+        assert len(b.notes) == before
 
 
 class TestDeviceEligibility:
@@ -1136,6 +1318,14 @@ class _FakeCursor:
 
     def position(self):
         return self._pos
+
+
+class _UnspawnableCursor(_FakeCursor):
+    """A cursor source whose helper process will not even spawn."""
+
+    def start(self):
+        self.started = True
+        return False
 
 
 class TestCursorSourceStamping:
