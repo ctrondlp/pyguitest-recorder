@@ -35,6 +35,75 @@ claiming everything works.
 | Keyboard attribution on native Wayland (`resolve_keyboard`) | run live on KWin and GNOME Shell 51 -- 122/122 keystrokes named the application, replay exit 0; see below |
 | win32 hook health (a hook Windows removed silently) | run live on Windows 11 -- a real hook removed by hand, reported 2.7s later; see below |
 
+## The pointer-confidence note, and the false positive it started as (2026-11-24)
+
+The note `start` writes when nothing can correct a delta-tracked pointer
+position. Measured on Debian 13 (GNOME/Wayland) and Pop!_OS (COSMIC), both of
+which present **both** kinds of pointer -- an `ImExPS/2 Generic Explorer
+Mouse` (relative) *beside* a `VirtualBox USB Tablet` and a `VirtualBox mouse
+integration` (both absolute, screen-mapped). That combination is what made the
+live run worth doing.
+
+Three device sets per box, each the live form of a case the unit tests cover
+with fakes:
+
+| device set | position source | note |
+|---|---|---|
+| the auto-picked set (holds the tablet) | read from the absolute device | silent |
+| keyboard + the PS/2 mouse, named explicitly | delta-tracked from a screen-centre seed | fires |
+| the keyboard alone | no pointer opened | silent |
+
+**The first cut got the first row wrong on both boxes.** It asked the question
+per device -- "any pointer with no range of its own" -- and the relative mouse
+in the auto-picked set answered yes, so the note went onto recordings whose
+coordinates came from the tablet and were exact. One shared `_pos` serves every
+device and an absolute device re-stamps it from its own reported value, so the
+gate now matches the sentence it emits ("no absolute pointer device"): a
+pointer has to have been opened, and `_abs_ranges` has to be empty. A warning
+that appears on every recording a machine makes is worse than no warning.
+3/3 on both boxes after the fix, and `tests/test_wayland.py`'s
+`test_a_relative_mouse_beside_an_absolute_device_is_silent` holds the row that
+failed.
+
+The residual is recorded in `_has_untracked_relative_pointer` rather than
+papered over: a desktop with both a relative mouse and a drawing tablet stays
+silent, and if only the mouse is used `_pos` drifts with nothing touching the
+tablet to correct it. Answering that truthfully needs the recording to have
+happened, and this note exists to be read before one.
+
+## The targeting summary, measured where it should disagree (2026-11-24)
+
+The summary is generation-time arithmetic and cannot be wrong in an
+OS-dependent way, so what was worth measuring is whether its numbers carry
+information. Run against the real resolver and the real accessibility tree on
+three desktops, aiming at a GTK fixture's own controls:
+
+| desktop | named an element | window-relative | screen coordinate |
+|---|---|---|---|
+| GhostBSD 15.1, X11 | 9 of 9 | 0 | 0 |
+| Debian 13, GNOME/Wayland | 0 of 12 | 0 | 12 |
+| Pop!_OS, COSMIC (native Wayland) | 0 of 12 | 0 | 12 |
+
+So it does distinguish them, and starkly. **What the two Wayland rows measure
+is worth stating exactly, because it is not only "Wayland cannot name a
+button".** On both, the session's window list came back *empty* while AT-SPI
+saw the frame perfectly well (`('frame', 'Live Probe')`), and with no window
+list to place a window-relative rectangle against, pyguitest refuses
+`ELEMENT_GEOMETRY` outright -- its refusal names that exact cascade. A control's
+own centre is therefore unaskable there, so those rows aimed at a grid over the
+area the fixture was placed in instead. The reading is honest about what a
+recording on such a session would get, but the cause is as much a missing
+compositor window driver (the GNOME Shell window-control extension inactive on
+the Debian box; COSMIC's driver reporting nothing) as it is Wayland's element
+naming -- a pre-existing gap this summary reports rather than one it found.
+
+The X11 row is the one that exercises the summary's good case end to end: every
+one of the nine controls resolved to a named element, and the line reads "every
+one of them survives the window moving". The all-screen-coordinate rows
+exercise the self-contained wording ("survives none of that: not the window
+moving, ...") that stands in for the dangling "none of those" when no
+window-relative point is in the file.
+
 ## The modal dialog, fixed and measured both ways (2026-11-21)
 
 **The gap this file has carried since 2026-09-23 is closed.** The section

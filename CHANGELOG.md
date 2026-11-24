@@ -3,6 +3,71 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.21.1] — 2026-11-24
+
+A patch, from a cross-platform review of both repositories. Nothing about
+what a generated script *does*: two recordings that were honest about a
+limitation in the file and silent about it where somebody could still act on
+it. The pyguitest floor is unchanged at 0.27.0.
+
+### Fixed
+
+- **A recording whose pointer position is a guess says so, while it is being
+  made.** The evdev backend reads exact coordinates from an absolute device (a
+  tablet, a VM's integration pointer) and the true cursor from the
+  `screencast_cursor` opt-in, but a bare relative mouse has only deltas: its
+  position is tracked from a screen-centre seed whose offset from the real
+  cursor never self-corrects, so a click can be attributed to the wrong window
+  entirely. The module docstring and `docs/getting-started.md` have always said
+  so; the recording itself did not, and that is the one place it can be read
+  by somebody who still has the option of plugging in a tablet or granting the
+  cursor stream. `start` now notes it once, the moment it commits to the
+  tracked seed with neither corrective available, and the CLI prints it before
+  "Recording." like every other opening note. A touchpad counts as tracked
+  (its ABS axes are pad-local, so it is stamped like a relative mouse); a
+  keyboard-only device list does not, having no click for a seed to mis-stamp;
+  and a relative mouse sitting *beside* an absolute device does not either,
+  because one shared position serves every device and the absolute one
+  re-stamps it from a reported value. That last row is the one a live run on
+  Debian and Pop!_OS corrected: both present a PS/2 mouse next to a VirtualBox
+  tablet, the first cut asked the question per device, and the note went onto
+  recordings whose coordinates were exact. A warning that appears on every
+  recording a machine makes is worse than no warning.
+- **The XWayland note names the way out of XWayland.** `auto` prefers XRecord
+  wherever an X server answers, which on a Wayland desktop with XWayland means
+  the narrower capture path -- and the recording already warned that native
+  Wayland clients are invisible to it. It did not say what to do instead, so
+  the note now carries `--backend wayland` verbatim rather than leaving a
+  reader to find it.
+- The session file's owner-only mode is pinned by a test of its own. It came
+  from `mkstemp` and was covered only against the generated script's mode, so
+  both widening together would still have agreed -- and this is the
+  credential-bearing half of the pair, holding the unredacted raw stream.
+
+### Added
+
+- **A generated script says how much of itself aims at elements.** The notes
+  now carry one line -- of so many clicks, drags and scrolls, how many named
+  an element, how many carry a window-relative point and how many a screen
+  coordinate -- with what each kind does not survive, and the recorded screen
+  geometry where any of them is a screen coordinate. Every one of those
+  fallbacks already explained *itself*, inline, at the call it affected; what
+  no comment carried was the proportion, which is the thing that decides
+  whether the file survives the application being laid out differently, and
+  it was available only to somebody willing to count the calls by hand.
+  Counted once per action rather than once per coordinate: a drag renders two
+  endpoints and a route of several more, and counting those would report a
+  file as mostly-coordinates on the strength of one gesture -- and the one
+  count is classified by the gesture's weakest point, because an end that
+  landed on the desktop or a route that crossed a frame pins the drag to the
+  screen whatever its start survives. Travel is not in it either -- a motion
+  run is how the pointer got somewhere, not something it did -- and neither
+  is a click that was consumed without anything reaching the file (the
+  action route refusing an element that offers no action, a disclosure pair
+  that cancels out): the summary describes the calls the file holds. A note
+  and not a warning, so `--no-header` drops it with the rest of the notes; a
+  script with no pointer action in it gets no line at all.
+
 ## [0.21.0] — 2026-11-21
 
 A minor, for `event_delay`: new command-line and configuration surface, plus

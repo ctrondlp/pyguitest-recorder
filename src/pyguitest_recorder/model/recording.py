@@ -378,6 +378,13 @@ class Recording:
         removed directory, or a plain path typed wrong -- is a `ValueError`
         naming it, the documented failure mode for everything else about a
         session file, rather than `mkstemp`'s raw `FileNotFoundError`.
+
+        The 0600 `mkstemp` opens with is kept deliberately, not incidentally:
+        this file holds the unredacted raw stream, so it is the
+        credential-bearing half of the pair `cli._write_script` restricts by
+        hand. Writing the payload any other way -- `target.write_text`, most
+        obviously -- would hand it the 0644 umask default instead, which is
+        what `test_a_session_file_is_owner_only_on_its_own` exists to catch.
         """
         target = Path(path)
         with contextlib.suppress(OSError, RuntimeError):

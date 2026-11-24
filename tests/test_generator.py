@@ -1489,6 +1489,265 @@ def test_function_name_is_used_for_both_the_definition_and_the_call():
     assert validate(source) == []
 
 
+class TestHowMuchOfTheScriptAimsAtElements:
+    """The targeting summary: the proportion, which no per-event comment carries.
+
+    Each fallback comment explains why *one* click became a coordinate. What
+    decides whether the whole script survives the application being laid out
+    differently is how much of it is named at all, and that was in the file
+    only for somebody willing to count the calls by hand.
+    """
+
+    BUTTON = ElementRef(
+        role="push button",
+        name="Save",
+        extents=(180, 80, 80, 30),
+        actions=("click",),
+        path=(("frame", "Example"),),
+    )
+
+    def _summary(self, *events, screens=((0, 1920, 1080, 1.0),), **options):
+        recording = Recording(
+            environment=Environment(screens=[tuple(s) for s in screens]),
+            events=list(events),
+        )
+        source = generate(recording, GeneratorOptions(**options))
+        lines, taking = [], False
+        for line in source.splitlines():
+            if "targeting:" in line:
+                taking = True
+            elif taking and not line.startswith("#     "):
+                break
+            if taking:
+                lines.append(line.lstrip("# ").strip())
+        return " ".join(lines)
+
+    def _named(self, window):
+        return Click(
+            timestamp=1.0,
+            target=Target(x=220, y=95, window=window, element=self.BUTTON),
+        )
+
+    def test_the_three_kinds_are_counted_and_shown_as_shares(self, window):
+        summary = self._summary(
+            self._named(window),
+            Click(timestamp=2.0, target=Target(x=300, y=300, window=window)),
+            Click(timestamp=3.0, target=Target(x=40, y=40)),
+        )
+        assert "of 3 pointer actions" in summary
+        assert "1 (33%) named an element" in summary
+        assert "1 (33%) a window-relative point" in summary
+        assert "1 (33%) a screen coordinate" in summary
+
+    def test_a_drag_counts_once_rather_than_once_per_endpoint(self, window):
+        # The whole reason the tally does not live in `_point`: a drag renders
+        # two points and a route of several more, and counting those would
+        # report a file as mostly-coordinates on the strength of one gesture.
+        summary = self._summary(
+            Drag(
+                timestamp=1.0,
+                start=Target(x=200, y=200, window=window),
+                end=Target(x=300, y=320, window=window),
+            )
+        )
+        assert "of 1 pointer action" in summary
+        assert "1 (100%) a window-relative point" in summary
+
+    def test_a_scroll_counts_once_despite_its_positioning_move(self, window):
+        # `_emit_scroll` calls `_move` to put the pointer back first; that
+        # move belongs to the scroll, not beside it.
+        summary = self._summary(
+            Scroll(timestamp=1.0, target=Target(x=300, y=300, window=window), dy=-2)
+        )
+        assert "of 1 pointer action" in summary
+
+    def test_travel_is_not_an_action(self, window):
+        # A motion run is how the pointer got there, not something it did to
+        # anything -- and counting it would swamp the proportion with travel.
+        summary = self._summary(
+            MouseMove(timestamp=1.0, target=Target(x=10, y=10, window=window)),
+            MouseMove(timestamp=1.1, target=Target(x=20, y=20, window=window)),
+            self._named(window),
+            motion="recorded",
+        )
+        assert "of 1 pointer action" in summary
+        assert "1 (100%) named an element" in summary
+
+    def test_a_fully_semantic_script_is_told_it_survives_a_move(self, window):
+        summary = self._summary(self._named(window))
+        assert "every one of them survives the window moving" in summary
+        assert "screen coordinate survives" not in summary
+
+    def test_a_script_with_no_screen_coordinate_is_not_told_what_one_costs(
+        self, window
+    ):
+        summary = self._summary(
+            Click(timestamp=1.0, target=Target(x=300, y=300, window=window))
+        )
+        assert "a window-relative point survives the window moving" in summary
+        assert "a screen coordinate survives" not in summary
+
+    def test_a_screen_coordinate_standing_alone_explains_itself(self, window):
+        # "survives none of those" needs the window-relative clause to point
+        # at; with no window-relative point in the file it pointed at nothing.
+        summary = self._summary(Click(timestamp=1.0, target=Target(x=40, y=40)))
+        assert "none of those" not in summary
+        assert "none of that: not the window moving" in summary
+
+    def test_screen_geometry_is_named_where_coordinates_are_screen_ones(self, window):
+        summary = self._summary(
+            Click(timestamp=1.0, target=Target(x=40, y=40)),
+            screens=((0, 2560, 1440, 1.5), (1, 1920, 1080, 1.0)),
+        )
+        # The scale only where it is not 1: that is the one a replay machine
+        # can differ on without anybody thinking to check.
+        assert "recorded at 2560x1440@1.5x, 1920x1080" in summary
+
+    def test_a_recording_that_reported_no_screens_names_no_geometry(self, window):
+        summary = self._summary(
+            Click(timestamp=1.0, target=Target(x=40, y=40)), screens=()
+        )
+        assert "a screen coordinate survives" in summary
+        assert "recorded at" not in summary
+
+    def test_absolute_mode_reports_every_action_as_a_screen_coordinate(self, window):
+        # The element was nameable; the mode is what made it a point, and the
+        # summary reports the file as it actually is rather than as it could
+        # have been.
+        summary = self._summary(self._named(window), locators="absolute")
+        assert "0 (0%) named an element" in summary
+        assert "1 (100%) a screen coordinate" in summary
+
+    def test_a_script_with_no_pointer_action_gets_no_summary(self):
+        assert self._summary(KeyStroke(timestamp=1.0, key="Return")) == ""
+
+    def test_a_click_the_action_route_dropped_is_not_a_named_action(self, window):
+        """A refused click is not in the file, so it is not in the count.
+
+        Under `click_via = "action"` an element with no click action is
+        dropped with a comment -- and it was tallied as "named an element",
+        so a script whose every click was refused summarised as 100% named.
+        A dropped click aims at nothing; only the rendered coordinate click
+        should count here.
+        """
+        # actions=() is "asked, and offers none" -- None would be the old
+        # optimism and renders a named click anyway. The companion is a
+        # scroll because the action route drops *every* unrendered click
+        # (its contract is no pointer injection at all), so only a
+        # non-click action can anchor the count.
+        unactionable = ElementRef(
+            role="push button",
+            name="Save",
+            extents=(180, 80, 80, 30),
+            actions=(),
+        )
+        summary = self._summary(
+            Click(
+                timestamp=1.0,
+                target=Target(x=220, y=95, window=window, element=unactionable),
+            ),
+            Scroll(timestamp=2.0, target=Target(x=300, y=300, window=window), dy=-1),
+            click_via="action",
+        )
+        assert "of 1 pointer action " in summary
+        assert "0 (0%) named an element" in summary
+
+    def test_a_script_of_only_dropped_clicks_has_no_summary(self, window):
+        unactionable = ElementRef(
+            role="push button",
+            name="Save",
+            extents=(180, 80, 80, 30),
+            actions=(),
+        )
+        summary = self._summary(
+            Click(
+                timestamp=1.0,
+                target=Target(x=220, y=95, window=window, element=unactionable),
+            ),
+            click_via="action",
+        )
+        assert summary == ""
+
+    def test_a_cancelled_disclosure_pair_is_not_a_named_action(self, window):
+        # Two clicks on the triangle cancel out and render a comment alone;
+        # a comment is not a pointer action the file performs.
+        row = ElementRef(
+            role="table cell",
+            name="Documents",
+            extents=(83, 131, 552, 21),
+            expanded=False,
+            selectable=True,
+        )
+        summary = self._summary(
+            Click(
+                timestamp=1.0,
+                target=Target(x=63, y=141, window=window, element=row),
+                count=2,
+            ),
+            self._named(window),
+        )
+        assert "of 1 pointer action " in summary
+        assert "1 (100%) named an element" in summary
+
+    def test_a_drag_is_classified_by_its_weakest_point(self, window):
+        """One gesture, counted screen-bound if any of its points is.
+
+        A drag out of a window onto the desktop renders its end as a raw
+        screen pair; classified by where it began, the summary reported a
+        file as free of screen coordinates while the `gui.drag(...)` right
+        there carried one -- and the recorded display geometry note was
+        omitted with it.
+        """
+        summary = self._summary(
+            Drag(
+                timestamp=1.0,
+                start=Target(x=200, y=200, window=window),
+                end=Target(x=900, y=700),
+            )
+        )
+        assert "1 (100%) a screen coordinate" in summary
+        assert "recorded at 1920x1080" in summary
+
+    def test_a_route_crossing_frames_pins_the_drag_to_the_screen(self, window):
+        # Both endpoints survive a window move; the route between them does
+        # not, because a frame-crossing route is rendered as raw screen
+        # pairs -- the gesture is only as portable as its weakest point.
+        summary = self._summary(
+            Drag(
+                timestamp=1.0,
+                start=Target(x=200, y=200, window=window),
+                end=Target(x=400, y=380, window=window),
+                route=(
+                    Target(x=250, y=120),
+                    Target(x=390, y=160),
+                ),
+            )
+        )
+        assert "1 (100%) a screen coordinate" in summary
+
+    def test_it_comes_after_the_warning_that_nothing_is_checked(self, window):
+        # `_NO_CHECKS` is placed first among the warnings deliberately: a
+        # reader should meet "this script verifies nothing" before commentary
+        # about which locator things fell back to. The summary is about the
+        # whole file, so it concludes rather than leads.
+        recording = Recording(
+            environment=Environment(screens=[(0, 1920, 1080, 1.0)]),
+            events=[Click(timestamp=1.0, target=Target(x=40, y=40))],
+        )
+        source = generate(recording, GeneratorOptions())
+        assert source.index("checks nothing") < source.index("targeting:")
+
+    def test_the_summary_is_a_note_rather_than_a_warning(self, window):
+        # It is commentary about the finished file, not a thing the script
+        # could not do -- so `--no-header` drops it, as it drops the rest of
+        # the notes, while every WARNING survives.
+        source = generate(
+            Recording(events=[self._named(window)]),
+            GeneratorOptions(include_header=False),
+        )
+        assert "targeting:" not in source
+
+
 def test_header_records_the_xwayland_caveat():
     from pyguitest_recorder.model import Environment
 

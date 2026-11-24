@@ -20,6 +20,7 @@ import selectors
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 
 import pytest
@@ -594,6 +595,139 @@ class TestTouchpadAbs:
         b._decode(e, _FakeEvent(e.EV_ABS, e.ABS_Y, 12000), 9)
         b._decode(e, _FakeEvent(e.EV_SYN, e.SYN_REPORT, 0), 9)
         assert _drain(b) == []
+
+
+class TestPointerConfidenceNote:
+    """`_has_untracked_relative_pointer`: when `start()` warns about tracking.
+
+    No absolute device and no `screencast_cursor` opt-in means every click's
+    position is a delta-tracked seed whose offset from the real cursor never
+    self-corrects -- the module docstring's own account of the gap. The
+    classifier is what `start()` asks before deciding whether to say so.
+    """
+
+    def _mouse_caps(self):
+        return {e.EV_KEY: [e.BTN_LEFT], e.EV_REL: [e.REL_X, e.REL_Y]}
+
+    def _tablet_caps(self):
+        return {
+            e.EV_KEY: [e.BTN_LEFT],
+            e.EV_ABS: [
+                (e.ABS_X, _FakeAbsInfo(500, 0, 32767)),
+                (e.ABS_Y, _FakeAbsInfo(300, 0, 32767)),
+            ],
+        }
+
+    def test_a_bare_relative_mouse_is_untracked(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice(self._mouse_caps(), fd=9)]
+        assert b._has_untracked_relative_pointer(e)
+
+    def test_a_true_absolute_device_needs_no_warning(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        dev = _FakeDevice(self._tablet_caps(), fd=9)
+        b._learn_abs_range(e, dev)
+        b._devices = [dev]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_keyboard_with_no_pointer_at_all_needs_no_warning(self):
+        # Nothing a tracked seed could mis-stamp: no pointer device was
+        # opened, so there is no click for the warning to be about.
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice({e.EV_KEY: [e.KEY_A, e.KEY_B]}, fd=9)]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_touchpad_counts_as_an_untracked_pointer(self):
+        # Pad-local ABS axes never enter `_abs_ranges` (see `TestTouchpadAbs`),
+        # and the touchpad is tracked exactly like a relative mouse.
+        caps = {
+            e.EV_KEY: [e.BTN_LEFT, e.BTN_TOUCH, e.BTN_TOOL_FINGER],
+            e.EV_ABS: [
+                (e.ABS_X, _FakeAbsInfo(500, 0, 1215)),
+                (e.ABS_Y, _FakeAbsInfo(300, 0, 680)),
+            ],
+        }
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        dev = _FakeDevice(caps, fd=9)
+        b._learn_abs_range(e, dev)
+        b._devices = [dev]
+        assert b._has_untracked_relative_pointer(e)
+
+    def test_a_device_that_vanished_is_not_counted_either_way(self):
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        b._devices = [_FakeDevice(OSError(19, "No such device"), fd=9)]
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_a_relative_mouse_beside_an_absolute_device_is_silent(self):
+        """The false positive a live run caught, on two boxes.
+
+        Every VM in the test fleet presents a relative PS/2 mouse *beside*
+        its absolute integration tablet, and the first cut asked the question
+        per device -- "any pointer with no range of its own" -- so the note
+        went onto recordings whose coordinates came from the tablet and were
+        exact. One shared `_pos` serves every device, so one absolute device
+        in the set is enough to re-stamp it from a reported value.
+        """
+        b = WaylandCaptureBackend([], screen_size=(1920, 1080))
+        mouse = _FakeDevice(self._mouse_caps(), fd=9)
+        tablet = _FakeDevice(self._tablet_caps(), fd=10)
+        b._learn_abs_range(e, mouse)  # contributes no range
+        b._learn_abs_range(e, tablet)  # registers fd 10
+        b._devices = [mouse, tablet]
+        assert b._abs_ranges, "the tablet should have registered a range"
+        assert not b._has_untracked_relative_pointer(e)
+
+    def test_start_wires_the_classifier_into_a_note(self, monkeypatch):
+        """`start()` asks the classifier and only the classifier decides.
+
+        Stubs `_open`, the thread spawn and the clock/xkb setup that `start()`
+        also does, so this is a test of the wiring -- one `if` -- and not a
+        second exercise of `_has_untracked_relative_pointer`, which the tests
+        above already cover without any device-I/O risk.
+        """
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: True)
+        b.start()
+        (note,) = [n for n in b.notes if "tracked from a screen-centre" in n]
+        assert "screencast_cursor" in note
+
+    def test_start_is_silent_when_the_classifier_says_no(self, monkeypatch):
+        b = WaylandCaptureBackend(["/dev/input/event0"])
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: False)
+        b.start()
+        assert not any("tracked from a screen-centre" in n for n in b.notes)
+
+    def test_start_asks_the_classifier_not_at_all_with_a_cursor_source(
+        self, monkeypatch
+    ):
+        # A cursor source short-circuits the `elif` outright -- the classifier
+        # must not even run, since its answer would be moot.
+        b = WaylandCaptureBackend(["/dev/input/event0"], cursor_source=_FakeCursor())
+        monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
+        monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
+        monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
+        monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
+        monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
+        monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+
+        def _boom(e):
+            raise AssertionError("classifier ran despite a cursor source")
+
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", _boom)
+        b.start()
+        assert not any("tracked from a screen-centre" in n for n in b.notes)
 
 
 class TestDeviceEligibility:

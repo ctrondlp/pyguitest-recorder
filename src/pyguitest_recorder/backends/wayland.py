@@ -25,7 +25,11 @@ What it sees and does not:
   over the tracked one. Exact with an absolute device or the cursor stream;
   the bare delta track's seed is a guess whose offset from the real cursor
   never self-corrects, so on a relative-only session it can attribute a click
-  to the wrong window -- the gap `screencast_cursor` exists to close.
+  to the wrong window -- the gap `screencast_cursor` exists to close. `start`
+  says so in the recording's notes, once, the moment it commits to the
+  tracked seed with no cursor source and no absolute device to correct it
+  (`_has_untracked_relative_pointer`), rather than leaving a reader to notice
+  only as a wrongly attributed click deep in the resolver's output.
 - A spike measured on GNOME Wayland that AT-SPI emits no input events at all
   (focus/state changes only), which is why targeting is resolved separately
   and this backend is strictly the input stream.
@@ -368,8 +372,70 @@ class WaylandCaptureBackend:
             # Best-effort: a denied or absent ScreenCast cursor source leaves
             # the delta tracking in place, never fails the recording.
             self._cursor.start()
+        elif self._has_untracked_relative_pointer(e):
+            # No absolute device and no opt-in cursor stream: every click's
+            # position is the seeded delta track the module docstring
+            # describes, whose offset from the real cursor never
+            # self-corrects. Said once, at the point this recording commits
+            # to that tracking, rather than left for a reader to notice only
+            # as a wrongly attributed click deep in the resolver's output.
+            self.notes.append(
+                "no absolute pointer device and no screencast_cursor: this "
+                "recording's pointer position is tracked from a screen-centre "
+                "seed, not read from the device, and its offset from the real "
+                "cursor never self-corrects -- a click can be attributed to "
+                "the wrong window. Set `screencast_cursor = true` in the "
+                "configuration for the true position instead."
+            )
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _has_untracked_relative_pointer(self, e: Any) -> bool:
+        """Whether a pointer was opened and nothing can correct its position.
+
+        Two conditions, and the second is about the device *set* rather than
+        any one device. A pointer has to have been opened at all -- pointer
+        capability only, since `_wants_device`'s `KEY_A` clause also matches a
+        plain keyboard, and a keyboard-only list has no click for a tracked
+        seed to mis-stamp. And `_abs_ranges` has to be empty: one shared
+        `_pos` serves every device, so a single absolute device in the set
+        re-stamps it from its own reported value whenever it moves (see
+        `_learn_abs_range`, which seeds from exactly that), and the position
+        is then read rather than guessed.
+
+        Asked that way round because the first cut asked it per device -- "any
+        pointer with no range of its own" -- and that fires on every VM in the
+        test fleet, which presents a relative PS/2 mouse *beside* its absolute
+        integration tablet. Measured on Debian 13 and Pop!_OS: the auto-picked
+        set holds both, the tablet is the device the pointer actually moves
+        through, and the note went onto a recording whose coordinates were
+        exact. A warning that appears on every recording a machine makes is
+        worse than no warning, so the gate now matches the sentence it emits:
+        "no absolute pointer device".
+
+        The residual, stated rather than papered over: a desktop with both a
+        relative mouse and a drawing tablet stays silent, and if the person
+        uses only the mouse, `_pos` drifts from the seed with nothing touching
+        the tablet to correct it. Deciding that truthfully needs the recording
+        to have happened -- whether an absolute event ever arrived is not
+        knowable at `start` -- and the note exists to be read *before* a run,
+        while plugging something in or granting the cursor stream is still an
+        option. `screencast_cursor` is the answer for that desktop too.
+        """
+        has_pointer = False
+        for dev in self._devices:
+            try:
+                caps = dev.capabilities()
+            except OSError:
+                continue
+            keys = set(caps.get(e.EV_KEY, []))
+            rel = set(caps.get(e.EV_REL, []))
+            if bool({e.BTN_LEFT, e.BTN_TOUCH} & keys) or bool(
+                {e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL} & rel
+            ):
+                has_pointer = True
+                break
+        return has_pointer and not self._abs_ranges
 
     def _open(
         self, evdev: ModuleType, paths: Sequence[str]
