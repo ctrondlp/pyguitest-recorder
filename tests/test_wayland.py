@@ -530,6 +530,9 @@ class _FakeDevice:
     def fileno(self):
         return self._fd
 
+    def close(self):
+        pass
+
 
 class TestTouchpadAbs:
     def _pad_caps(self):
@@ -709,25 +712,70 @@ class TestPointerConfidenceNote:
         b.start()
         assert not any("tracked from a screen-centre" in n for n in b.notes)
 
-    def test_start_asks_the_classifier_not_at_all_with_a_cursor_source(
-        self, monkeypatch
-    ):
-        # A cursor source short-circuits the `elif` outright -- the classifier
-        # must not even run, since its answer would be moot.
-        b = WaylandCaptureBackend(["/dev/input/event0"], cursor_source=_FakeCursor())
+    def _started(self, monkeypatch, cursor, classifier):
+        """Run start() with every device-touching step stubbed."""
+        b = WaylandCaptureBackend(["/dev/input/event0"], cursor_source=cursor)
         monkeypatch.setattr(b, "_open", lambda evdev, paths: ([_FakeDevice({})], []))
         monkeypatch.setattr(b, "_use_monotonic_clock", lambda dev: None)
         monkeypatch.setattr(b, "_learn_abs_range", lambda e, dev: None)
         monkeypatch.setattr(wayland_module, "drm_screen_size", lambda: (1920, 1080))
         monkeypatch.setattr(wayland_module.XkbTranslator, "create", lambda: None)
         monkeypatch.setattr(threading.Thread, "start", lambda self: None)
-
-        def _boom(e):
-            raise AssertionError("classifier ran despite a cursor source")
-
-        monkeypatch.setattr(b, "_has_untracked_relative_pointer", _boom)
+        monkeypatch.setattr(b, "_has_untracked_relative_pointer", lambda e: classifier)
         b.start()
+        # The reader Thread was created but `Thread.start` is stubbed, so it
+        # was never started and `stop()`'s join would reject it; the reader
+        # is not what these tests exercise.
+        b._thread = None
+        return b
+
+    def test_start_is_silent_while_a_cursor_source_is_believed(self, monkeypatch):
+        # The classifier now runs even with a cursor source -- stop() needs
+        # its answer -- but start() still raises no note while the source is
+        # believed: a spawned source may yet deliver, and only stop() knows.
+        b = self._started(monkeypatch, _FakeCursor(pos=(10, 10)), classifier=True)
         assert not any("tracked from a screen-centre" in n for n in b.notes)
+
+    def test_a_cursor_source_that_cannot_spawn_warns_at_start(self, monkeypatch):
+        # start() catches the one failure it can see -- a helper that will not
+        # even spawn (CursorSource.start() returns False) -- when there is no
+        # absolute device to stand in.
+        b = self._started(monkeypatch, _UnspawnableCursor(), classifier=True)
+        assert any("could not be spawned" in n for n in b.notes)
+
+    def test_a_spawn_failure_with_an_absolute_device_stays_silent(self, monkeypatch):
+        # classifier=False means an absolute device is present, so even a
+        # dead cursor helper leaves the position corrected.
+        b = self._started(monkeypatch, _UnspawnableCursor(), classifier=False)
+        assert not any("could not be spawned" in n for n in b.notes)
+
+    def test_a_cursor_source_that_never_delivers_warns_at_stop(self, monkeypatch):
+        # Spawned fine, so start() is silent; but no position ever arrived,
+        # so every stamp fell back to the track -- stop() raises the note.
+        b = self._started(monkeypatch, _FakeCursor(pos=None), classifier=True)
+        assert not any("screen-centre" in n for n in b.notes)  # silent at start
+        b.stop()
+        assert any("no cursor position" in n for n in b.notes)
+
+    def test_a_cursor_source_that_delivered_then_died_stays_silent(self, monkeypatch):
+        # It stamped a real position at least once, so the early track was
+        # corrected; a later clear does not retroactively doom the recording.
+        cursor = _FakeCursor(pos=(10, 10))
+        b = self._started(monkeypatch, cursor, classifier=True)
+        b._stamp()  # takes the cursor's position -> _cursor_stamped
+        cursor._pos = None  # stream dies
+        b._stamp()  # falls back to the track
+        b.stop()
+        assert not any("no cursor position" in n for n in b.notes)
+
+    def test_no_cursor_and_no_absolute_device_still_warns_at_start(self, monkeypatch):
+        # The original path is unchanged: no source, untracked pointer -> the
+        # start-time note, and stop() must not double it.
+        b = self._started(monkeypatch, None, classifier=True)
+        assert any("no absolute pointer device" in n for n in b.notes)
+        before = len(b.notes)
+        b.stop()
+        assert len(b.notes) == before
 
 
 class TestDeviceEligibility:
@@ -1270,6 +1318,14 @@ class _FakeCursor:
 
     def position(self):
         return self._pos
+
+
+class _UnspawnableCursor(_FakeCursor):
+    """A cursor source whose helper process will not even spawn."""
+
+    def start(self):
+        self.started = True
+        return False
 
 
 class TestCursorSourceStamping:

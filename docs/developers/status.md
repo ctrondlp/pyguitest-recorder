@@ -69,7 +69,23 @@ The residual is recorded in `_has_untracked_relative_pointer` rather than
 papered over: a desktop with both a relative mouse and a drawing tablet stays
 silent, and if only the mouse is used `_pos` drifts with nothing touching the
 tablet to correct it. Answering that truthfully needs the recording to have
-happened, and this note exists to be read before one.
+happened, and the start-time note exists to be read before one.
+
+**The cursor source cannot be believed at `start` either, and a review round
+closed that (2026-11-24, unit-verified).** Enabling `screencast_cursor`
+suppressed the note outright, but the source can fail to spawn, be denied
+consent, or simply never deliver -- and every one of those leaves the
+position on the same tracked seed the note exists for. A spawn failure is the
+only outcome `start` can see (`CursorSource.start()` returns False); consent
+and the first position arrive after it returns, so `stop` owns the rest: a
+`_cursor_stamped` flag records whether `_stamp` ever took a real position,
+and `stop` raises the note when the source stamped none and no absolute
+device stood in. A source that delivered and then died mid-recording stays
+silent -- its early positions corrected the track. `tests/test_wayland.py`'s
+`TestPointerConfidenceNote` covers spawn-failure (and its absolute-device
+exemption), never-delivered, delivered-then-died, and the one-note-per-run
+invariant; the spawn-failure and never-delivered cases fail with the fix
+reverted.
 
 ## The targeting summary, measured where it should disagree (2026-11-24)
 

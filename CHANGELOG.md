@@ -30,11 +30,26 @@ on it; nothing emitted here is new API over there.
   keyboard-only device list does not, having no click for a seed to mis-stamp;
   and a relative mouse sitting *beside* an absolute device does not either,
   because one shared position serves every device and the absolute one
-  re-stamps it from a reported value. That last row is the one a live run on
-  Debian and Pop!_OS corrected: both present a PS/2 mouse next to a VirtualBox
-  tablet, the first cut asked the question per device, and the note went onto
-  recordings whose coordinates were exact. A warning that appears on every
-  recording a machine makes is worse than no warning.
+  re-stamps it *while it is reporting events*. That last row is the one a
+  live run on Debian and Pop!_OS corrected: both present a PS/2 mouse next to
+  a VirtualBox tablet, the first cut asked the question per device, and the
+  note went onto recordings whose coordinates were exact. A warning that
+  appears on every recording a machine makes is worse than no warning. The
+  residual is stated, not hidden: a tablet that stays idle while only the
+  mouse is used sends no corrective event, so that session stays silent and
+  its track can drift -- the note is raised at `start`, to be read while
+  plugging something in or granting the cursor stream is still an option, and
+  a present absolute device is the honest signal there.
+- **A set `screencast_cursor` that delivers no position still gets the
+  warning.** Enabling the cursor stream suppressed the pointer-confidence
+  note outright, but a helper that cannot spawn, a denied portal, or a stream
+  that never delivers all leave every position on the same screen-centre
+  track the note exists for -- and configuring the source must not be what
+  silences it. A spawn failure is caught at `start`; the rest is only known
+  once the recording is over, so `stop` raises the note when the source
+  stamped no position and no absolute device stood in for it. A stream that
+  delivered and then died mid-recording stays silent, its early positions
+  having corrected the track.
 - **The XWayland note names the way out of XWayland.** `auto` prefers XRecord
   wherever an X server answers, which on a Wayland desktop with XWayland means
   the narrower capture path -- and the recording already warned that native

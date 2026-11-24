@@ -250,6 +250,19 @@ class WaylandCaptureBackend:
         self._screen_size = screen_size
         self._screen = screen
         self._cursor = cursor_source
+        self._cursor_stamped = False
+        """Whether `_stamp` ever took a position from the cursor source.
+
+        The fact `stop` needs that `start` cannot have: a spawned helper says
+        nothing about consent, and the first position arrives -- or never
+        does -- only while the recording runs. See the confidence note in
+        `stop`."""
+        self._untracked_pointer = False
+        """`_has_untracked_relative_pointer`'s answer, kept from `start`.
+
+        Re-asking at `stop` would query devices that are already closed."""
+        self._confidence_noted = False
+        """One pointer-confidence note per recording, whichever path adds it."""
         self._queue: queue.Queue[RawEvent | None] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -368,17 +381,34 @@ class WaylandCaptureBackend:
         # Layout-aware key decoding through libxkbcommon where it is present;
         # None falls back to the fixed US table in `_decode_key`.
         self._xkb = XkbTranslator.create()
+        self._untracked_pointer = self._has_untracked_relative_pointer(e)
         if self._cursor is not None:
-            # Best-effort: a denied or absent ScreenCast cursor source leaves
-            # the delta tracking in place, never fails the recording.
-            self._cursor.start()
-        elif self._has_untracked_relative_pointer(e):
+            # Still best-effort -- a failed or denied cursor source must
+            # never fail the recording -- but no longer silently believed:
+            # a source that yields no position leaves exactly the tracked
+            # seed the note below exists for, and configuring it must not
+            # suppress the warning the failure re-earns. What can be known
+            # here is only a spawn that failed; consent and the first
+            # position arrive, or never do, while the recording runs, so
+            # `stop` owns that half of the answer via `_cursor_stamped`.
+            if not self._cursor.start() and self._untracked_pointer:
+                self._confidence_noted = True
+                self.notes.append(
+                    "screencast_cursor is set but its helper could not be "
+                    "spawned, and no absolute pointer device is present: "
+                    "this recording's pointer position is tracked from a "
+                    "screen-centre seed, not read from the device, and its "
+                    "offset from the real cursor never self-corrects -- a "
+                    "click can be attributed to the wrong window."
+                )
+        elif self._untracked_pointer:
             # No absolute device and no opt-in cursor stream: every click's
             # position is the seeded delta track the module docstring
             # describes, whose offset from the real cursor never
             # self-corrects. Said once, at the point this recording commits
             # to that tracking, rather than left for a reader to notice only
             # as a wrongly attributed click deep in the resolver's output.
+            self._confidence_noted = True
             self.notes.append(
                 "no absolute pointer device and no screencast_cursor: this "
                 "recording's pointer position is tracked from a screen-centre "
@@ -616,6 +646,32 @@ class WaylandCaptureBackend:
         if self._cursor is not None:
             with contextlib.suppress(Exception):
                 self._cursor.stop()
+        if (
+            self._cursor is not None
+            and self._untracked_pointer
+            and not self._cursor_stamped
+            and not self._confidence_noted
+        ):
+            # The half of the cursor-source answer `start` could not give: a
+            # spawned helper says nothing about consent, and whether a
+            # position ever arrived is only known once the recording is
+            # over. A source that stamped nothing left every position on the
+            # tracked seed -- the exact state the no-cursor note warns
+            # about, and configuring the source must not be what silences
+            # it. A source that delivered and then died mid-recording stays
+            # silent here (its early positions corrected the track); the
+            # binary is "ever supplied a position", not "always did".
+            # `_confidence_noted` keeps a twice-stopped backend at one note.
+            self._confidence_noted = True
+            self.notes.append(
+                "screencast_cursor is set but the ScreenCast stream supplied "
+                "no cursor position for this recording (consent not granted, "
+                "or the stream never delivered), and no absolute pointer "
+                "device is present: every pointer position fell back to the "
+                "screen-centre-seeded track, whose offset from the real "
+                "cursor never self-corrects -- a click can be attributed to "
+                "the wrong window."
+            )
         self._queue.put(None)  # unblock any events() consumer
 
     # -- reader -------------------------------------------------------------
@@ -944,6 +1000,7 @@ class WaylandCaptureBackend:
         if self._cursor is not None:
             pos = self._cursor.position()
             if pos is not None:
+                self._cursor_stamped = True
                 return pos
         return self._pos if self._pos is not None else (0, 0)
 
