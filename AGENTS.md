@@ -91,6 +91,36 @@ Fix lint/format/type issues right the first time rather than looping
 edit-check-edit-check; run the full gate once near the end of a change, not
 after every edit.
 
+## Cross-platform record and playback are the product
+
+A recording's value is a script that replays on a desktop the recording
+never saw — a session captured on X11 driving the same application on
+Wayland, Windows or a Mac. Keep both halves of that the first test of any
+capture, resolver or generator change:
+
+- **Record on every platform the same way.** The capture backends (x11,
+  wayland/evdev, win32, macos) feed one canonical event model, and the
+  resolver names whatever the platform's accessible tree reports — in
+  pyguitest's canonical vocabulary, which is what makes a recording made
+  anywhere mean the same thing everywhere.
+- **Emit the cross-platform spelling.** Roles render through
+  `_ROLE_CONSTANTS` as `Role.*`; elements lead and coordinates follow,
+  and that rule is measured, not aesthetic — a replayed screen-coordinate
+  click typed three runs' text into GNOME Shell's search box while every
+  element-anchored step of the same script held (2026-11-25).
+- **New emitted API moves the floor.** Anything the generator can emit
+  that an older pyguitest lacks or gets wrong is exactly what `FLOOR`
+  carries — see "`PROFILE`, `FLOOR` and the `pyproject.toml` floor move
+  together" below.
+- **Tables that mirror pyguitest groups are pinned by test, not import.**
+  Every `import pyguitest` in this package is function-local on purpose —
+  a recorder slow to start is a recorder that misses input — so
+  module-level role tables stay strings, and `test_generator.py` holds
+  each mirror to the installed `Role` with its delta *named*
+  (`_WINDOW_ROLES` is the group plus `application`; `_TEXT_ROLES` the
+  group minus `spin button`). A change on either side becomes a decision,
+  never drift.
+
 ## Docs and changelog
 
 `CHANGELOG.md`'s `[Unreleased]` section gets an entry for any user-facing
