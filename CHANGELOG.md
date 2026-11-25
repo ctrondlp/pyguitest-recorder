@@ -3,6 +3,31 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.22.0] — 2026-11-25
+
+**The profile and floor move to pyguitest 0.29.0, and this time the step is
+load-bearing: the generator renders three roles that release introduced.**
+`Role.POPUP_MENU` is Qt's spelling for an opened menu — GTK publishes
+`menu`, Qt publishes `popup menu`, submenus included, so a recording that
+navigated a Qt menu named a role this generator could only spell as a raw
+string before. `Role.MENU_BAR` and `Role.TOOL_TIP` are the two strings
+every backend already produced that finally gained constants over there.
+All three are elements a recording really resolves — a submenu walked, a
+menu bar clicked, a tooltip under a hovered pointer — and `validate()`
+checks each rendered constant against the installed pyguitest, which is
+exactly why the floor must carry the release that has them.
+
+The same pyguitest release also makes recordings *made on Windows* more
+portable with no change here: a static caption there now reads `label`
+rather than `text` (matching every other backend), dialogs — including
+WPF and WinForms modals with owners — read `dialog`, checkable WPF menu
+items read `check menu item`, and macOS switches read `switch`. The
+resolver names whatever the platform reports and every one of those
+constants was already rendered, so generated scripts simply come out with
+the cross-platform spelling now. Profile `pyguitest-0.29`, floor and pin
+0.29.0; CI's `pyguitest-floor` job stays red until that release is on
+PyPI — release pyguitest first, as ever.
+
 ## [0.21.1] — 2026-11-24
 
 A patch, from a cross-platform review of both repositories. Nothing about

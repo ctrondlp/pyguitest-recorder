@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.28"
+PROFILE = "pyguitest-0.29"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.28.0"
+FLOOR = "0.29.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -242,9 +242,13 @@ raised on the first page key. So the floor carries the patch, and it moves
 only when a patch release fixes what an emitted call *gets wrong*; a patch
 that fixes nothing a script replays leaves it where it is. It always lies on
 PROFILE's line, which the test suite also holds -- so when that line
-advances with a pyguitest minor, the floor follows to its `.0` as a pairing
-step (0.28.0 is one: nothing emitted is new API over there), because a
-header must not claim a profile its own floor predates.
+advances with a pyguitest minor, the floor follows to its `.0`, because a
+header must not claim a profile its own floor predates. 0.29.0 carries new
+emitted API, not only a pairing step: `_ROLE_CONSTANTS` now renders
+`Role.POPUP_MENU`, `Role.MENU_BAR` and `Role.TOOL_TIP`, which pyguitest
+introduced there, so a generated script that names one of those roles -- a
+Qt popup menu, a menu bar, a tooltip resolved under the pointer -- needs
+0.29.0 and `validate()` against an older one would reject it.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -446,6 +450,16 @@ _ROLE_CONSTANTS = {
     "switch": "SWITCH",
     "tree table": "TREE_TABLE",
     "level bar": "LEVEL_BAR",
+    # pyguitest 0.29.0's additions, named for the same reason and made safe by
+    # the same floor: `popup menu` is Qt's spelling for an opened menu (GTK
+    # says `menu`), and `menu bar` and `tool tip` are the strings every
+    # backend already produced that gained a constant there. A recording
+    # resolves any of them as the element under the pointer -- a submenu
+    # navigated, a tooltip hovered -- and `validate()` checks each against
+    # the installed pyguitest, which the floor holds at 0.29.0.
+    "popup menu": "POPUP_MENU",
+    "menu bar": "MENU_BAR",
+    "tool tip": "TOOL_TIP",
 }
 
 

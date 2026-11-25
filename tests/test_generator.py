@@ -2657,6 +2657,38 @@ def test_every_role_constant_the_generator_names_is_one_the_floor_pyguitest_has(
         assert getattr(pyguitest.Role, constant) == expected, constant
 
 
+def test_the_window_roles_mirror_is_pyguitests_group_plus_application():
+    # `_WINDOW_ROLES` mirrors `Role.WINDOW_ROLES` by hand because this module
+    # imports pyguitest only inside functions, like every module here -- a
+    # recorder that is slow to start is a recorder that misses input -- so a
+    # module-level table cannot name `Role.*` directly. The mirror is held
+    # here instead: pyguitest's own group plus the one documented extra.
+    # `application` is a toplevel in the accessible tree but not a window,
+    # and `_SCOPE_ROLES` subtracts it right back for `within=` scoping --
+    # its own docstring carries that story.
+    import pyguitest
+
+    assert (
+        frozenset(pyguitest.Role.WINDOW_ROLES) | {"application"}
+    ) == generator_module._WINDOW_ROLES
+    assert frozenset(pyguitest.Role.WINDOW_ROLES) == generator_module._SCOPE_ROLES
+
+
+def test_the_text_roles_table_is_pyguitests_group_minus_spin_button():
+    # Typed runs are attributed to the three field roles; pyguitest's
+    # `Role.TEXT_ROLES` also carries `spin button`, which this table has
+    # never included. Held to the *named* delta so a change on either side
+    # becomes a decision here rather than silent drift -- the same promise
+    # `_ROLE_CONSTANTS` makes about constants, made about a group.
+    import pyguitest
+
+    from pyguitest_recorder.analyzer import normalize as normalize_module
+
+    expected = frozenset(pyguitest.Role.TEXT_ROLES) - {pyguitest.Role.SPIN_BUTTON}
+    assert expected == generator_module._TEXT_ROLES
+    assert expected == normalize_module._TEXT_ROLES
+
+
 def test_the_gtk4_roles_render_as_constants(window):
     # pyguitest 0.21.0 added these three; before it they rendered as string
     # literals, which worked but read as roles pyguitest had never heard of.
@@ -2666,6 +2698,26 @@ def test_the_gtk4_roles_render_as_constants(window):
         ("level bar", "LEVEL_BAR"),
     ):
         element = ElementRef(role=role, name="Wi-Fi")
+        source = render(
+            WaitForElement(element=element),
+            Click(target=Target(x=1, y=2, window=window, element=element)),
+        )
+        assert f"role=Role.{constant}" in source, role
+        assert f'role="{role}"' not in source, role
+        assert validate(source) == [], role
+
+
+def test_the_pyguitest_0_29_roles_render_as_constants(window):
+    # pyguitest 0.29.0 added these three -- Qt's `popup menu` beside GTK's
+    # `menu`, and the two strings every backend produced that finally gained
+    # constants. Before the floor moved they rendered as string literals,
+    # which worked but read as roles pyguitest had never heard of.
+    for role, constant in (
+        ("popup menu", "POPUP_MENU"),
+        ("menu bar", "MENU_BAR"),
+        ("tool tip", "TOOL_TIP"),
+    ):
+        element = ElementRef(role=role, name="File")
         source = render(
             WaitForElement(element=element),
             Click(target=Target(x=1, y=2, window=window, element=element)),

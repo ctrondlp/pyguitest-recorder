@@ -338,11 +338,14 @@ dependencies = [
     # the session's own pointer first. It is also the release whose `macos`
     # backend reads `AXSubrole`, which is what lets a Mac dialog report
     # `dialog` at all and what the resolver's dialog memory recognises a
-    # modal by on that platform. 0.28.0 is a pairing step, not a second
-    # story: PROFILE names the pyguitest line the output is checked
-    # against, the floor must lie on that line, and nothing this generator
-    # emits is new API over there.
-    "pyguitest>=0.28.0",
+    # modal by on that platform. 0.29.0, by contrast, IS a second story:
+    # this generator now emits `Role.POPUP_MENU`, `Role.MENU_BAR` and
+    # `Role.TOOL_TIP`, which pyguitest introduced there (a Qt popup menu, a
+    # menu bar, a tooltip resolved under the pointer), so a script that names
+    # one of those roles needs 0.29.0 and `validate()` against an older
+    # pyguitest would reject it -- the floor earns its move rather than only
+    # pairing with the profile.
+    "pyguitest>=0.29.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]
