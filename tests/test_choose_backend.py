@@ -28,6 +28,21 @@ def _raise_no_evdev():
     )
 
 
+def _evdev_can_capture(monkeypatch):
+    """Let the evdev backend be selected, whatever the box running this has.
+
+    Patches `unavailable_reason` rather than `available`, because that is the
+    seam `_choose_wayland` reads -- and since `available()` is defined as it
+    answering None, this opens the auto-fallback gate too. Patching only
+    `available` leaves the selection asking the real machine: it passes on a
+    developer box whose user is in the `input` group, and fails in CI, where
+    there is no python-evdev at all.
+    """
+    monkeypatch.setattr(
+        "pyguitest_recorder.backends.wayland.unavailable_reason", lambda: None
+    )
+
+
 class TestAutoOnLinux:
     def test_auto_picks_xrecord(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
@@ -74,9 +89,7 @@ class TestAutoOnLinux:
             "pyguitest_recorder.backends.x11.unavailable_reason",
             lambda: "no X server",
         )
-        monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: True
-        )
+        _evdev_can_capture(monkeypatch)
         assert choose_backend(_settings(backend="auto")).name == "wayland-evdev"
 
     def test_auto_fallback_needs_wayland_to_be_available(self, monkeypatch):
@@ -157,9 +170,7 @@ class TestAutoOnLinux:
 
     def test_naming_wayland_picks_it_when_devices_are_readable(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
-        monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.unavailable_reason", lambda: None
-        )
+        _evdev_can_capture(monkeypatch)
         monkeypatch.setattr(
             "pyguitest_recorder.backends.wayland.pick_devices", lambda: []
         )
@@ -205,17 +216,13 @@ class TestAutoOnLinux:
 
     def test_wayland_carries_the_screen_tag_instead_of_refusing_it(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
-        monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: True
-        )
+        _evdev_can_capture(monkeypatch)
         backend = choose_backend(_settings(backend="wayland", screen=2))
         assert backend._screen == 2
 
     def test_wayland_has_no_cursor_source_by_default(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
-        monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: True
-        )
+        _evdev_can_capture(monkeypatch)
         backend = choose_backend(_settings(backend="wayland"))
         assert backend._cursor is None
 
@@ -223,9 +230,7 @@ class TestAutoOnLinux:
         # The opt-in builds a CursorSource and hands it to the backend; it is
         # only *started* (consent dialog) when the backend starts, not here.
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
-        monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: True
-        )
+        _evdev_can_capture(monkeypatch)
         backend = choose_backend(_settings(backend="wayland", screencast_cursor=True))
         assert backend._cursor is not None
         # Selection must be side-effect-free: nothing is spawned (and so no

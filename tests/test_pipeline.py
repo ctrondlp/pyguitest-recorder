@@ -236,7 +236,7 @@ class OneWindowSession:
         return (0, 0, 800, 600)
 
 
-def test_an_editor_that_renames_itself_while_typing_stays_one_window():
+def test_an_editor_that_renames_itself_while_typing_stays_one_window(monkeypatch):
     """The shape the first recording of a real application came out wrong in.
 
     A text editor renamed its window on every keystroke. Each title read as a
@@ -246,7 +246,14 @@ def test_an_editor_that_renames_itself_while_typing_stays_one_window():
     """
     from pyguitest_recorder.analyzer import infer_synchronization
     from pyguitest_recorder.windows import DesktopResolver
+    from pyguitest_recorder.windows import resolver as resolver_module
 
+    # The resolver never attributes a click to its own process, so a box where
+    # this test runs as pid 900 -- `RenamingEditor`'s -- would resolve no
+    # window at all and fail on something that is not under test. Any pid no
+    # fake here carries will do. See the `own_pid` fixture in test_resolver.py,
+    # where that collision actually happened.
+    monkeypatch.setattr(resolver_module.os, "getpid", lambda: 424242)
     editor = RenamingEditor()
     made = DesktopResolver(session=OneWindowSession(editor), elements=False)
     normalizer = Normalizer(resolver=made, started=0.0)
