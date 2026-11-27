@@ -490,9 +490,20 @@ def _writable_path_problem(value: str, flag: str) -> str | None:
 
     Checked rather than assumed, and as close to the real write as a check can
     get without performing it: the directory has to exist, be a directory, and
-    be writable, and an existing file at the path has to be writable too.
-    `_write_script` and `Recording.save` both write through a temporary file in
-    the same directory, so directory permission is the one that decides.
+    be writable. `_write_script` and `Recording.save` both write through a
+    temporary file in that directory and `os.replace` it into place, so
+    directory permission is the one that decides -- and the *file's* own mode
+    is deliberately not consulted. A rename over a read-only file succeeds
+    (replacing needs write and execute on the directory, nothing on the
+    target), so refusing `--output report.py` because report.py is mode 0444
+    aborted a run before capture that would have written perfectly well.
+
+    The path is resolved first, exactly as both writers resolve it before they
+    write. `os.replace` replaces the *link*, which is why they do; checking
+    the unresolved parent therefore asked about the wrong directory -- with
+    `--output latest.py` pointing at a read-only mount, this passed and the
+    write then failed after the whole interaction had been recorded, which is
+    the one failure the check exists to prevent.
 
     Advisory by nature -- the mode can change between here and the write, and
     on Windows `os.access` reports little about ACLs -- so this exists to
@@ -500,18 +511,20 @@ def _writable_path_problem(value: str, flag: str) -> str | None:
     path under a root-owned tree) rather than to make the write infallible.
     """
     path = Path(value)
-    parent = path.parent if str(path.parent) else Path(".")
+    with contextlib.suppress(OSError, RuntimeError):
+        # Suppressed the way `_write_script` suppresses it: a symlink loop or
+        # an unreadable path leaves the original spelling to fail on its own
+        # terms rather than turning a resolve error into a refusal here.
+        path = path.resolve()
+    parent = path.parent
     if not parent.exists():
         return f"{flag} {value!r}: the directory {str(parent)!r} does not exist"
     if not parent.is_dir():
         return f"{flag} {value!r}: {str(parent)!r} is not a directory"
     if not os.access(parent, os.W_OK):
         return f"{flag} {value!r}: the directory {str(parent)!r} is not writable"
-    if path.exists():
-        if path.is_dir():
-            return f"{flag} {value!r} is a directory, not a file"
-        if not os.access(path, os.W_OK):
-            return f"{flag} {value!r} exists and is not writable"
+    if path.is_dir():
+        return f"{flag} {value!r} is a directory, not a file"
     return None
 
 
@@ -866,6 +879,14 @@ def _elapsed_reminders(settings: Settings) -> Iterator[None]:
         yield
     finally:
         done.set()
+        # Joined, not merely signalled. `done.set()` alone cannot stop a tick
+        # that has already returned from `wait()` and is inside
+        # `_say_elapsed`, so a recording stopped at that instant interleaved
+        # "still recording -- 5 minutes so far" into the run summary printed
+        # just after it. A bounded join rather than an open one: the thread
+        # does nothing but one `print`, and the reminder is not worth hanging
+        # a finished recording over if it somehow does not return.
+        thread.join(timeout=2.0)
 
 
 def _say_elapsed(elapsed: float, settings: Settings) -> None:
@@ -894,16 +915,27 @@ def _warn_motion_without_waypoints(recording: Recording, settings: Settings) -> 
     move renders as a teleport, exactly as `motion = "teleport"` would. What
     the reader needs to know is that the waypoints they asked for are not
     there, which is the one thing the silent version did not tell them.
+
+    The way out depends on which run this is, so it is named conditionally.
+    Telling someone to pass `--record-motion` when they are *holding* it --
+    a capture that recorded no pointer movement at all, because the
+    interaction was clicks on already-hovered controls -- names a flag
+    already in effect and leaves them with no next step.
     """
     if settings.motion not in ("recorded", "verbatim"):
         return
     if any(isinstance(event, MouseMove) for event in recording.events):
         return
+    remedy = (
+        "This recording holds no pointer movement to draw a route from."
+        if settings.record_motion
+        else "A recording made with --record-motion carries the waypoints "
+        "this setting draws from."
+    )
     print(
         f"note: motion = {settings.motion!r} has no route to render in this "
         "recording -- it holds no pointer motion, so every move renders as a "
-        "plain teleport. A recording made with --record-motion carries the "
-        "waypoints this setting draws from.",
+        f"plain teleport. {remedy}",
         file=sys.stderr,
     )
 
@@ -1177,8 +1209,17 @@ def _emit(
         )
         kept = len(recording.events)
         removed = before - kept
-        what = "Trimmed" if trimming else "Excluded"
-        print(f"{what} {removed} of {before} events", file=sys.stderr)
+        # Silent when an exclusion removed nothing. On the capture path
+        # `Recorder._add` has already dropped those events, so this second
+        # pass can never remove any and the count is *always* zero there --
+        # printed right beside the recorder's own "N event(s) were withheld
+        # from this recording" note, it said the flag had done nothing while
+        # the flag had in fact worked. An explicit trim still reports its
+        # zero: "Trimmed 0 of 412" is the answer to a --from or --drop that
+        # did not match what the user expected it to.
+        if trimming or removed:
+            what = "Trimmed" if trimming else "Excluded"
+            print(f"{what} {removed} of {before} events", file=sys.stderr)
         if before and not kept:
             # The `_trimmed_events` docstring's stance is to notice, not trim
             # quietly: a window or a drop list that removed every event leaves a

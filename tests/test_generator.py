@@ -5110,3 +5110,105 @@ def test_a_non_window_anchor_keeps_its_role(window):
     assert 'name="Right"' in source
     assert "Role.PANEL" in source or 'role="panel"' in source
     assert validate(source) == []
+
+
+class TestSensitiveTreatsEveryRunAsSecret:
+    """`GeneratorOptions.sensitive` -- `--sensitive` on a `--regenerate`.
+
+    Redaction is a *generation* step, so the flag has to be read here and not
+    only by the capture-time normalizer. Before the option existed it was
+    silently inert on a regenerate, and the asymmetry was the dangerous way
+    round: `--no-redact`, which writes a secret into the script as a literal,
+    took effect because it lives here, while the two flags that withhold one
+    did not. The only privacy flag that reached a regenerated script was the
+    one that weakens it.
+    """
+
+    def _events(self):
+        target = Target(x=1, y=1, element=ElementRef(role="text", name="Token"))
+        return (
+            TextInput(timestamp=1.0, text="hunter2", target=target),
+            Assertion(timestamp=2.0, check="text", expected="hunter2", target=target),
+        )
+
+    def test_without_the_flag_an_unflagged_field_keeps_its_text(self):
+        source = render(*self._events())
+        assert "hunter2" in source
+
+    def test_the_typed_text_is_withheld_from_the_script(self):
+        source = render(*self._events(), sensitive=True)
+        assert "hunter2" not in source
+        assert 'os.environ["SECRET_1"]' in source
+
+    def test_a_text_check_is_withheld_too(self):
+        # The check's *expected* value is the same secret read back, so
+        # redacting the call and not the comparison would publish it anyway.
+        source = render(*self._events(), sensitive=True)
+        assert "equals=SECRET_2" in source
+
+    def test_the_check_comment_does_not_print_what_the_call_withholds(self):
+        # `describe_assertion` reads the event's own flag, which the
+        # normalizer never set here -- so the call was redacted to SECRET_2
+        # while the `# Check:` comment beside it printed the value in clear.
+        source = render(*self._events(), sensitive=True)
+        assert "# Check: 'Token' matches the recorded value" in source
+
+    def test_the_comment_does_not_claim_a_password_field_that_was_not_one(self):
+        # The field's role is "text". `--sensitive` is the caller overriding
+        # the normalizer's answer, not the accessibility tree reporting a
+        # password field, so claiming the role sends a reader looking for one
+        # that does not exist.
+        source = render(*self._events(), sensitive=True)
+        assert "went into a password field" not in source
+        assert "--sensitive" in source
+
+    def test_a_genuinely_flagged_field_still_says_so(self):
+        source = render(
+            TextInput(timestamp=1.0, text="hunter2", sensitive=True),
+            sensitive=True,
+        )
+        assert "went into a password field" in source
+
+    def test_the_script_still_validates_with_everything_withheld(self):
+        source = generate(
+            Recording(events=list(self._events())),
+            GeneratorOptions(sensitive=True),
+        )
+        assert validate(source) == []
+
+
+class TestAGeneratedCommentStaysInsideTheLineLimit:
+    """A comment is the only thing `ruff format` cannot wrap for us.
+
+    `_comment` wraps at 78 for that reason, and `_emit_comment` used to
+    append its line directly instead -- which went unnoticed until the
+    normalizer began emitting a `Comment` of its own for a key it could not
+    name. That text is 143 characters, so every script holding an unnamed
+    key carried a single 151-character line.
+    """
+
+    def _longest(self, source):
+        return max(len(line) for line in source.splitlines())
+
+    def test_a_long_comment_event_is_wrapped(self):
+        text = (
+            "a key was pressed here that this recording could not name, so it "
+            "is not replayed -- the capture backend reported no key name and "
+            "no text for it"
+        )
+        source = render(
+            Comment(timestamp=0.0, text=text),
+            Click(timestamp=1.0, target=Target(x=5, y=6)),
+        )
+        assert self._longest(source) <= 88
+        # Wrapped, not truncated: every word still reaches the reader.
+        joined = " ".join(
+            line.strip().lstrip("# ")
+            for line in source.splitlines()
+            if line.strip().startswith("#")
+        )
+        assert "the capture backend reported no key name" in joined
+
+    def test_a_short_comment_is_still_one_line(self):
+        source = render(Comment(timestamp=0.0, text="checked by hand"))
+        assert "# checked by hand" in source

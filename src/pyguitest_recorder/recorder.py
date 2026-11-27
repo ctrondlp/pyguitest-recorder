@@ -742,7 +742,22 @@ class Recorder:
         return False
 
     def start(self) -> None:
-        """Prepare capture. Raises CaptureUnavailable if this session cannot."""
+        """Prepare capture. Raises CaptureUnavailable if this session cannot.
+
+        Also raises `ConfigError` for a motion setting with nothing to render
+        from. That refusal moved out of `Settings.__post_init__` so that
+        `--regenerate --recorded-motion` -- the combination recipes.md
+        recommends -- stops being refused at construction, and `main()` then
+        asked it on the capture path instead. But `Recorder` is public API, so
+        the command line is not the only capture path: a library caller
+        building one directly got no refusal at all, and a silent one is what
+        the check exists to prevent (every move renders as a teleport, exactly
+        as if the setting had worked). Asked here, the one layer that knows a
+        capture is about to happen and that a regenerate never reaches. The
+        command line keeps its own earlier call, which refuses before a
+        session is opened; `main()` catches `ConfigError` either way.
+        """
+        self.settings.validate_motion_for_capture()
         self._backend = choose_backend(self.settings)
         display = self.settings.display or os.environ.get("DISPLAY", "")
         # Notes are collected before the environment block replaces it, and
@@ -1431,11 +1446,16 @@ class Recorder:
         # to a single member and costs the recording its element context.
         # The scale that member exists to supply is only consumed by the
         # evdev backend anyway.
-        if self._on_wayland():
-            wanted.extend(self._screen_info_members(wanted))
+        #
+        # `wanted` non-empty is part of the condition and stated here rather
+        # than inside: with both context settings off nothing is opened at
+        # all, and naming a lone member would open a session to answer a
+        # question `_wire_capture_scale` is not going to ask.
+        if wanted and self._on_wayland():
+            wanted.extend(self._screen_info_members())
         return tuple(wanted)
 
-    def _screen_info_members(self, wanted: list[str]) -> list[str]:
+    def _screen_info_members(self) -> list[str]:
         """A SCREEN_INFO provider to add, where this compositor needs one named.
 
         `_wire_capture_scale` needs the compositor's scale factor, and the only
@@ -1456,9 +1476,11 @@ class Recorder:
         hopefully: a *named* backend that cannot build fails the whole
         composition, where the session is otherwise allowed to fall back to
         one half or the other.
+
+        Whether any session is being opened at all is the caller's condition,
+        not a parameter here: this reads the compositor and the tool, and
+        nothing about it depends on which other members were chosen.
         """
-        if not wanted:
-            return []
         try:
             import pyguitest
             from pyguitest.backends.kscreen import available as kscreen_available

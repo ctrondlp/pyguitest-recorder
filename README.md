@@ -312,7 +312,7 @@ resolve to a drop-down instead of the application's window.
 
 Every floor step between that and 0.25.0 is one of those same two kinds, and
 each is reasoned out where it was decided rather than retold here: the comment
-above `pyguitest>=0.29.0` in
+above `pyguitest>=0.30.0` in
 [pyproject.toml](https://github.com/ctrondlp/pyguitest-recorder/blob/main/pyproject.toml)
 gives the reason for each one, and
 [CHANGELOG.md](https://github.com/ctrondlp/pyguitest-recorder/blob/main/CHANGELOG.md)
@@ -331,12 +331,19 @@ process" case alone keeps the `CapabilityUnsupported` fast-fail -- a
 behavioural change `validate()` cannot catch, since the method is present on
 either side of it.
 
-0.29.0 is the release this output is verified against now, and the step to
-it is load-bearing: this generator renders `Role.POPUP_MENU`,
-`Role.MENU_BAR` and `Role.TOOL_TIP` -- a Qt popup menu, a menu bar, a
-tooltip resolved under the pointer -- which pyguitest introduced there, so a
-script naming one needs 0.29.0. The step to 0.27.0 before it was
-load-bearing too. This generator renders the click that *opens* a window as
+0.30.0 is the release this output is verified against now. That step is a
+pairing one -- nothing here renders a call 0.30.0 introduced -- but it does
+change what one emitted construct *does* on a Mac: an AltGr chord, which the
+generator spells `&(…)`, used to type a literal ampersand into the
+application there, and 0.30.0 refuses it instead. A script generated here
+and replayed under 0.29.0 on macOS therefore does the wrong thing silently
+where this floor does it loudly.
+
+The step to 0.29.0 before it was load-bearing: this generator renders
+`Role.POPUP_MENU`, `Role.MENU_BAR` and `Role.TOOL_TIP` -- a Qt popup menu, a
+menu bar, a tooltip resolved under the pointer -- which pyguitest introduced
+there, so a script naming one needs 0.29.0. The step to 0.27.0 before *that*
+was load-bearing too. This generator renders the click that *opens* a window as
 `click(via="pointer")` -- an accessible-action click on such a control leaves
 every later action in that application unanswered, so the dialog it opened is
 never dismissed -- and on 0.26.1 that call could move no pointer at all on a

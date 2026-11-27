@@ -1572,3 +1572,154 @@ class TestTheConsoleHonoursSensitive:
     def test_an_already_sensitive_event_is_untouched(self):
         event = dataclasses.replace(self._assertion(), sensitive=True)
         assert _as_secret_as_asked(Settings(), event) is event
+
+
+class TestTheOutputPathIsCheckedBeforeRecording:
+    """`_writable_path_problem`: refuse a destination before, not after.
+
+    Neither path is touched until `_emit`, which for a recording is after the
+    whole interaction -- so a read-only mount or a typo'd directory surfaced
+    as a traceback with every captured event already discarded and nothing
+    left to retry with.
+    """
+
+    def _problem(self, path, flag="--output"):
+        from pyguitest_recorder.cli import _writable_path_problem
+
+        return _writable_path_problem(str(path), flag)
+
+    def test_a_writable_directory_is_accepted(self, tmp_path):
+        assert self._problem(tmp_path / "out.py") is None
+
+    def test_a_missing_directory_is_named(self, tmp_path):
+        problem = self._problem(tmp_path / "nope" / "out.py")
+        assert problem is not None
+        assert "does not exist" in problem
+
+    def test_a_directory_in_place_of_a_file_is_refused(self, tmp_path):
+        target = tmp_path / "adir"
+        target.mkdir()
+        problem = self._problem(target)
+        assert problem is not None
+        assert "is a directory, not a file" in problem
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    def test_an_unwritable_directory_is_named(self, tmp_path):
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            problem = self._problem(locked / "out.py")
+        finally:
+            locked.chmod(0o700)
+        assert problem is not None
+        assert "is not writable" in problem
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    def test_a_read_only_file_in_a_writable_directory_is_accepted(self, tmp_path):
+        # `_write_script` and `Recording.save` both mkstemp in the parent and
+        # `os.replace` into place, which needs nothing on the target file. A
+        # refusal here aborted a run before capture that would have written
+        # perfectly well.
+        target = tmp_path / "out.py"
+        target.write_text("# old\n", encoding="utf-8")
+        target.chmod(0o444)
+        try:
+            assert self._problem(target) is None
+        finally:
+            target.chmod(0o644)
+
+    @pytest.mark.skipif(os.name != "posix", reason="symlinks")
+    def test_a_symlink_is_judged_by_where_it_points(self, tmp_path):
+        # Both writers `resolve()` before they write, because `os.replace`
+        # would otherwise replace the *link*. Checking the unresolved parent
+        # asked about the wrong directory, so this passed and the write then
+        # failed after the whole recording.
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        link = tmp_path / "latest.py"
+        link.symlink_to(locked / "out.py")
+        try:
+            problem = self._problem(link)
+        finally:
+            locked.chmod(0o700)
+        assert problem is not None
+        assert "is not writable" in problem
+
+    def test_both_destinations_are_checked_on_the_capture_path(self, tmp_path):
+        from pyguitest_recorder.cli import _validate_writable_outputs
+        from pyguitest_recorder.config import ConfigError
+
+        settings = Settings(
+            output=str(tmp_path / "out.py"),
+            session_file=str(tmp_path / "nope" / "s.json"),
+        )
+        with pytest.raises(ConfigError, match="--save-session"):
+            _validate_writable_outputs(settings)
+
+    def test_the_session_file_is_not_checked_on_a_regenerate(self, tmp_path):
+        # `_regenerate` passes `save_session=False`, so no session file is
+        # ever written there -- checking it refused a regenerate whose script
+        # destination was perfectly writable.
+        from pyguitest_recorder.cli import _validate_writable_outputs
+
+        settings = Settings(
+            output=str(tmp_path / "out.py"),
+            session_file=str(tmp_path / "nope" / "s.json"),
+        )
+        _validate_writable_outputs(settings, session_file=False)
+
+
+class TestWhatEmitSaysAboutExclusionAndMotion:
+    """The two notes `_emit` prints that describe the recording, not the file."""
+
+    def _recording(self):
+        window = WindowRef(title="Editor", app_id="org.x.Editor", pid=9)
+        return Recording(
+            events=[
+                Click(timestamp=float(i), target=Target(x=1, y=1, window=window))
+                for i in range(3)
+            ]
+        )
+
+    def _emit(self, settings, recording=None):
+        from pyguitest_recorder.cli import _emit
+
+        _emit(recording or self._recording(), settings, save_session=False)
+
+    def test_an_exclusion_that_removed_nothing_says_nothing(self, capsys):
+        # On the capture path `Recorder._add` has already dropped those
+        # events, so this second pass can never remove any -- and the line
+        # landed beside the recorder's own "N event(s) were withheld" note,
+        # saying the flag had done nothing while the flag had worked.
+        self._emit(Settings(exclude_windows=("*Bitwarden*",)))
+        assert "Excluded" not in capsys.readouterr().err
+
+    def test_an_exclusion_that_removed_something_reports_it(self, capsys):
+        self._emit(Settings(exclude_windows=("*Editor*",)))
+        err = capsys.readouterr().err
+        assert "Excluded 3 of 3 events" in err
+        assert "--exclude-window removed every event" in err
+
+    def test_an_explicit_trim_still_reports_its_zero(self, capsys):
+        from pyguitest_recorder.cli import _emit
+
+        # The answer to a --from or --drop that did not match what the user
+        # expected it to, so it is said even when nothing was removed.
+        _emit(self._recording(), Settings(), save_session=False, trim_from=0.0)
+        assert "Trimmed 0 of 3 events" in capsys.readouterr().err
+
+    def test_a_capture_that_recorded_no_route_is_not_told_to_record_one(self, capsys):
+        # `--record-motion` is already in effect here, so naming it leaves
+        # the reader with no next step.
+        self._emit(Settings(motion="recorded", record_motion=True))
+        err = capsys.readouterr().err
+        assert "no route to render" in err
+        assert "--record-motion" not in err
+
+    def test_a_regenerate_of_a_motionless_session_names_the_flag(self, capsys):
+        self._emit(Settings(motion="recorded", record_motion=False))
+        err = capsys.readouterr().err
+        assert "no route to render" in err
+        assert "--record-motion" in err

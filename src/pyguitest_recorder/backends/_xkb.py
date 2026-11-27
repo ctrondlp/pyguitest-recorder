@@ -97,8 +97,18 @@ def _declare(lib: Any) -> None:
 
 
 _DEAD_KEYSYM_FIRST = 0xFE50
-_DEAD_KEYSYM_LAST = 0xFE7F
-"""X11's dead-key block, deliberately left without text -- see `keysym_text`."""
+_DEAD_KEYSYM_LAST = 0xFE93
+"""X11's dead-key block, deliberately left without text -- see `keysym_text`.
+
+0xFE93 rather than the 0xFE6F the diacritics themselves end at, because the
+block is not contiguous and two later runs are dead keys too: `dead_a`
+through `dead_greek` (0xFE80-0xFE8C), the universal syllable-entry vowels,
+and `dead_lowline` through `dead_longsolidusoverlay` (0xFE90-0xFE93), the
+German T3 additions. Stopping at 0xFE7F left all twelve to libxkbcommon,
+against this guard's own stated intent. One range rather than three, since
+nothing between 0xFE50 and 0xFE93 produces a character under any layout --
+0xFE70-0xFE7F is the AccessX/Pointer_* control block, which has none either.
+"""
 
 # Tri-state: None before the first attempt, False once the library or the
 # symbol has been found absent, otherwise the bound function.

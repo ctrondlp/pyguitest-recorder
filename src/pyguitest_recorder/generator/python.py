@@ -1866,9 +1866,23 @@ class PythonGenerator:
         state.lines.append(f"gui.wait({gap:.3f})")
 
     def _emit_comment(self, event: Comment, state: _State) -> None:
-        """Render a standalone comment."""
-        if self.options.comments:
-            state.lines.append(f"# {_one_line(event.text)}")
+        """Render a standalone comment, wrapped the way every other one is.
+
+        Through `_comment` rather than appending the line itself, for the
+        reason that function's own docstring gives: a comment is opaque to
+        `ruff format`, so an unwrapped one is the only thing in a generated
+        file that can run past the line limit. That stopped being theoretical
+        when the normalizer began emitting a `Comment` of its own -- its
+        "a key was pressed here that this recording could not name" is 143
+        characters, which came out as a single 151-character line in every
+        script that held an unnamed key.
+
+        `_one_line` still runs first: `textwrap.wrap` would otherwise be
+        handed the line break that makes a comment end and code begin (see
+        `_one_line`), and collapsing it here keeps that guarantee ahead of
+        the wrapping rather than relying on it.
+        """
+        self._comment(_one_line(event.text), state)
 
     def _emit_pause(self, event: Pause, state: _State) -> None:
         """Render an explicit sleep, which is always a last resort."""
@@ -2832,13 +2846,25 @@ class PythonGenerator:
             # An event that carries its own note says *why* (the recorder was
             # too far behind to know the field), which the password wording
             # here would contradict.
-            self._comment(
-                "the text itself was never written here"
-                if event.note
-                else "this went into a password field, so the text itself was "
-                "never written here",
-                state,
-            )
+            #
+            # So does `options.sensitive`, for the same reason one step over:
+            # the flag is the caller declaring every run secret, *not* the
+            # accessibility tree reporting a password field -- so claiming
+            # the role is a claim nothing here can support, and a reader who
+            # goes looking for the password field will not find one.
+            if event.note:
+                why = "the text itself was never written here"
+            elif not event.sensitive:
+                why = (
+                    "every typed run in this script is withheld (--sensitive), "
+                    "so the text itself was never written here"
+                )
+            else:
+                why = (
+                    "this went into a password field, so the text itself was "
+                    "never written here"
+                )
+            self._comment(why, state)
         else:
             text = _literal(event.text)
         element = event.target.element if event.target else None
@@ -2995,8 +3021,14 @@ class PythonGenerator:
         every run secret (`options.sensitive`). One predicate for both so a
         new use site cannot honour one and miss the other, which is how
         `--sensitive` came to be inert on `--regenerate`.
+
+        `event.sensitive` directly, not through `getattr`: both types in the
+        annotation declare the field, so a default would only swallow a
+        rename or a typo -- and swallowing it would answer "not secret" for
+        every event, which is the one wrong answer that writes text into the
+        script.
         """
-        return bool(getattr(event, "sensitive", False) or self.options.sensitive)
+        return bool(event.sensitive or self.options.sensitive)
 
     def _secret(self, event: TextInput, state: _State) -> str:
         """Render sensitive input as an environment lookup, never as a literal."""

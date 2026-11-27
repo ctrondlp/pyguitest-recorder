@@ -220,6 +220,86 @@ visible in the artifact it produced.
   correct answer, so the assumption is not made in either direction until
   the space is measured.
 
+### Fixed (from the review round on this change set)
+
+- **A script holding an unnamed key ran past the line limit.** The comment
+  the normalizer now writes for a key it cannot name is longer than a
+  generated line is allowed to be, and `_emit_comment` appended it directly
+  instead of through `_comment` — the wrapper that exists because a comment
+  is opaque to `ruff format`, so an unwrapped one is the only thing in a
+  generated file that can exceed the limit. Every script with such a key
+  carried one over-long line.
+
+- **An output path that could be written was refused before capture.** The
+  new preflight rejected an existing file whose own mode was read-only, but
+  both writers create a temporary file in the directory and rename it into
+  place — which needs nothing at all on the target — so `--output` aimed at
+  a mode-0444 file in a writable directory aborted a run that would have
+  written perfectly well. The check also asked about the wrong directory for
+  a symlinked target, the one case it was most needed for: both writers
+  resolve the path first, because `os.replace` replaces the link, so a link
+  into a read-only mount passed the preflight and then failed with the whole
+  interaction already recorded.
+
+- **`--sensitive` claimed a password field that was not one.** The flag is
+  the caller declaring every typed run secret, not the accessibility tree
+  reporting a password field, and the comment beside a withheld run said
+  "this went into a password field" either way — sending a reader to look
+  for a field that does not exist. The wording now names the flag that
+  withheld it, as the event-level note already did.
+
+- **A capture with `--exclude-window` reported excluding nothing.** The
+  events are dropped as they arrive, so the second pass at emit time can
+  never remove any and the count was always zero — printed immediately
+  beside the recorder's own note saying how many events *were* withheld, it
+  read as the flag having done nothing. An explicit trim still reports its
+  zero, which is the answer to a `--from` or `--drop` that did not match
+  what the user expected.
+
+- **Part of X11's dead-key block was left to libxkbcommon.** The guard that
+  keeps a dead key from carrying text stopped at the end of the diacritics,
+  but the block is not contiguous: the universal syllable-entry vowels and
+  the German T3 additions sit above it and were unguarded, against the
+  guard's own stated intent.
+
+- **A recording holding no motion was told to pass a flag it was already
+  holding.** The note that explains why `motion = "recorded"` has no route
+  to render advised `--record-motion` unconditionally, including to the run
+  that recorded no pointer movement *with* that flag — an interaction of
+  clicks on already-hovered controls — leaving no next step. The remedy is
+  named from the run.
+
+- **A library caller got the motion refusal the command line gets.** Moving
+  the check off `Settings.__post_init__` — so that `--regenerate
+  --recorded-motion`, the combination recipes.md recommends, stops being
+  refused at construction — left it asked from `main()` alone, and `Recorder`
+  is public API: building one directly with a rendered-motion setting and no
+  `record_motion` was accepted and produced a script of silent teleports,
+  the outcome the check exists to prevent. `Recorder.start()` asks it now,
+  the one layer that knows a capture is beginning and that a regenerate never
+  reaches; the command line keeps its earlier call, which still refuses
+  before a session is opened.
+
+- **An elapsed reminder could print into the run summary.** Signalling the
+  reminder thread cannot stop a tick that has already left its wait, so a
+  recording stopped at that instant interleaved "still recording" into the
+  summary printed just after it, which the function's own docstring says
+  cannot happen. It is now joined, bounded.
+
+### Fixed (documentation, same round)
+
+- **The README still named the previous pyguitest release as the floor.**
+  The version this output is verified against moved with the pin, and two
+  statements did not — one of them quoting a requirement line that no longer
+  exists. The generated-floor guard only matches the "or newer" phrasing, so
+  it caught neither.
+
+- **Four more pages still presented `wait_for_window`/`activate_window` as
+  generated output** — the same stale-call drift this change set fixed in the
+  README and getting-started. The new guard reads only `gui.`-prefixed calls
+  out of a real script and does not cover `docs/developers/architecture.md`
+  at all, so none of them were caught.
+
 ### Added
 
 - **The keypad, Clear and the ISO section key are named on macOS.** The

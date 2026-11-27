@@ -20,7 +20,7 @@ from conftest import FakeResolver
 from pyguitest_recorder.analyzer import Normalizer
 from pyguitest_recorder.backends import x11 as x11_module
 from pyguitest_recorder.backends.base import CaptureUnavailable, RawEvent
-from pyguitest_recorder.config import Settings
+from pyguitest_recorder.config import ConfigError, Settings
 from pyguitest_recorder.model import ElementRef, Recording
 from pyguitest_recorder.recorder import Recorder
 from pyguitest_recorder.stopkey import StopKey
@@ -84,6 +84,47 @@ def test_a_successful_start_opens_the_session_and_the_backend() -> None:
     assert backend.started
     assert recorder._session is session
     assert not session.closed
+
+
+def test_a_motion_setting_with_nothing_to_record_from_is_refused_here_too() -> None:
+    # `Recorder` is public API, so the command line is not the only capture
+    # path. The refusal lives on the record path rather than in
+    # `Settings.__post_init__` (so that `--regenerate --recorded-motion` is
+    # allowed), and `main()` is only one caller of it: a library caller
+    # building a Recorder directly got no refusal and a script of silent
+    # teleports, which is the outcome the check exists to prevent.
+    recorder = Recorder(settings=Settings(motion="recorded", record_motion=False))
+    with pytest.raises(ConfigError, match="needs record_motion"):
+        recorder.start()
+
+
+def test_that_refusal_comes_before_any_backend_or_session_is_opened() -> None:
+    # A configuration that cannot be served should cost nothing: no capture
+    # backend chosen, so no consent dialog and no device opened on the way to
+    # being told the setting is unusable.
+    recorder = Recorder(settings=Settings(motion="verbatim", record_motion=False))
+    with (
+        mock.patch("pyguitest_recorder.recorder.choose_backend") as chosen,
+        pytest.raises(ConfigError),
+    ):
+        recorder.start()
+    assert not chosen.called
+
+
+def test_a_regenerate_shaped_motion_setting_is_not_refused_on_the_record_path() -> None:
+    # The other half: `record_motion` on with a rendered-motion setting is
+    # exactly what a capture asking for waypoints looks like, and must start.
+    recorder = _recorder(FakeSession())
+    recorder.settings = Settings(
+        window_context=False,
+        element_context=False,
+        motion="recorded",
+        record_motion=True,
+    )
+    backend = FakeBackend(fails=False)
+    with mock.patch("pyguitest_recorder.recorder.choose_backend", return_value=backend):
+        recorder.start()
+    assert backend.started
 
 
 def test_the_session_is_not_leaked_when_the_backend_fails_to_start() -> None:

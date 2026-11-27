@@ -37,7 +37,7 @@ pyguitest-recorder --regenerate login.json -o login_test.py
 
 This is worth doing habitually for two reasons. Inference improves — a pause
 that rendered as `gui.wait(3.8)` last month may render as
-`wait_for_window(...)` today, and regenerating gets you that for free across
+`gui.expect_window(...)` today, and regenerating gets you that for free across
 every recording you ever made. And rendering is deterministic from the
 observations, never from the previous script, so regenerating the same file
 twice cannot compound artifacts.
