@@ -412,7 +412,10 @@ class Settings:
         self._validate_timeout_numbers()
         self._validate_timeout_ordering()
         self._validate_event_delay()
-        self._validate_motion_needs_record_motion()
+        # `validate_motion_for_capture` is deliberately *not* here: it is only
+        # true of a run that captures. See its own docstring, and `_validate_trim`
+        # in cli.py for the same shape -- a check that depends on the mode of
+        # invocation belongs where the mode is known.
         self._validate_check_key_is_not_the_stop_key()
         self._validate_header_needs_include_header()
         self._validate_exclude_windows()
@@ -488,8 +491,8 @@ class Settings:
                 "clamped to max_timeout regardless of what was observed"
             )
 
-    def _validate_motion_needs_record_motion(self) -> None:
-        """Reject `motion = "recorded"`/`"verbatim"` with nothing recorded to render.
+    def validate_motion_for_capture(self) -> None:
+        """Reject `motion = "recorded"`/`"verbatim"` with nothing being recorded.
 
         Both values render the pointer's own route -- `via` waypoints, or
         every position with its wait -- and that route only exists in a
@@ -499,6 +502,16 @@ class Settings:
         exactly as `motion = "teleport"` would -- indistinguishable from the
         setting having worked, except that the waypoints someone turned this
         on for are not there.
+
+        Called from the *record* path only, not from `__post_init__`, because
+        `record_motion` describes a capture that a `--regenerate` is not doing
+        and that its recording may already have performed. Asked at
+        construction, this refused `--regenerate session.json
+        --recorded-motion` outright -- the combination recipes.md recommends,
+        on a session recorded with motion -- and the spelling that worked was
+        to pass the capture flag to a run that captures nothing. The
+        regenerate path asks the recording instead: see
+        `_warn_motion_without_waypoints` in cli.py.
         """
         if self.motion in ("recorded", "verbatim") and not self.record_motion:
             raise ConfigError(

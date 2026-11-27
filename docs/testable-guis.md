@@ -161,7 +161,7 @@ gui.wait_until_gone(name="Saving…", timeout=10)
 ```
 
 `within=save_as` is doing real work there, and the recorder emits it for the
-same reason: `wait_for_window` hands back a `Window`, which is the handle for
+same reason: `expect_window` hands back a `Window`, which is the handle for
 geometry and placement and scopes nothing, so an unscoped
 `gui.text_field("Name")` searches the whole accessible tree and can answer
 with a field of that name in another window. `window_element` is the call

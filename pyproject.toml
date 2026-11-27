@@ -345,7 +345,7 @@ dependencies = [
     # one of those roles needs 0.29.0 and `validate()` against an older
     # pyguitest would reject it -- the floor earns its move rather than only
     # pairing with the profile.
-    "pyguitest>=0.29.0",
+    "pyguitest>=0.30.0",
     # tomllib is 3.11+; 3.10 reads the configuration file through tomli.
     "tomli>=2.0; python_version < '3.11'",
 ]

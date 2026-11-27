@@ -107,3 +107,62 @@ def test_a_library_too_old_for_a_symbol_is_a_clean_fallback(monkeypatch):
     with pytest.raises(OSError, match="too old"):
         _xkb._bind()
     assert XkbTranslator.create("us") is None
+
+
+class TestKeysymText:
+    """`keysym_text`: libxkbcommon's own table, for the blocks python-xlib skips.
+
+    `Xlib.XK.keysym_to_string` covers Latin-1 plus eight named control keys
+    and returns None for everything else -- its own source says the other
+    blocks "will have to wait" -- so a keystroke on a Cyrillic, Greek,
+    Hebrew, Arabic or Thai layout carried no text at all, was recorded as a
+    bare key *name*, and walked straight past redaction, since only a
+    `TextInput` carries the sensitive flag.
+    """
+
+    def test_a_cyrillic_keysym_answers_its_character(self):
+        from pyguitest_recorder.backends._xkb import keysym_text
+
+        if not keysym_text(0x61):  # no libxkbcommon on this box
+            pytest.skip("libxkbcommon is absent or has no keysym table")
+        assert keysym_text(0x6C6) == "ф"  # Cyrillic_ef
+
+    def test_a_keysym_naming_no_character_is_empty(self):
+        from pyguitest_recorder.backends._xkb import keysym_text
+
+        assert keysym_text(0xFFE1) == ""  # Shift_L
+
+    @pytest.mark.parametrize(
+        "keysym",
+        [
+            0xFE50,  # dead_grave, the block's first
+            0xFE6F,  # dead_currency, where the diacritics end
+            0xFE80,  # dead_a, the universal syllable-entry vowels
+            0xFE8C,  # dead_greek, where those end
+            0xFE90,  # dead_lowline, the German T3 additions
+            0xFE93,  # dead_longsolidusoverlay, where those end
+        ],
+    )
+    def test_every_dead_key_is_left_without_text(self, keysym):
+        # X11 delivers `dead_acute` then `e` and the *application* composes
+        # the result, so a recording that keeps them as two key events
+        # replays correctly against that same composition. Turning a dead key
+        # into text would both lose the accent and claim a character the
+        # keypress did not produce. The block is not contiguous, which an
+        # earlier range missed: it ran to 0xFE7F and left the last twelve
+        # keysyms to whatever libxkbcommon says about them.
+        from pyguitest_recorder.backends._xkb import keysym_text
+
+        assert keysym_text(keysym) == ""
+
+    def test_a_missing_library_is_empty_rather_than_an_error(self, monkeypatch):
+        # Every caller treats "" as "not a character", so nothing has to know
+        # whether the library was there.
+        from pyguitest_recorder.backends import _xkb
+
+        monkeypatch.setattr(_xkb, "_keysym_to_utf8", None)
+        monkeypatch.setattr(
+            _xkb.ctypes, "CDLL", mock.Mock(side_effect=OSError("no such library"))
+        )
+        assert _xkb.keysym_text(0x61) == ""
+        assert _xkb._keysym_to_utf8 is False

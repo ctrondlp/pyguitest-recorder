@@ -47,6 +47,32 @@ def clock(monkeypatch):
     return made
 
 
+OWN_PID = 424242
+"""What every test here means by "the process the recorder is running in".
+
+Not a real pid, which is the point: see `own_pid`."""
+
+
+@pytest.fixture(autouse=True)
+def own_pid(monkeypatch):
+    """Pin this process's pid, so no fake window can be mistaken for it.
+
+    `DesktopResolver` refuses to resolve a window belonging to its own
+    process -- the recorder never records itself -- and the windows here carry
+    made-up pids, `FakeWindow`'s 1234 above all. On a box where the test
+    process genuinely *is* pid 1234 the whole file inverts: every point
+    resolves to no window, because the resolver is correctly declining to
+    attribute clicks to itself. Twenty-four tests with nothing to do with pids
+    then fail, which is what the macOS CI runner did on 2026-11-27.
+
+    Patched here rather than by picking a larger fake pid, because no literal
+    is out of reach on every platform -- Linux allows pids past four million.
+    The patch is `os.getpid` itself, so the tests that build a window or an
+    ancestry out of "this process" read the same answer the resolver does.
+    """
+    monkeypatch.setattr(resolver_module.os, "getpid", lambda: OWN_PID)
+
+
 class FakeWindow:
     def __init__(self, title="Example", app_id="org.example.App", pid=1234):
         self.title = title

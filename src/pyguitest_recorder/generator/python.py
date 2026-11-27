@@ -54,7 +54,7 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
 from ..model import (
@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.29"
+PROFILE = "pyguitest-0.30"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.29.0"
+FLOOR = "0.30.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -249,6 +249,16 @@ emitted API, not only a pairing step: `_ROLE_CONSTANTS` now renders
 introduced there, so a generated script that names one of those roles -- a
 Qt popup menu, a menu bar, a tooltip resolved under the pointer -- needs
 0.29.0 and `validate()` against an older one would reject it.
+
+0.30.0 is a pairing step, not new emitted API: nothing here renders a call
+that release introduced. It does change what one emitted construct *does* on
+a Mac, which is the kind of thing a floor exists to pin -- an AltGr chord,
+which `_sendkeys_modifiers` spells `&(…)`, used to type a literal ampersand
+into the application there because `macquartz` had no entry for the sigil and
+the character fell through to the literal path. 0.30.0 refuses it instead. A
+script generated here and replayed under 0.29.0 on macOS therefore does the
+wrong thing silently where this floor does it loudly, which is reason enough
+for the step on its own.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached
@@ -466,7 +476,7 @@ _ROLE_CONSTANTS = {
 _RESERVED = frozenset({"gui", "pyguitest", "os", "re", "time", "Capability", "Role"})
 """Names the generated module binds itself, which a window must not take.
 
-A window titled "gui" would otherwise produce `gui = gui.wait_for_window(...)`,
+A window titled "gui" would otherwise produce `gui = gui.expect_window(...)`,
 rebinding the session over itself. That compiles, passes validation, and then
 fails several lines later with an unrelated AttributeError.
 """
@@ -858,6 +868,28 @@ class GeneratorOptions:
     "looks like a bug" failure this release's rounding change existed to remove.
     """
     redact_sensitive: bool = True
+
+    sensitive: bool = False
+    """Treat every typed run as secret, whatever the element under it said.
+
+    `Settings.sensitive`, read here rather than only by the capture-time
+    normalizer, because redaction is a *generation* step: `--sensitive` on a
+    `--regenerate` has to withhold the text, and before this field existed it
+    silently did nothing. That asymmetry was the dangerous way round -- the
+    flag that writes a secret into the script as a literal (`--no-redact`)
+    took effect on a regenerate because it lives here, while the two that
+    withhold one did not, so the only privacy flag that reached a regenerated
+    script was the one that weakens it. A recording whose password field the
+    accessibility tree never published as one -- the case
+    `_note_unidentified_text` exists for, and the case its own advice sends a
+    reader to `--sensitive` for -- could therefore not be scrubbed at all
+    without performing the whole interaction again.
+
+    Keyed per event through `_is_secret` rather than consulted at each use,
+    so `TextInput.sensitive` (one recognised password field) and this (every
+    run) answer one question in one place.
+    """
+
     include_header: bool = True
 
     header: str = ""
@@ -1834,9 +1866,23 @@ class PythonGenerator:
         state.lines.append(f"gui.wait({gap:.3f})")
 
     def _emit_comment(self, event: Comment, state: _State) -> None:
-        """Render a standalone comment."""
-        if self.options.comments:
-            state.lines.append(f"# {_one_line(event.text)}")
+        """Render a standalone comment, wrapped the way every other one is.
+
+        Through `_comment` rather than appending the line itself, for the
+        reason that function's own docstring gives: a comment is opaque to
+        `ruff format`, so an unwrapped one is the only thing in a generated
+        file that can run past the line limit. That stopped being theoretical
+        when the normalizer began emitting a `Comment` of its own -- its
+        "a key was pressed here that this recording could not name" is 143
+        characters, which came out as a single 151-character line in every
+        script that held an unnamed key.
+
+        `_one_line` still runs first: `textwrap.wrap` would otherwise be
+        handed the line break that makes a comment end and code begin (see
+        `_one_line`), and collapsing it here keeps that guarantee ahead of
+        the wrapping rather than relying on it.
+        """
+        self._comment(_one_line(event.text), state)
 
     def _emit_pause(self, event: Pause, state: _State) -> None:
         """Render an explicit sleep, which is always a last resort."""
@@ -2556,18 +2602,36 @@ class PythonGenerator:
             return
         renderer(event, state)
 
+    def _described(self, event: Assertion) -> Assertion:
+        """`event` as this generator has decided to treat it, for describing.
+
+        `describe_assertion` reads the event's own `sensitive` flag and
+        nothing else, which is right for the live console but wrong here as
+        soon as `options.sensitive` makes a run secret that the normalizer
+        did not mark. Without this the *call* was redacted to `SECRET_1`
+        while the `# Check:` comment beside it still printed the expected
+        text in clear -- a leak inside the redaction, and in the one output
+        a reader scans first.
+        """
+        if self._is_secret(event) and not event.sensitive:
+            return replace(event, sensitive=True)
+        return event
+
     def _check_text(self, event: Assertion, state: _State) -> None:
         """Render a check that an element still reads what it read when recorded."""
         element = event.target.element
         if element is None:
-            state.warnings.append(describe_assertion(event))
+            state.warnings.append(describe_assertion(self._described(event)))
             return
-        if event.sensitive and self.options.redact_sensitive:
+        if self._is_secret(event) and self.options.redact_sensitive:
             expected = self._secret_name(state)
         else:
             expected = _literal(str(event.expected))
         self._check_comment(
-            describe_assertion(event, redact_sensitive=self.options.redact_sensitive),
+            describe_assertion(
+                self._described(event),
+                redact_sensitive=self.options.redact_sensitive,
+            ),
             state,
         )
         self._expect("expect_text", element, state, f"equals={expected}")
@@ -2774,7 +2838,7 @@ class PythonGenerator:
         a field that already held text it is a different act from the one
         recorded, and the keystrokes themselves are what reproduces it.
         """
-        if event.sensitive:
+        if self._is_secret(event):
             text = self._secret(event, state)
             # Said at the point of use, not only in the binding block at the
             # top: a reader scanning the body should not have to work out why
@@ -2782,13 +2846,25 @@ class PythonGenerator:
             # An event that carries its own note says *why* (the recorder was
             # too far behind to know the field), which the password wording
             # here would contradict.
-            self._comment(
-                "the text itself was never written here"
-                if event.note
-                else "this went into a password field, so the text itself was "
-                "never written here",
-                state,
-            )
+            #
+            # So does `options.sensitive`, for the same reason one step over:
+            # the flag is the caller declaring every run secret, *not* the
+            # accessibility tree reporting a password field -- so claiming
+            # the role is a claim nothing here can support, and a reader who
+            # goes looking for the password field will not find one.
+            if event.note:
+                why = "the text itself was never written here"
+            elif not event.sensitive:
+                why = (
+                    "every typed run in this script is withheld (--sensitive), "
+                    "so the text itself was never written here"
+                )
+            else:
+                why = (
+                    "this went into a password field, so the text itself was "
+                    "never written here"
+                )
+            self._comment(why, state)
         else:
             text = _literal(event.text)
         element = event.target.element if event.target else None
@@ -2922,7 +2998,7 @@ class PythonGenerator:
         than none, since what this exists to make a reader do is check the file
         for a secret the recorder could not have known about.
         """
-        if event.sensitive or not self.options.redact_sensitive:
+        if self._is_secret(event) or not self.options.redact_sensitive:
             return
         element = event.target.element if event.target else None
         if element is not None and element.name:
@@ -2936,6 +3012,23 @@ class PythonGenerator:
         )
         if warning not in state.warnings:
             state.warnings.append(warning)
+
+    def _is_secret(self, event: TextInput | Assertion) -> bool:
+        """Whether this event's text is to be treated as a secret.
+
+        Either the normalizer recognised the field it went into (the event's
+        own flag, set from the `password text` role) or the caller declared
+        every run secret (`options.sensitive`). One predicate for both so a
+        new use site cannot honour one and miss the other, which is how
+        `--sensitive` came to be inert on `--regenerate`.
+
+        `event.sensitive` directly, not through `getattr`: both types in the
+        annotation declare the field, so a default would only swallow a
+        rename or a typo -- and swallowing it would answer "not secret" for
+        every event, which is the one wrong answer that writes text into the
+        script.
+        """
+        return bool(event.sensitive or self.options.sensitive)
 
     def _secret(self, event: TextInput, state: _State) -> str:
         """Render sensitive input as an environment lookup, never as a literal."""
@@ -3936,9 +4029,32 @@ def _header(
     # calls were checked against, and this says which recorder wrote them --
     # which is the question asked first when a generated script turns out to
     # have a bug in its own shape rather than in the application.
+    #
+    # "Wrote them" is the *running* version, which is what that question is
+    # about. It used to be `env.recorder_version`, stamped at capture, so a
+    # `--regenerate` -- the workflow recipes.md calls habitual -- produced a
+    # file claiming to have been written by whichever recorder had recorded
+    # the session, possibly years and several output changes earlier. The
+    # capture-time version is a real fact too, and keeps its own line below
+    # whenever it differs, beside the other things that describe the
+    # recording rather than this file (`Recorded at/on`, `Capture`,
+    # `pyguitest`).
+    #
+    # Imported here rather than at module scope: the package's `__init__`
+    # imports this module (for `ValidationError`) before it binds
+    # `__version__`, so a top-level import of it would be circular.
+    from .. import __version__  # noqa: PLC0415
+
     parenthetical = ", ".join(p for p in (plain_name(env.compositor), env.desktop) if p)
     detail = [
-        f"Recorder:    pyguitest-recorder {env.recorder_version or 'unknown'}",
+        f"Recorder:    pyguitest-recorder {__version__}",
+    ]
+    if env.recorder_version and env.recorder_version != __version__:
+        detail.append(
+            f"Recorded by: pyguitest-recorder {env.recorder_version} "
+            "(regenerated by the version above)"
+        )
+    detail += [
         f"Recorded at: {env.recorded_at or 'unknown'}",
         f"Profile:     {PROFILE}",
         f"Recorded on: {plain_name(env.session_type) or 'unknown'} "

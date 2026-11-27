@@ -138,7 +138,7 @@ decided when it is recorded:
 |---|---|
 | `gui.button("Save").click()` and other named elements | The portable case. AT-SPI answers the same under X11 and Wayland |
 | `gui.move_mouse(x, y)` and window-relative coordinates | Needs pointer and window-geometry capabilities the compositor may not grant |
-| `gui.activate_window(...)`, `wait_for_idle(win.pid)` | Compositor-tier: available on some desktops, absent on others |
+| `gui.focus_window(...)`, `gui.wait_for_idle(win.pid)` | Compositor-tier: available on some desktops, absent on others |
 | `gui.expect_window(app_id=...)` | **Protocol-specific.** An id recorded through XWayland is the `WM_CLASS` class; the same application running natively publishes a different one, and the match is exact |
 
 That last row is the one that bites in practice, because it is the case where
@@ -276,7 +276,7 @@ everything else here gets:
 - among that process's windows, the one the element's own accessible ancestry
   names. Taking the first is how a recording announces a window nothing was
   done in: zenity owns both its dialog and a window called "zenity", and the
-  live run that found this generated a stray `wait_for_window("zenity")` for
+  live run that found this generated a stray `gui.expect_window("zenity")` for
   typing that went into the dialog.
 
 The last clicked text field remains the fallback wherever focus cannot be
@@ -348,8 +348,8 @@ raises `NameError` on its first run is not much better.
 
 What is saved in a `--save-session` recording is what was *observed*: events,
 the windows and elements they resolved to, and the pauses between them. The
-rules that turn a pause into `wait_for_window` rather than `gui.wait(...)` run
-when a script is generated.
+rules that turn a pause into `gui.expect_window` rather than `gui.wait(...)`
+run when a script is generated.
 
 Two things follow. `--regenerate` re-analyzes an old recording under whatever
 rules exist now, so an improvement to inference improves every recording ever

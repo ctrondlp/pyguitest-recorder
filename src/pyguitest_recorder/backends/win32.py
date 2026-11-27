@@ -106,7 +106,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from .base import CaptureUnavailable, RawEvent
+from .base import CaptureUnavailable, RawEvent, pending_from
 
 __all__ = ["Win32CaptureBackend", "available", "unavailable_reason"]
 
@@ -493,6 +493,8 @@ def _declare_user32(lib: Any) -> None:
     lib.PostThreadMessageW.restype = ctypes.c_int
     lib.GetForegroundWindow.argtypes = ()
     lib.GetForegroundWindow.restype = ctypes.c_void_p
+    lib.GetCursorPos.argtypes = (ctypes.POINTER(_POINT),)
+    lib.GetCursorPos.restype = ctypes.c_int
     lib.GetWindowThreadProcessId.argtypes = (
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_ulong),
@@ -1102,6 +1104,11 @@ class Win32CaptureBackend:
         self._wheel = _WheelAccumulator()
         self._altgr_announced = False
         self._altgr_down = False
+        # Last pointer position the mouse hook reported, for stamping key
+        # events with -- see `_pointer_now` and `_translate_mouse`. Seeded
+        # from `GetCursorPos` in `start`, so a recording that begins with a
+        # keystroke still carries a real position rather than (0, 0).
+        self._pointer: tuple[int, int] | None = None
 
     def start(self) -> None:
         """Install both hooks and begin pumping their thread's message queue.
@@ -1145,6 +1152,10 @@ class Win32CaptureBackend:
             )
         self._reset_input_state()
         self._state.seed(lib)
+        # Beside the keyboard shadow's own seed, and for the same reason: both
+        # read the real state of an input device once, here, so the first event
+        # of the recording is not described against a default.
+        self._seed_pointer()
         self._keyboard_proc = _HOOKPROC(self._on_keyboard_event)
         self._mouse_proc = _HOOKPROC(self._on_mouse_event)
         self._ready.clear()
@@ -1496,10 +1507,21 @@ class Win32CaptureBackend:
                 self._state.press(vk_code)
             else:
                 self._state.release(vk_code)
+        # Stamped with the pointer for the reason set out in the wayland
+        # backend's `_decode_key`: the analyzer reads a *key* event's
+        # coordinates for the check key's "whatever the pointer is over"
+        # (`inspect`), for `_key_target`'s window attribution, and for
+        # `_text_target`'s last resort. `KBDLLHOOKSTRUCT` carries no position
+        # of its own, so this is the tracked one -- `GetCursorPos` at `start`
+        # and every mouse message since.
+        key_x, key_y = self._pointer_now()
         self._queue.put(
             RawEvent(
                 kind="key_press" if pressed else "key_release",
                 timestamp=_now(),
+                x=key_x,
+                y=key_y,
+                screen=self.screen,
                 keysym=keysym,
                 text=text,
                 injected=injected,
@@ -1525,10 +1547,39 @@ class Win32CaptureBackend:
         if raw is not None:
             self._queue.put(raw)
 
+    def _seed_pointer(self) -> None:
+        """Read the cursor once, so a key event before any motion has a position.
+
+        `GetCursorPos` rather than a guess: Windows will answer exactly where
+        the pointer is, where the evdev Wayland backend can only seed its
+        delta track from the screen's centre. Called from `start`, off the
+        hook callbacks -- a syscall inside `_on_keyboard_event` would add
+        latency to every keystroke on the whole desktop, which is the budget
+        `low_level_hooks_timeout_ms` exists to protect.
+
+        Best-effort: a failure leaves `_pointer` None and the first real mouse
+        event fills it in, which is the state this backend shipped with.
+        """
+        lib = _user32()
+        if lib is None:
+            return
+        point = _POINT()
+        with contextlib.suppress(Exception):
+            if lib.GetCursorPos(ctypes.byref(point)):
+                self._pointer = (point.x, point.y)
+
+    def _pointer_now(self) -> tuple[int, int]:
+        """The last known pointer position, or the origin before one is known."""
+        return self._pointer if self._pointer is not None else (0, 0)
+
     def _translate_mouse(self, wparam: int, info: Any) -> RawEvent | None:
         """One `MSLLHOOKSTRUCT` -> a `RawEvent`, or None for an unmeant message."""
         now = _now()
         x, y, screen = info.pt.x, info.pt.y, self.screen
+        # Every mouse message carries `pt`, including the button and wheel
+        # ones, so this tracks the pointer for the key events to stamp with
+        # even when the pointer is never moved during the recording.
+        self._pointer = (x, y)
         injected = bool(info.flags & LLMHF_INJECTED)
         if wparam == WM_MOUSEMOVE:
             return RawEvent(
@@ -1621,6 +1672,10 @@ class Win32CaptureBackend:
             if isinstance(item, Exception):
                 raise CaptureUnavailable(str(item)) from item
             yield item
+
+    def pending(self) -> list[RawEvent]:
+        """What capture has delivered and nothing has consumed yet, oldest first."""
+        return pending_from(self._queue)
 
     def drain(self) -> Iterator[RawEvent]:
         """Yield what the hooks have already delivered, without waiting for more.

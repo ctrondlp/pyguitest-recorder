@@ -3,6 +3,395 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.23.0] — 2026-11-26
+
+From an ease-of-use and cross-platform review of both repositories. The
+findings share a shape: the record path has been polished live on seven
+boxes, while `--regenerate` — the workflow the docs call habitual — had
+been reasoned about on paper. Three of them were silent, which is what
+makes them the serious ones: the run exited 0 and the damage was only
+visible in the artifact it produced.
+
+### Fixed
+
+- **`--sensitive` and `--exclude-window` did nothing on a `--regenerate`,
+  while `--no-redact` worked — so the only privacy flag that reached a
+  regenerated script was the one that weakens it.** Both withholding flags
+  were read only by the capture-time normalizer, and `redact_sensitive`
+  alone was a generator option. A password typed into a field the
+  accessibility tree never published as `password text` is written into the
+  script as a literal, and the remedy the generated script's own warning
+  names, recipes.md states ("redaction is a generation step at all — so
+  that regenerating later can still produce a working script") and the
+  README repeats, is to regenerate with `--sensitive`. It silently changed
+  nothing. `sensitive` is now a `GeneratorOptions` field keyed per event
+  through one predicate, and `exclude_windows` joins the trim in the pass
+  ahead of analysis, so an already-captured recording can finally be
+  rendered without a password manager's window in it. The same argument
+  settings.py already used to refuse `sensitive` with `record_raw` — that
+  it "would keep in the clear every keystroke sensitive promised to
+  withhold" — simply had not been extended to this path. A regenerate still
+  never rewrites a session file, so the recording itself is unchanged.
+
+- **Key events carried no pointer position on the win32 and wayland
+  backends, and the analyzer reads one off them.** x11 has always passed
+  `root_x`/`root_y` and macOS its `_location()`; the other two left the
+  `RawEvent` defaults, so the coordinates were (0, 0). Three decisions read
+  them: the check key's "whatever the pointer is over", `_key_target`'s
+  window attribution, and `_text_target`'s last resort. So a check key
+  pointed at a result label inspected the top-left corner of the screen,
+  and every keystroke on Windows was attributed to whichever window sat
+  there — which the generator then wrote out as a `focus_window(...)` call,
+  the one call whose purpose is to stop keys reaching the wrong window.
+  win32 now tracks the cursor from `GetCursorPos` at start and every mouse
+  message after it; wayland stamps `_stamp()`, as its own button branch
+  already did. Invisible to CI, which is the other half of the lesson: the
+  shared fixture builds key events with no coordinates and the check-key
+  tests use a resolver whose single element spans the whole screen.
+
+- **No keystroke on a non-Latin-1 layout produced any text on X11, and the
+  characters leaked into the script as key names.**
+  `Xlib.XK.keysym_to_string` covers Latin-1 and eight named control keys —
+  its own source says the other blocks "will have to wait" — so Latin-2/3/
+  4/5, Cyrillic, Greek, Hebrew, Arabic and Thai all came back empty. Typing
+  Cyrillic recorded as a run of `tap_key("Cyrillic_pe")` calls, which
+  replay refuses on Windows and macOS, so the recording was unreplayable
+  off X11. Worse, redaction only covers a `TextInput`: a password typed on
+  such a layout walked straight past it and was spelled out one key name at
+  a time. Decoding now goes through libxkbcommon's own stateless keysym
+  table first (`_xkb.keysym_text`), falling back to python-xlib where the
+  library is absent or too old, which is the behaviour this backend had.
+  Dead keys are deliberately left without text: X11 delivers `dead_acute`
+  then `e` and the application composes the result, so keeping them as two
+  key events is what replays correctly.
+
+- **A chord on a non-Latin layout recorded the key as a hex number.** The
+  keysym *name* comes from this backend's own table, which falls back to hex
+  for a keysym it has no name for — and only the 'xf86', 'xkb', 'latin1' and
+  'miscellany' groups were loaded into it. Measured on a live X11 session
+  switched to `ru`: Ctrl plus the ф key recorded
+  `gui.send_keys('^({0x6c6})')`, where 0x6c6 is `Cyrillic_ef`. Every
+  per-script group python-xlib ships is loaded now, so Cyrillic, Greek,
+  Hebrew, Arabic, Thai, Katakana and the Latin-2/3/4 sets all name their
+  keys; the same session then records `'^({Cyrillic_ef})'`.
+
+  This is the *name* half of the text fix above, and only a chord needed it:
+  plain typing reads its character through libxkbcommon, which is why
+  `type_text('фыва')` was already right. pyguitest 0.30.0 carries the
+  matching half — it could not resolve `Cyrillic_ef` either, so without it
+  this change would only have moved the failure.
+
+- **A typed run was withheld as "possibly a password" on three of the four
+  backends, because only x11 implemented `pending()`.** The analyzer asks
+  for capture's unconsumed queue to decide whether a late focus read can be
+  trusted, and treats no answer as "assume focus moved" — so on Windows,
+  macOS and Wayland any typing that began more than the focus lag behind
+  consumption was dropped from the script and replaced with a secret
+  binding, where the same run on X11 was kept. The threshold is routinely
+  crossed: the resolver's own docstring puts a focus read at ~400ms on a
+  busy desktop and ~1.2s on KWin. `pending()` is now part of the capture
+  protocol with one shared implementation (`base.pending_from`) that all
+  four backends use.
+
+- **A touchpad-only Wayland seat stamped every event at the origin.** The
+  screen-centre seed the backend's notes promise lived inside the
+  relative-delta branch, so it was reached only once a relative device had
+  already moved — and a touchpad never delivers one: it is classified
+  pad-like by `BTN_TOOL_FINGER`, its ABS stream is dropped, and libinput
+  synthesizes `REL_X`/`REL_Y` in userspace above the device node. On a
+  laptop whose only pointer is its touchpad the tracked position therefore
+  stayed unset for the whole recording and every click, scroll and
+  keystroke resolved to whatever window sat at the top-left. The same hole
+  caught a plain mouse whose first event was a click with the pointer
+  already on target. `start` now seeds the position once the screen size is
+  known, which is what the notes already said happened.
+
+- **An unnamed key became a script that could not run.** The macOS backend
+  reports `keysym = ""` for a virtual keycode its table does not name — the
+  keypad, the ISO section key, the JIS keys — deliberately, saying that what
+  an unnamed key means is the normalizer's call. Nothing made that call, so
+  it became `KeyStroke(key="")` and rendered `gui.tap_key("")`, refused at
+  replay everywhere, or with a modifier held `gui.send_keys("^({})")`, which
+  raises outright. The normalizer now renders a comment saying a key was
+  observed there and is not reproduced. A keypad digit still types, because
+  it arrives with no name but with its character.
+
+- **A finished recording was lost when its output path could not be
+  written.** Neither the script nor the session path was touched until the
+  emit step at the very end, and only a missing directory got a clean
+  message — a read-only mount, a full disk or a quota surfaced as a
+  `PermissionError` traceback with every captured event already gone.
+  `--save-session`, the one the docs tell everyone to pass, was the likeliest
+  to be aimed at a share that could not take it. Both paths are now checked
+  before anything is captured, as a one-line refusal beside the trim's.
+
+- **A regenerated script's header named the recorder that recorded it, not
+  the one that wrote the file.** The line exists, by its own comment, to
+  answer "which recorder wrote them" when a script has a bug in its own
+  shape — and it was built from the capture-time environment, so every
+  regenerate misattributed itself, possibly by several output changes.
+  `Recorder:` is now the running version; the capture-time one keeps its own
+  `Recorded by:` line whenever it differs, beside the other facts that
+  describe the recording rather than the file.
+
+- **`--regenerate --recorded-motion` was refused, and the spelling that
+  worked was a capture flag.** `motion = "recorded"` was validated against
+  `record_motion` at construction, which describes a capture a regenerate is
+  not doing and whose recording may already have performed it — so the
+  combination recipes.md recommends was rejected, and the way through was to
+  pass `--record-motion` to a run that captures nothing. The check now runs
+  on the record path only; a regenerate asks the recording instead and notes
+  when it holds no motion to render.
+
+- **`--backend wayland` without the `[wayland]` extra reported a permissions
+  problem.** `available()` caught the capture error and returned a bare
+  False, which threw away the distinction, and the caller supplied the
+  permissions sentence for both causes — so a user who had installed the
+  package without its extra was told to grant machine-wide read access to
+  every input device, the most security-sensitive step in this tool, when
+  the fix was one pip command needing no privilege. There is now an
+  `unavailable_reason()`, as win32 and macos both have.
+
+- **`--sensitive` withheld the value from the script and then echoed it to
+  the terminal.** `announce_checks` prints each check as it is recorded
+  through the same `describe_assertion`, which reads the event's own flag and
+  nothing else -- so a run declared secret wholesale still printed the
+  expected text in clear on the console, in the one place a reader is
+  certainly looking at that moment. The flag now means the same thing in both
+  outputs.
+
+### Fixed (documentation)
+
+- **The headline sample showed two calls the generator has never written.**
+  `README.md` and `docs/getting-started.md` both presented
+  `gui.wait_for_window(...)` and `gui.activate_window(...)` as the output of
+  a recording. A window wait renders as `expect_window` -- the raising
+  sibling, because a replay that reaches the wait already knows the window
+  opens -- and a deliberate window switch as `focus_window`, which waits for
+  the window to settle, asks more than once and confirms the request was
+  honored. Both documented calls exist in pyguitest, so nothing failed at
+  replay and no check caught it; the reader comparing the page against their
+  own first recording is who it fails. The same samples also imported `Role`
+  without using it and were one capability short of the `require()` block the
+  generator emits. `tests/test_docs.py` now reads the window-call family out
+  of a real generated script, so a sample presented as generated output has
+  to be output the generator produces.
+
+### Fixed (from the CodeRabbit round on this change set)
+
+- **`--sensitive` redacted the check's value but not the comment beside
+  it.** `describe_assertion` reads the event's own `sensitive` flag and
+  nothing else, which is right for the live console and wrong once
+  `options.sensitive` makes a run secret the normalizer did not mark — so
+  the call came out as `SECRET_1` while the `# Check:` line above it printed
+  the expected text in clear. A leak inside the redaction, in the output a
+  reader scans first.
+
+- **`kscreen` was requested for X11 recordings too.** `_screen_info_members`
+  reads the *ambient* compositor, so an `xrecord` recording of a private X
+  display on a KWin box asked for a member the display's scoped environment
+  may not be able to build — and a named backend that cannot build takes the
+  whole composition down to one member, costing the recording its element
+  context. It is gated on a native-Wayland recording now, which is the only
+  path that consumes the scale.
+
+- **A recording with both context settings off said nothing about scale.**
+  No session is opened in that configuration, so nothing can report a scale
+  factor — but the coordinates still go into the script, and under
+  `locators = "absolute"` they are all a replay has. It notes that now
+  instead of returning silently.
+
+- **A regenerate was refused for an unwritable session path it never
+  writes.** `_regenerate` passes `save_session=False`, so checking
+  `session_file` there rejected a run whose script destination was fine.
+  That check is now scoped to the capture path.
+
+- **The unnamed-key branch skipped the action-boundary bookkeeping.** An
+  unnamed key is still a real keypress: it bounds a preceding click's effect
+  window and marks a held button as keyed, and returning ahead of that let
+  the effect pass attribute a selection the key caused to the click before
+  it.
+
+- **The ScreenCast cursor position is no longer divided by the scale.** That
+  conversion is right for the tracked position, which is built from DRM
+  physical pixels, but the cursor source reports `spa_meta_cursor.position`
+  in its stream's own space and nothing has established whether that space
+  is physical or logical. Halving an already-logical position would break a
+  correct answer, so the assumption is not made in either direction until
+  the space is measured.
+
+### Fixed (from the review round on this change set)
+
+- **A script holding an unnamed key ran past the line limit.** The comment
+  the normalizer now writes for a key it cannot name is longer than a
+  generated line is allowed to be, and `_emit_comment` appended it directly
+  instead of through `_comment` — the wrapper that exists because a comment
+  is opaque to `ruff format`, so an unwrapped one is the only thing in a
+  generated file that can exceed the limit. Every script with such a key
+  carried one over-long line.
+
+- **An output path that could be written was refused before capture.** The
+  new preflight rejected an existing file whose own mode was read-only, but
+  both writers create a temporary file in the directory and rename it into
+  place — which needs nothing at all on the target — so `--output` aimed at
+  a mode-0444 file in a writable directory aborted a run that would have
+  written perfectly well. The check also asked about the wrong directory for
+  a symlinked target, the one case it was most needed for: both writers
+  resolve the path first, because `os.replace` replaces the link, so a link
+  into a read-only mount passed the preflight and then failed with the whole
+  interaction already recorded.
+
+- **`--sensitive` claimed a password field that was not one.** The flag is
+  the caller declaring every typed run secret, not the accessibility tree
+  reporting a password field, and the comment beside a withheld run said
+  "this went into a password field" either way — sending a reader to look
+  for a field that does not exist. The wording now names the flag that
+  withheld it, as the event-level note already did.
+
+- **A capture with `--exclude-window` reported excluding nothing.** The
+  events are dropped as they arrive, so the second pass at emit time can
+  never remove any and the count was always zero — printed immediately
+  beside the recorder's own note saying how many events *were* withheld, it
+  read as the flag having done nothing. An explicit trim still reports its
+  zero, which is the answer to a `--from` or `--drop` that did not match
+  what the user expected.
+
+- **Part of X11's dead-key block was left to libxkbcommon.** The guard that
+  keeps a dead key from carrying text stopped at the end of the diacritics,
+  but the block is not contiguous: the universal syllable-entry vowels and
+  the German T3 additions sit above it and were unguarded, against the
+  guard's own stated intent.
+
+- **A recording holding no motion was told to pass a flag it was already
+  holding.** The note that explains why `motion = "recorded"` has no route
+  to render advised `--record-motion` unconditionally, including to the run
+  that recorded no pointer movement *with* that flag — an interaction of
+  clicks on already-hovered controls — leaving no next step. The remedy is
+  named from the run.
+
+- **A library caller got the motion refusal the command line gets.** Moving
+  the check off `Settings.__post_init__` — so that `--regenerate
+  --recorded-motion`, the combination recipes.md recommends, stops being
+  refused at construction — left it asked from `main()` alone, and `Recorder`
+  is public API: building one directly with a rendered-motion setting and no
+  `record_motion` was accepted and produced a script of silent teleports,
+  the outcome the check exists to prevent. `Recorder.start()` asks it now,
+  the one layer that knows a capture is beginning and that a regenerate never
+  reaches; the command line keeps its earlier call, which still refuses
+  before a session is opened.
+
+- **An elapsed reminder could print into the run summary.** Signalling the
+  reminder thread cannot stop a tick that has already left its wait, so a
+  recording stopped at that instant interleaved "still recording" into the
+  summary printed just after it, which the function's own docstring says
+  cannot happen. It is now joined, bounded.
+
+### Fixed (documentation, same round)
+
+- **The README still named the previous pyguitest release as the floor.**
+  The version this output is verified against moved with the pin, and two
+  statements did not — one of them quoting a requirement line that no longer
+  exists. The generated-floor guard only matches the "or newer" phrasing, so
+  it caught neither.
+
+- **Four more pages still presented `wait_for_window`/`activate_window` as
+  generated output** — the same stale-call drift this change set fixed in the
+  README and getting-started. The new guard reads only `gui.`-prefixed calls
+  out of a real script and does not cover `docs/developers/architecture.md`
+  at all, so none of them were caught.
+
+### Added
+
+- **The keypad, Clear and the ISO section key are named on macOS.** The
+  table had no keypad at all, so `_key` reported an empty keysym for every
+  one of them — and `_typed` correctly refuses the `\r` keypad Enter sends
+  as text, so both fields came out empty and the normalizer had nothing to
+  name the press by (see the unnamed-key fix above). Measured on macOS
+  15.8.1 through `UCKeyTranslate` against the live layout rather than copied
+  from `Events.h`: every code produces exactly the character its name claims
+  ('0'–'9', '.', '*', '+', '/', '-', '=', ETX for `KP_Enter`, '§' for
+  `section`). Each name round-trips back to its own keycode through
+  pyguitest's own table, which gained the same entries. The four JIS keys
+  stay out: the same probe shows a non-JIS layout gives them no character,
+  so there is no reading from this keyboard that would justify them.
+
+- **A scaled Wayland desktop recorded coordinates in the wrong space, and
+  only the top-left corner of the screen mapped into the right one.** The
+  evdev backend works in DRM *physical* pixels; both consumers of its
+  coordinates work in the compositor's *logical* ones — the resolver
+  hit-tests them with `session.window_at`, and a generated script replays
+  them through pyguitest, whose own injection is logical. Measured end to
+  end on a Fedora 44 KWin session at 200%: asked to move the pointer to
+  logical (100, 100), capture observed physical (200, 200) — exactly the
+  scale factor apart. Unconverted, a click in the middle of the screen
+  resolved as if it were in the far corner, and anything in the lower-right
+  three quarters resolved to nothing at all. The whole test fleet is 1x,
+  which is why this had never shown up.
+
+  `set_scale` now tells the backend the factor and `_stamp` converts on the
+  way out, leaving the tracking itself physical because that is the space
+  the devices, the DRM mode, `_scale_abs` and the delta clamp all work in.
+  `Recorder.start` supplies the factor between opening its session and
+  starting capture, since it is the one object holding both — the same shape
+  as pyguitest's `_wire_atspi_window_geometry`. On the same live session the
+  three injected points came back 1:1 across the whole screen, and at scale
+  1 nothing changed and nothing was said.
+
+  Two cases it refuses rather than guesses, each with a note: a session that
+  reports no screen information at all (so a scaled desktop cannot be
+  detected), and a desktop mixing factors across outputs, which needs
+  per-output arithmetic that `Screen` carries no positions for. KDE used to
+  be the first of those — `kdotool+atspi` has no `SCREEN_INFO` provider —
+  which is why this round also asks for pyguitest 0.30.0's `kscreen` member
+  there.
+
+- **`drm_screen_size()` answered None on a desktop that had a perfectly
+  ordinary screen, and None is not harmless here.** It accepted only a
+  connector whose sysfs `enabled` flag says so, and on a Fedora 44 KWin box
+  running VMware's SVGA II adapter (`vmwgfx`) *every* connector reports
+  `enabled = disabled` — including the one driving the display, whose
+  `modes` correctly reads `1280x800` and agrees with `kscreen-doctor`.
+  Everything positional is guarded on that answer: `_scale_abs` leaves an
+  absolute device's raw absinfo values unscaled, `_flush` skips the delta
+  track entirely, and the screen-centre seed cannot engage — so `_stamp()`
+  answered (0, 0) for every click, scroll and keystroke on that box, which
+  is precisely the symptom the seed was added to remove. There is now a
+  three passes ordered by how far each signal can be trusted: `enabled` plus
+  a mode, then `status = connected` plus a mode, then any connector with a
+  mode at all — because answering None is the actively harmful outcome.
+
+  The ordering was earned rather than assumed. A first attempt put
+  "any connector with a mode" second, on the strength of "a disconnected
+  connector's `modes` file is empty"; Fedora 19 disproves that, publishing
+  `640x480` on all eight of its `Virtual-*` connectors while only one is
+  enabled, so a mode-only rule is right there by sort order alone. `status`
+  is the far narrower signal and goes ahead of it: measured on Debian 13 and
+  Omarchy, it tracks reality exactly. The strict first pass is unchanged, and
+  five live boxes answer through it — Debian 13, Omarchy on vboxvideo,
+  Pop!_OS/COSMIC, Ubuntu and a second vmwgfx box — so every path has
+  evidence behind it.
+
+- **A recording says how long it has been running, while it is running.**
+  Two reminders on stderr, then one every five minutes, each naming the stop
+  gesture and `--regenerate <session> --to <seconds>`; and the summary now
+  reports the recorded span beside the event count. The measured case this
+  answers is eight minutes left open that swallowed an unrelated editor
+  window and the text typed into it, after which nothing said the recording
+  had covered eight minutes rather than the twenty seconds intended.
+
+### Changed
+
+- **Profile and floor move to pyguitest 0.30.0**, as a pairing step rather
+  than for new emitted API — nothing here renders a call that release
+  introduced. It does change what one emitted construct does, which is what
+  a floor is for: an AltGr chord, spelled `&(…)`, used to type a literal
+  ampersand into the application on macOS, because `macquartz` had no entry
+  for the sigil and the character fell through to the literal path. 0.30.0
+  refuses it. A script generated here and replayed under 0.29.0 on a Mac
+  does the wrong thing silently where this floor does it loudly. Profile
+  `pyguitest-0.30`, floor and pin 0.30.0; CI's `pyguitest-floor` job stays
+  red until that release is on PyPI — release pyguitest first, as ever.
+
 ## [0.22.0] — 2026-11-25
 
 **The profile and floor move to pyguitest 0.29.0, and this time the step is

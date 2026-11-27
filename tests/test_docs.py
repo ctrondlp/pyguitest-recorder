@@ -29,8 +29,23 @@ from pathlib import Path
 from pyguitest_recorder.analyzer import SyncOptions, infer_synchronization
 from pyguitest_recorder.cli import build_parser
 from pyguitest_recorder.config import Settings
-from pyguitest_recorder.generator import FLOOR, PROFILE
-from pyguitest_recorder.model import Click, Pause, Target, WaitForWindow, WindowRef
+from pyguitest_recorder.generator import (
+    FLOOR,
+    PROFILE,
+    GeneratorOptions,
+    generate,
+)
+from pyguitest_recorder.model import (
+    Click,
+    ElementRef,
+    Environment,
+    Pause,
+    Recording,
+    Target,
+    WaitForWindow,
+    WindowActivate,
+    WindowRef,
+)
 
 _MAIN = WindowRef(
     title="Editor", app_id="org.x.Editor", pid=11, geometry=(0, 0, 800, 600)
@@ -151,6 +166,65 @@ def test_the_documented_timeout_example_is_the_scaling_the_analyzer_applies():
         assert (
             f"floor {options.min_timeout:g}s, cap {options.max_timeout:g}s" in text
         ), f"{page} quotes a floor or cap the analyzer does not apply"
+
+
+def test_pages_name_the_window_calls_the_generator_actually_writes():
+    """A sample presented as generated output has to be output it generates.
+
+    Both headline pages showed `gui.wait_for_window(...)` and
+    `gui.activate_window(...)` in the "what comes out" sample for an entire
+    edition. Neither is a call this generator has ever written: a window wait
+    renders as `expect_window` (the raising sibling, because a replay that
+    reaches the wait already knows the window opens) and a deliberate window
+    switch as `focus_window` (which waits for the window to settle, asks more
+    than once, and confirms the request was honored). Both documented calls
+    exist in pyguitest, so nothing failed at replay and no other check here
+    noticed -- a reader comparing the page against their own first recording
+    is what noticed.
+
+    So the window family is read out of a real generated script rather than
+    asserted as text. Only that family is checked: the pages also teach calls
+    a person adds by hand, which the generator is not expected to write.
+    """
+    window = WindowRef(title="Example", app_id="org.x.Example", pid=7)
+    recording = Recording(
+        events=[
+            WaitForWindow(window=window, timeout=10.0),
+            WindowActivate(timestamp=0.1, window=window),
+            Click(
+                timestamp=1.0,
+                target=Target(
+                    x=10,
+                    y=10,
+                    window=window,
+                    element=ElementRef(role="push button", name="Save"),
+                ),
+            ),
+        ],
+        environment=Environment(
+            session_type="x11",
+            compositor="mutter",
+            screens=(),
+            capabilities=(),
+            pyguitest_version=FLOOR,
+            notes=(),
+        ),
+        raw=(),
+        started_at=0.0,
+    )
+    generated = generate(recording, GeneratorOptions())
+    emitted = set(re.findall(r"\bgui\.(\w+)\(", generated))
+    assert {"expect_window", "focus_window"} <= emitted, (
+        "the generator no longer writes the window calls this test is about"
+    )
+
+    family = ("wait_for_window", "expect_window", "activate_window", "focus_window")
+    for page in _PAGES:
+        for name in re.findall(r"\bgui\.(\w+)\(", _read(page)):
+            if name in family:
+                assert name in emitted, (
+                    f"{page} shows gui.{name}(...), which the generator never writes"
+                )
 
 
 def test_no_page_calls_a_helper_the_old_way():

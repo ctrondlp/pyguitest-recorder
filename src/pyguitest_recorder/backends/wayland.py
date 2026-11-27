@@ -57,12 +57,12 @@ import contextlib
 import queue
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from ._xkb import XkbTranslator
-from .base import CaptureUnavailable, RawEvent
+from .base import CaptureUnavailable, RawEvent, pending_from
 
 if TYPE_CHECKING:
     from ._screencast import CursorSource
@@ -142,28 +142,85 @@ def _evdev() -> ModuleType:
 
 
 def drm_screen_size() -> tuple[int, int] | None:
-    """The current mode of the first enabled DRM connector, or None.
+    """The current mode of the DRM connector driving the display, or None.
 
     Read from sysfs because this backend deliberately has no display
     connection to ask: it is not an X client and must not become a Wayland
-    client. The first line of an enabled connector's `modes` is its current
-    mode -- confirmed against a live KWin session (`kscreen-doctor` and this
-    agreed on 1280x800). One screen is assumed; multi-monitor arithmetic is
-    the DPI/multi-monitor matrix's territory, not guessed at here.
+    client. The first line of a connector's `modes` is its current mode --
+    confirmed against a live KWin session (`kscreen-doctor` and this agreed
+    on 1280x800). One screen is assumed; multi-monitor arithmetic is the
+    DPI/multi-monitor matrix's territory, not guessed at here.
+
+    The `enabled` flag cannot be trusted on every driver. Measured on a
+    Fedora 44 KWin box running VMware's SVGA II
+    adapter (`vmwgfx`): *every* connector there reports `enabled =
+    disabled`, including `card0-Virtual-1`, which is the one actually
+    driving the display and whose `modes` correctly reads `1280x800`. So the
+    enabled-only filter answered None on a perfectly ordinary desktop -- and
+    None is not a harmless "unknown" here. Everything positional is guarded
+    on it: `_scale_abs` leaves an absolute device's raw absinfo values
+    unscaled, `_flush` skips the delta track entirely, and the screen-centre
+    seed in `start` cannot engage -- so `_stamp()` answered (0, 0) for every
+    click, scroll and keystroke on that box, which is exactly the symptom
+    the seed exists to prevent.
+
+    Three passes, in order of how much each signal can be trusted, because no
+    single one is reliable on every driver:
+
+    1. `enabled` says so, and the connector publishes a mode. The original
+       rule, so a machine whose flag is honest is answered exactly as before
+       -- measured honest on Debian 13, Omarchy (vboxvideo), Pop!_OS/COSMIC,
+       Ubuntu and a second vmwgfx box.
+    2. `status` says `connected`, and it publishes a mode. This is what
+       rescues the KWin/vmwgfx case above, and it is a far narrower guess
+       than pass 3: measured on Debian and Omarchy, `status` tracks reality
+       exactly (connected iff enabled iff publishing a mode).
+    3. Any connector publishing a mode at all. Kept as a last resort in case
+       a driver gets `status` wrong too, since answering None is the
+       actively harmful outcome.
+
+    Pass 3 is deliberately last rather than second, which an earlier version
+    of this had wrong on the strength of "a disconnected connector's `modes`
+    file is empty". Fedora 19 disproves that: all eight of its `Virtual-*`
+    connectors publish `640x480` while only `Virtual-1` is enabled, so a
+    mode-only rule picks whichever connector sorts first and is right there
+    only by luck.
     """
     import glob  # noqa: PLC0415
 
-    for status in sorted(glob.glob("/sys/class/drm/*/enabled")):
+    def read(path: str) -> str:
         try:
-            with open(status) as fh:
-                if fh.read().strip() != "enabled":
-                    continue
-            with open(status[: -len("enabled")] + "modes") as fh:
+            with open(path) as fh:
+                return fh.read().strip()
+        except OSError:
+            return ""
+
+    def mode_of(node: str) -> tuple[int, int] | None:
+        try:
+            with open(node + "/modes") as fh:
                 first = fh.readline().strip()
             width, height = first.split("x", 1)
             return int(width), int(height)
         except (OSError, ValueError):
-            continue
+            return None
+
+    nodes = sorted(
+        path[: -len("/enabled")] for path in glob.glob("/sys/class/drm/*/enabled")
+    )
+    # Annotated, because mypy reads a bare lambda in a typed context as an
+    # untyped call.
+    accepts: tuple[Callable[[str], bool], ...] = (
+        lambda node: read(node + "/enabled") == "enabled",
+        lambda node: read(node + "/status") == "connected",
+        lambda _node: True,
+    )
+    for accept in accepts:
+        for node in nodes:
+            if not accept(node):
+                continue
+            size = mode_of(node)
+            if size is not None:
+                return size
     return None
 
 
@@ -216,10 +273,46 @@ def _wants_device(e: Any, caps: dict[Any, Any]) -> bool:
 
 def available() -> bool:
     """Whether this machine can capture via evdev (devices readable now)."""
+    return unavailable_reason() is None
+
+
+def unavailable_reason() -> str | None:
+    """Why this machine cannot capture via evdev, or None if it can.
+
+    Two distinct failures kept apart, for the reason `win32.unavailable_reason`
+    and `x11.unavailable_reason` keep theirs apart: they look identical from
+    outside -- "the wayland backend is unavailable" -- and need opposite fixes.
+    python-evdev being absent is `pip install 'pyguitest-recorder[wayland]'`;
+    no readable device is a group membership or a udev ACL.
+
+    Before this existed `available()` caught `CaptureUnavailable` and returned
+    a bare False, which threw the distinction away, and the caller supplied the
+    permissions sentence for both. So a user who had installed the package
+    without its extra was told to grant machine-wide read access to every
+    input device -- the most security-sensitive step in this tool, and the one
+    the docs ask them to think hardest about -- when the actual fix was one
+    pip command that needs no privilege at all.
+    """
     try:
-        return bool(pick_devices())
+        _evdev()
+    except CaptureUnavailable as exc:
+        return (
+            f"{exc} -- install the extra that provides it: "
+            "pip install 'pyguitest-recorder[wayland]'"
+        )
+    try:
+        if not pick_devices():
+            return _NO_READABLE_DEVICE
     except CaptureUnavailable:
-        return False
+        return _NO_READABLE_DEVICE
+    return None
+
+
+_NO_READABLE_DEVICE = (
+    "no readable evdev input device -- the wayland backend reads "
+    "/dev/input/event*, which needs membership in the 'input' group or a udev "
+    "ACL (the same access pyguitest's uinput replay needs)"
+)
 
 
 class WaylandCaptureBackend:
@@ -286,6 +379,10 @@ class WaylandCaptureBackend:
         a touchpad's pad-local finger coordinates, a gamepad's sticks, a
         sensor's axes. Their button events still decode normally."""
         self._pos: tuple[int, int] | None = None  # pointer position, if known
+        # Compositor scale factor, 1.0 until `set_scale` is told otherwise.
+        # The tracked position above stays physical; this converts on the way
+        # out of `_stamp`. See `set_scale` for the measurement behind it.
+        self._scale = 1.0
         self._clock_offset = 0.0
         """Added to a kernel timestamp to rebase it onto `time.monotonic`.
 
@@ -378,6 +475,25 @@ class WaylandCaptureBackend:
         for dev in self._devices:
             self._use_monotonic_clock(dev)
             self._learn_abs_range(e, dev)
+        # The screen-centre seed the notes below promise, placed here rather
+        # than on the first relative delta. It used to live inside `_flush`'s
+        # `if dx or dy:`, which meant it was reached only once a *relative*
+        # device had already moved -- and a touchpad never delivers one:
+        # `_learn_abs_range` files it under `_padlike_fds` by BTN_TOOL_FINGER,
+        # `_decode` drops its ABS stream, and libinput synthesizes REL_X/REL_Y
+        # in userspace, above the device node. So on a laptop whose only
+        # pointer is its touchpad `_pos` stayed None for the whole recording
+        # and `_stamp` answered (0, 0) for every click, scroll and keystroke,
+        # all of which then resolved to whatever window sat at the top-left.
+        # The same hole caught a plain mouse whose first pointer event was a
+        # click, with the pointer already over its target -- the case
+        # `_learn_abs_range` seeds an absolute device against for this reason.
+        #
+        # After an absolute device has seeded from its own reported value this
+        # is a no-op, which is why it is guarded rather than unconditional.
+        if self._pos is None and self._screen_size is not None:
+            width, height = self._screen_size
+            self._pos = (width // 2, height // 2)
         # Layout-aware key decoding through libxkbcommon where it is present;
         # None falls back to the fixed US table in `_decode_key`.
         self._xkb = XkbTranslator.create()
@@ -599,6 +715,10 @@ class WaylandCaptureBackend:
             if item is None:
                 return
             yield item
+
+    def pending(self) -> list[RawEvent]:
+        """What capture has delivered and nothing has consumed yet, oldest first."""
+        return pending_from(self._queue)
 
     def drain(self) -> Iterator[RawEvent]:
         """Yield what is already buffered, without blocking."""
@@ -989,6 +1109,39 @@ class WaylandCaptureBackend:
         extent = self._screen_size[axis]
         return round((value - amin) * (extent - 1) / (amax - amin))
 
+    def set_scale(self, scale: float) -> None:
+        """Declare the compositor's scale factor, so events can be emitted logical.
+
+        Called by `Recorder.start` once its pyguitest session exists, which is
+        the only thing here that can ask: this backend reads `/dev/input`
+        below the compositor and deliberately holds no display connection, so
+        it has no way to learn a scale by itself.
+
+        **Why this is needed at all**, measured end to end on a Fedora 44 KWin
+        session at 200%: this backend works in DRM *physical* pixels, while
+        both consumers of its coordinates work in compositor *logical* ones --
+        the resolver hit-tests them with `session.window_at`, and the
+        generated script replays them through pyguitest, whose own injection
+        is logical. Asked to move the pointer to logical (100, 100), capture
+        observed physical (200, 200): the two spaces differ by exactly the
+        scale factor. Unconverted, only the top-left 1/scale of the screen
+        mapped into the resolver's space at all, and everything inside it was
+        attributed to the wrong place -- a click in the middle of the screen
+        resolved as if it were in the far corner.
+
+        1.0 leaves every coordinate exactly as before, which is what every
+        unscaled session gets and what a session whose scale cannot be
+        determined keeps.
+        """
+        if scale > 0:
+            self._scale = float(scale)
+
+    def _to_logical(self, x: int, y: int) -> tuple[int, int]:
+        """Physical device coordinates in the space the consumers work in."""
+        if self._scale == 1.0:
+            return x, y
+        return int(x / self._scale), int(y / self._scale)
+
     def _stamp(self) -> tuple[int, int]:
         """The position to put on an event, preferring the cursor source.
 
@@ -996,13 +1149,31 @@ class WaylandCaptureBackend:
         position it is the ground truth (the whole point of the opt-in), so it
         wins over the delta-tracked `_pos`; otherwise the tracked position, or
         (0, 0) before anything is known.
+
+        Converted to logical coordinates on the way out -- see `set_scale`.
+        The tracking itself stays physical, because that is the space the
+        devices and the DRM mode speak and the space `_scale_abs` and the
+        delta clamp have to work in; this is the one boundary where events
+        leave for consumers that speak the other one.
         """
         if self._cursor is not None:
             pos = self._cursor.position()
             if pos is not None:
                 self._cursor_stamped = True
+                # NOT converted. `_to_logical` divides by the compositor
+                # scale, which is right for the delta/absolute track below
+                # because that is built from DRM physical pixels -- but this
+                # comes from `spa_meta_cursor.position` on a ScreenCast
+                # stream, in that stream's own space, and nothing here has
+                # established whether that space is physical or logical. On
+                # a 200% session, dividing a position that was already
+                # logical would halve a correct answer. Left alone until the
+                # space is measured: the cursor path's own origin/scale
+                # mapping is an open question either way.
                 return pos
-        return self._pos if self._pos is not None else (0, 0)
+        if self._pos is None:
+            return 0, 0
+        return self._to_logical(*self._pos)
 
     def _decode_key(self, e: Any, ev: Any, ts: float, fd: int | None = None) -> None:
         code, val = ev.code, ev.value
@@ -1044,10 +1215,25 @@ class WaylandCaptureBackend:
                 self._held_shift = pressed
             keysym, text = keysym_and_text(code, self._held_shift)
             text = text if pressed else ""
+        # Stamped with the pointer, exactly as the button branch above is, and
+        # for a reason that is not about this backend: three decisions in the
+        # analyzer read a *key* event's coordinates. `inspect(raw.x, raw.y,
+        # raw.screen)` is what the check key asks about "whatever the pointer
+        # is over"; `_key_target` resolves the window a keystroke went to
+        # through `resolve_keyboard`; and `_text_target`'s last resort falls
+        # back to `_target(raw)`. x11 has always passed `root_x`/`root_y` here
+        # and macOS its `_location()`, while this backend and win32 left the
+        # `RawEvent` defaults -- so a check key pointed at a result label
+        # inspected screen pixel (0, 0) and every keystroke was attributed to
+        # whatever window sat at the top-left corner.
+        x, y = self._stamp()
         self._emit(
             RawEvent(
                 kind="key_press" if pressed else "key_release",
                 timestamp=ts,
+                x=x,
+                y=y,
+                screen=self._screen,
                 keysym=keysym,
                 text=text,
             )
@@ -1126,6 +1312,9 @@ class WaylandCaptureBackend:
             # tracked from the screen's centre once the screen is known, and
             # clamped to it -- degraded next to a true absolute device or the
             # cursor source, said so in the docs, and better than (0, 0).
+            # `start` owns the seed, so by here `_pos` is already set whenever
+            # the screen size is known; the fallback below is for the one case
+            # it is not, where clamping has no extent to clamp to anyway.
             if self._screen_size is not None:
                 w, h = self._screen_size
                 px, py = self._pos if self._pos is not None else (w // 2, h // 2)

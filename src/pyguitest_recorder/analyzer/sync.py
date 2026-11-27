@@ -15,7 +15,8 @@ were under the pointer at the time.
 The rules, in the order they are tried:
 
 1. The next action is in a window no earlier event saw. The user was waiting
-   for that window to open, so the pause becomes `wait_for_window`.
+   for that window to open, so the pause becomes a `WaitForWindow`, which
+   the generator renders as `gui.expect_window(...)`.
 2. The next action is on an element no earlier event saw, in a window that was
    already open. A dialog filled itself in, a list finished loading: the pause
    becomes `wait_for_element`.
@@ -433,7 +434,7 @@ def _window_key(window: WindowRef | None) -> str:
     of one application -- every TextEdit window on macOS, where it is the
     owning process's name, and every window of one WM_CLASS on X11 -- so it
     made a second window of the same application look already seen: no
-    `wait_for_window` where a pause had waited for it to open, and no raise
+    `WaitForWindow` where a pause had waited for it to open, and no raise
     when the recording moved back and forth between two of them. The title is
     safe in the key because the resolver pins it to what the window was first
     seen as (see `WindowRef`), so a drifting title does not split one window

@@ -1527,3 +1527,209 @@ class TestStopLifecycle:
         backend._run()
         backend.stop()
         assert list(backend.events()) == []
+
+
+class TestDrmScreenSizeReadsSysfs:
+    """`drm_screen_size` against the two shapes sysfs actually presents.
+
+    Everything positional in this backend is guarded on the answer:
+    `_scale_abs` leaves an absolute device's raw absinfo values unscaled
+    without it, `_flush` skips the delta track, and `start`'s screen-centre
+    seed cannot engage -- so None makes `_stamp()` answer (0, 0) for every
+    click, scroll and keystroke, which is the symptom the seed exists to
+    prevent.
+
+    The second shape was measured on a Fedora 44 KWin box running VMware's
+    SVGA II adapter (`vmwgfx`), where *every* connector reports `enabled =
+    disabled` including the one driving the display -- whose `modes` still
+    read `1280x800`, agreeing with `kscreen-doctor`. A Debian box on the same
+    driver reported the flag honestly, so both passes have to work.
+    """
+
+    def _sysfs(self, tmp_path, connectors):
+        """A fake /sys/class/drm. Values are (enabled, status, modes)."""
+        root = tmp_path / "drm"
+        root.mkdir()
+        for name, fields in connectors.items():
+            enabled, status, modes = fields
+            node = root / name
+            node.mkdir()
+            (node / "enabled").write_text(enabled)
+            (node / "status").write_text(status)
+            (node / "modes").write_text(modes)
+        return str(root / "*" / "enabled")
+
+    def _read(self, monkeypatch, pattern):
+        import glob as glob_module
+
+        real_glob = glob_module.glob
+        monkeypatch.setattr(
+            glob_module, "glob", lambda p: real_glob(pattern if "drm" in p else p)
+        )
+        return wayland_module.drm_screen_size()
+
+    def test_an_honest_enabled_flag_is_used(self, tmp_path, monkeypatch):
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("enabled\n", "connected\n", "1280x800\n1024x768\n"),
+                "card0-Virtual-2": ("disabled\n", "disconnected\n", ""),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1280, 800)
+
+    def test_a_connector_with_a_mode_is_used_when_no_flag_says_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        # The vmwgfx shape: nothing is flagged enabled, and the connector
+        # driving the display is the only one publishing a mode.
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "connected\n", "1280x800\n"),
+                "card0-Virtual-2": ("disabled\n", "disconnected\n", ""),
+                "card0-Virtual-3": ("disabled\n", "disconnected\n", ""),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1280, 800)
+
+    def test_an_enabled_connector_still_wins_over_a_merely_moded_one(
+        self, tmp_path, monkeypatch
+    ):
+        # The first pass is kept strictly ahead of the second, so a machine
+        # whose flag is honest cannot be answered from a stale connector.
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "connected\n", "640x480\n"),
+                "card0-Virtual-2": ("enabled\n", "connected\n", "1920x1080\n"),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1920, 1080)
+
+    def test_no_connector_with_a_mode_is_still_none(self, tmp_path, monkeypatch):
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "disconnected\n", ""),
+                "card0-Virtual-2": ("disabled\n", "disconnected\n", "\n"),
+            },
+        )
+        assert self._read(monkeypatch, pattern) is None
+
+    def test_status_is_preferred_over_a_bare_mode_when_enabled_lies(
+        self, tmp_path, monkeypatch
+    ):
+        # The refinement Fedora 19 earned: there, all eight connectors publish
+        # a 640x480 mode while only one is enabled, so "any connector with a
+        # mode" is right only by sort order. `status` narrows it properly --
+        # measured on Debian and Omarchy, status tracks reality exactly.
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "disconnected\n", "640x480\n"),
+                "card0-Virtual-2": ("disabled\n", "connected\n", "1280x800\n"),
+                "card0-Virtual-3": ("disabled\n", "disconnected\n", "640x480\n"),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1280, 800)
+
+    def test_a_mode_only_connector_is_still_the_last_resort(
+        self, tmp_path, monkeypatch
+    ):
+        # If a driver gets `status` wrong too, answering None is the actively
+        # harmful outcome -- everything positional in this backend is guarded
+        # on the size being known.
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "unknown\n", "1366x768\n"),
+                "card0-Virtual-2": ("disabled\n", "unknown\n", ""),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1366, 768)
+
+    def test_enabled_still_outranks_a_connected_sibling(self, tmp_path, monkeypatch):
+        pattern = self._sysfs(
+            tmp_path,
+            {
+                "card0-Virtual-1": ("disabled\n", "connected\n", "640x480\n"),
+                "card0-Virtual-2": ("enabled\n", "connected\n", "1920x1080\n"),
+            },
+        )
+        assert self._read(monkeypatch, pattern) == (1920, 1080)
+
+
+class TestLogicalCoordinateConversion:
+    """Captured physical pixels, emitted in the space the consumers use.
+
+    Measured end to end on a Fedora 44 KWin session at 200%: this backend
+    works in DRM physical pixels, while both consumers of its coordinates
+    work in compositor logical ones -- the resolver hit-tests them with
+    `session.window_at`, and a generated script replays them through
+    pyguitest, whose own injection is logical. Asked to move the pointer to
+    logical (100, 100), capture observed physical (200, 200): exactly the
+    scale factor apart. Unconverted, only the top-left 1/scale of the screen
+    mapped into the resolver's space at all.
+
+    With the conversion, the same live run captured (100, 100), (320, 200)
+    and (600, 380) for those three injected logical points -- 1:1 across the
+    whole screen, including the region that previously fell outside it.
+    """
+
+    def _backend(self, scale=None, pos=(200, 200)):
+        backend = object.__new__(wayland_module.WaylandCaptureBackend)
+        backend._scale = 1.0
+        backend._pos = pos
+        backend._cursor = None
+        backend._cursor_stamped = False
+        if scale is not None:
+            backend.set_scale(scale)
+        return backend
+
+    def test_an_unscaled_session_is_left_exactly_as_it_was(self):
+        # Every box in the test fleet is 1x; the conversion must be a no-op.
+        assert self._backend()._stamp() == (200, 200)
+
+    def test_a_doubled_session_halves_the_captured_position(self):
+        assert self._backend(scale=2.0)._stamp() == (100, 100)
+
+    def test_a_fractional_scale_divides_too(self):
+        assert self._backend(scale=1.25, pos=(250, 500))._stamp() == (200, 400)
+
+    def test_the_tracked_position_itself_stays_physical(self):
+        # The devices and the DRM mode speak physical, and `_scale_abs` and
+        # the delta clamp have to work in it; only the emit boundary converts.
+        backend = self._backend(scale=2.0)
+        assert backend._pos == (200, 200)
+        assert backend._stamp() == (100, 100)
+
+    def test_an_unknown_position_is_still_the_origin(self):
+        assert self._backend(scale=2.0, pos=None)._stamp() == (0, 0)
+
+    def test_a_nonsense_scale_is_refused_rather_than_applied(self):
+        # A zero or negative factor would divide by zero or mirror the screen.
+        backend = self._backend()
+        backend.set_scale(0)
+        backend.set_scale(-2)
+        assert backend._scale == 1.0
+        assert backend._stamp() == (200, 200)
+
+    def test_the_cursor_source_position_is_left_alone(self):
+        # Deliberately NOT converted. `_to_logical` divides by the compositor
+        # scale, which is right for the tracked position because that is
+        # built from DRM physical pixels -- but the cursor source reports
+        # `spa_meta_cursor.position` from a ScreenCast stream, in that
+        # stream's own space, and nothing has established whether that space
+        # is physical or logical. On a 200% session, dividing a position that
+        # was already logical would halve a correct answer, so the assumption
+        # is not made in either direction until the space is measured.
+        backend = self._backend(scale=2.0)
+
+        class _Cursor:
+            def position(self):
+                return (400, 600)
+
+        backend._cursor = _Cursor()
+        assert backend._stamp() == (400, 600)
+        assert backend._cursor_stamped is True
