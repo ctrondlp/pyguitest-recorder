@@ -21,6 +21,13 @@ def _settings(**overrides):
     return Settings(**overrides)
 
 
+def _raise_no_evdev():
+    """Stand in for `wayland._evdev` on a box without python-evdev."""
+    raise CaptureUnavailable(
+        "python-evdev is not installed or not usable on this platform"
+    )
+
+
 class TestAutoOnLinux:
     def test_auto_picks_xrecord(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
@@ -151,7 +158,7 @@ class TestAutoOnLinux:
     def test_naming_wayland_picks_it_when_devices_are_readable(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
         monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: True
+            "pyguitest_recorder.backends.wayland.unavailable_reason", lambda: None
         )
         monkeypatch.setattr(
             "pyguitest_recorder.backends.wayland.pick_devices", lambda: []
@@ -161,10 +168,30 @@ class TestAutoOnLinux:
     def test_naming_wayland_refuses_with_the_permission_reason(self, monkeypatch):
         monkeypatch.setattr(recorder_module.sys, "platform", "linux")
         monkeypatch.setattr(
-            "pyguitest_recorder.backends.wayland.available", lambda: False
+            "pyguitest_recorder.backends.wayland.unavailable_reason",
+            lambda: (
+                "no readable evdev input device -- needs membership in the "
+                "'input' group or a udev ACL"
+            ),
         )
         with pytest.raises(CaptureUnavailable, match="input.*group"):
             choose_backend(_settings(backend="wayland"))
+
+    def test_naming_wayland_says_pip_when_evdev_is_the_missing_piece(self, monkeypatch):
+        # The distinction the reason exists for: a package installed without
+        # its [wayland] extra needs a pip command, and telling that user to
+        # grant machine-wide read access to every input device sends them at
+        # the most security-sensitive step in the tool for no reason.
+        monkeypatch.setattr(recorder_module.sys, "platform", "linux")
+        monkeypatch.setattr(
+            "pyguitest_recorder.backends.wayland._evdev",
+            _raise_no_evdev,
+        )
+        with pytest.raises(CaptureUnavailable) as caught:
+            choose_backend(_settings(backend="wayland"))
+        message = str(caught.value)
+        assert "pyguitest-recorder[wayland]" in message
+        assert "input' group" not in message
 
     def test_wayland_refuses_an_explicit_display_before_recording(self, monkeypatch):
         # A setting the backend cannot honour is stated up front, not ignored:

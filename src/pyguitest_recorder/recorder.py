@@ -408,8 +408,10 @@ def _choose_wayland(settings: Settings) -> CaptureBackend:
     Like `_choose_macos`, the commonest unavailability is a permission rather
     than a missing dependency: `/dev/input/event*` is readable only to the
     `input` group (or via a udev ACL), the same tier pyguitest's own uinput
-    replay needs, so `available()` returning False usually means "add this user
-    to the `input` group" rather than "install something". The stop chord is
+    replay needs. "Commonest" is not "only", though, which is why this asks
+    `unavailable_reason()` for the sentence instead of supplying its own for a
+    bare False -- a package installed without its `[wayland]` extra has no
+    python-evdev and needs a pip command, not a privilege. The stop chord is
     not handed over: this backend does not recognise it mid-capture, so the
     consumer's own recogniser ends the recording (see backends/wayland.py).
 
@@ -420,7 +422,8 @@ def _choose_wayland(settings: Settings) -> CaptureBackend:
     the opaque per-event tag it is on every backend, so it is carried, not
     refused.
     """
-    from .backends.wayland import WaylandCaptureBackend, available
+    from .backends.wayland import WaylandCaptureBackend
+    from .backends.wayland import unavailable_reason as wayland_unavailable_reason
 
     if settings.display is not None:
         raise CaptureUnavailable(
@@ -430,12 +433,12 @@ def _choose_wayland(settings: Settings) -> CaptureBackend:
             'configuration, or record with backend = "xrecord" against that '
             "X server instead."
         )
-    if not available():
-        raise CaptureUnavailable(
-            "no readable evdev input device -- the wayland backend reads "
-            "/dev/input/event*, which needs membership in the 'input' group "
-            "or a udev ACL (the same access pyguitest's uinput replay needs)"
-        )
+    # Asked for the reason rather than a boolean: "python-evdev is missing"
+    # and "the devices are not readable" are opposite fixes, and this used to
+    # report the permissions one for both.
+    reason = wayland_unavailable_reason()
+    if reason is not None:
+        raise CaptureUnavailable(reason)
     cursor = None
     if settings.screencast_cursor:
         # Opt-in: the true cursor position via the ScreenCast portal, for a
@@ -761,6 +764,9 @@ class Recorder:
             if log.start():
                 self._effect_log = log
                 self._resolver.effects = log
+        # Between the session opening and capture starting, because only the
+        # session can answer and only capture needs the answer.
+        self._wire_capture_scale(opening)
         # Before capture starts, so that every window already open is known by
         # the title it had before anything was recorded into it -- see
         # `DesktopResolver.prime`.
@@ -794,6 +800,86 @@ class Recorder:
             # try/except-then-stop pattern one layer up.
             self.stop()
             raise
+
+    def _wire_capture_scale(self, opening: list[str]) -> None:
+        """Tell an evdev capture backend the compositor's scale factor.
+
+        The evdev backend reads `/dev/input` below the compositor and holds no
+        display connection, so it cannot learn a scale by itself -- but it
+        emits DRM *physical* pixels, while both consumers of those
+        coordinates speak compositor *logical* ones: this resolver hit-tests
+        them with `session.window_at`, and the generated script replays them
+        through pyguitest, whose own injection is logical. Measured on a
+        Fedora 44 KWin session at 200%: a move to logical (100, 100) was
+        captured as physical (200, 200), so the two spaces differ by exactly
+        the scale factor and an unconverted recording mapped only the
+        top-left quarter of the screen into the space it was resolved
+        against.
+
+        Wired here, the way pyguitest's own `_wire_atspi_window_geometry`
+        hands one member a capability a sibling has: the Recorder is the one
+        object holding both the capture backend and a pyguitest session.
+
+        Best effort, and silent when there is nothing to say. A session with
+        no `SCREEN_INFO` provider cannot be asked -- KDE was exactly that
+        case until pyguitest 0.30.0 added its `kscreen` member -- and a
+        failure here must not stop a recording that is perfectly fine on an
+        unscaled desktop, which is every desktop in the test fleet. An
+        unscaled answer is also silent: there is nothing for a reader to do
+        about a factor of 1.
+        """
+        backend = self._backend
+        setter = getattr(backend, "set_scale", None)
+        if setter is None:
+            # x11/win32/macos capture: nothing to wire, nothing to say.
+            return
+        if self._session is None:
+            # Both context settings off, so no session was opened and there
+            # is nothing here that can report a scale -- but the coordinates
+            # still go into the script, and under `locators = "absolute"`
+            # they are all a replay has. Said rather than skipped silently:
+            # on a scaled desktop they are larger than the logical space the
+            # replay injects into, by the factor nothing here can read.
+            opening.append(
+                "no desktop session was opened (window_context and "
+                "element_context are both off), so a scaled desktop cannot "
+                "be detected: on one, the captured coordinates in this "
+                "recording are larger than the space a replay injects into "
+                "by the scale factor. Turn one of the context settings on, "
+                "or record an unscaled session."
+            )
+            return
+        try:
+            screens = self._session.screens()
+        except Exception:  # noqa: BLE001 - no screen info is not an error here
+            opening.append(
+                "this session reports no screen information, so a scaled "
+                "desktop cannot be detected: on one, captured coordinates "
+                "would be larger than the space windows are reported in by "
+                "the scale factor, and clicks would be attributed to the "
+                "wrong window"
+            )
+            return
+        scales = {float(screen.scale) for screen in screens if screen.scale}
+        if not scales or scales == {1.0}:
+            return
+        if len(scales) > 1:
+            # Per-output scales need per-output arithmetic, which needs output
+            # *positions* -- and `Screen` deliberately does not carry them.
+            opening.append(
+                "this desktop mixes scale factors across outputs "
+                f"({', '.join(format(s, 'g') for s in sorted(scales))}), which "
+                "this recorder cannot correct for: coordinates are captured in "
+                "one space and resolved in another, so clicks on at least one "
+                "output will be attributed to the wrong window"
+            )
+            return
+        scale = scales.pop()
+        setter(scale)
+        opening.append(
+            f"this desktop is scaled {scale:g}x; captured coordinates are "
+            "converted to the logical space windows are reported in"
+        )
 
     def run(self) -> Recording:
         """Capture until the backend stops, returning the finished recording.
@@ -1337,7 +1423,54 @@ class Recorder:
             wanted.append(window)
         if self.settings.element_context:
             wanted.append(element)
+        # Only for a native-Wayland recording. An `xrecord` recording of a
+        # private X display on a KWin box would otherwise pick up `kscreen`
+        # too -- `_screen_info_members` reads the *ambient* compositor, while
+        # `_connect` composes under that display's scoped environment, where
+        # a named backend that cannot build takes the whole composition down
+        # to a single member and costs the recording its element context.
+        # The scale that member exists to supply is only consumed by the
+        # evdev backend anyway.
+        if self._on_wayland():
+            wanted.extend(self._screen_info_members(wanted))
         return tuple(wanted)
+
+    def _screen_info_members(self, wanted: list[str]) -> list[str]:
+        """A SCREEN_INFO provider to add, where this compositor needs one named.
+
+        `_wire_capture_scale` needs the compositor's scale factor, and the only
+        thing that can answer is a pyguitest session with SCREEN_INFO. Most
+        compositors already bring one in the members above: `gnomeshell` has
+        it on Mutter, and the `windows` group has it on the wlroots
+        compositors and COSMIC.
+
+        KWin is the exception, and the reason is the same one that makes
+        `_wayland_window_backend` name Mutter's backend directly: `kdotool`,
+        the window member there, reports no outputs and declines the
+        capability, so a `kdotool+atspi` session cannot be asked about screens
+        at all. pyguitest 0.30.0 added `kscreen` as a separate member for
+        exactly that gap, so it is named here when it is there to name.
+
+        Both conditions the backend's own factory checks are checked here too
+        -- the compositor, and whether the tool exists -- rather than naming it
+        hopefully: a *named* backend that cannot build fails the whole
+        composition, where the session is otherwise allowed to fall back to
+        one half or the other.
+        """
+        if not wanted:
+            return []
+        try:
+            import pyguitest
+            from pyguitest.backends.kscreen import available as kscreen_available
+            from pyguitest.session import Compositor
+
+            if pyguitest.detect().compositor is not Compositor.KWIN:
+                return []
+            if not kscreen_available():
+                return []
+        except Exception:  # noqa: BLE001 - detection is best-effort, as above
+            return []
+        return ["kscreen"]
 
     def _wayland_window_backend(self) -> str:
         """The pyguitest window backend for the compositor being recorded.

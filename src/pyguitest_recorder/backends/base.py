@@ -19,11 +19,18 @@ identically under Wayland — can feed the same normalizer.
 
 from __future__ import annotations
 
+import queue
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
-__all__ = ["RawEvent", "RawKind", "CaptureBackend", "CaptureUnavailable"]
+__all__ = [
+    "RawEvent",
+    "RawKind",
+    "CaptureBackend",
+    "CaptureUnavailable",
+    "pending_from",
+]
 
 RawKind = Literal[
     "motion",
@@ -107,6 +114,26 @@ class CaptureBackend(Protocol):
         nothing and returns immediately.
         """
 
+    def pending(self) -> list[RawEvent]:
+        """What capture has delivered and nothing has consumed yet, oldest first.
+
+        Read-only: the queue is left exactly as it was, because the consumer
+        is another thread and goes on taking from it. `pending_from` is the
+        implementation every backend here uses.
+
+        Part of the protocol rather than one backend's extra, because the
+        analyzer's answer changes when it is missing. `_focus_untrusted` asks
+        for this to decide whether a late focus read can be trusted, and with
+        no answer it has to assume the worst -- so on the three backends that
+        did not implement it, *any* typing that began more than the focus lag
+        behind consumption was dropped from the script and replaced with a
+        secret binding noting it might have been a password. The same run on
+        x11 was kept. The threshold is routinely crossed: the resolver's own
+        docstring puts a focus read at ~400ms on a busy desktop and ~1.2s on
+        KWin, so Windows, macOS and Wayland recordings were quietly losing
+        typed text that X11 recordings kept.
+        """
+
     @property
     def stop_pressed_at(self) -> float | None:
         """When the stop key completed, on the capture clock, or None.
@@ -122,3 +149,21 @@ class CaptureBackend(Protocol):
 
     def stop(self) -> None:
         """Stop capturing and release the display connection."""
+
+
+def pending_from(source: queue.Queue[Any]) -> list[RawEvent]:
+    """`CaptureBackend.pending` over a backend's own event queue.
+
+    A copy taken under the queue's own lock, leaving the queue exactly as it
+    was. Anything that is not a `RawEvent` is left out: the end-of-stream
+    marker and a pump's exception are not events, and the caller is asking
+    what input is waiting.
+
+    Shared rather than reimplemented per backend because all four keep a
+    plain `queue.Queue` and the answer has to mean the same thing on each --
+    the analyzer treats "no answer" as "assume focus moved", so a backend
+    that quietly lacked this cost its recordings their typed text.
+    """
+    with source.mutex:
+        queued = list(source.queue)
+    return [item for item in queued if isinstance(item, RawEvent)]

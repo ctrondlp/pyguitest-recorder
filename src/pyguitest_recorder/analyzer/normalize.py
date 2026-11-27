@@ -21,6 +21,7 @@ from ..backends.base import RawEvent
 from ..model import (
     Assertion,
     Click,
+    Comment,
     Drag,
     ElementRef,
     Event,
@@ -935,6 +936,42 @@ class Normalizer:
         for pending in self._held.values():
             if pending.keyed is None:
                 pending.keyed = raw.timestamp
+
+        # *After* the action-boundary bookkeeping above, not before it. An
+        # unnamed key is still a real keypress: it bounds a preceding click's
+        # effect window and marks a held button as keyed. Returning ahead of
+        # that let the effect pass attribute a selection this key caused to
+        # the click before it.
+        if not raw.keysym and not raw.text:
+            # The call the macOS backend's `_key` docstring leaves to this
+            # function: it sets `keysym` to "" for a virtual keycode its table
+            # does not name "rather than invented", and says what that means
+            # is the normalizer's call. Nothing made that call, so an unnamed
+            # key became `KeyStroke(key="")` and the generator rendered
+            # `gui.tap_key("")`, refused at replay on every backend -- or,
+            # with a modifier held, `gui.send_keys("^({})")`, which raises
+            # `ValueError: empty {} in send_keys`. Either way a recording
+            # produced a script that could not run.
+            #
+            # A comment rather than a silent drop: a script cannot press a key
+            # it has no name for, and the person reading it needs to know a
+            # keypress was observed there and is not reproduced. The empty
+            # `text` half of the condition matters -- a keypad digit arrives
+            # with no keysym but *with* its character, and the text path below
+            # replays it correctly as typing.
+            out = self._flush_text()
+            out.append(
+                Comment(
+                    timestamp=self._at(raw),
+                    text=(
+                        "a key was pressed here that this recording could not "
+                        "name, so it is not replayed -- the capture backend "
+                        "reported no key name and no text for it"
+                    ),
+                    origin=Origin.OBSERVED,
+                )
+            )
+            return out
         active = self._mods - _TEXT_SAFE
         # Shift and AltGr make text, so with a key that *has* text they are not
         # a command. With one that has none -- Left, Home, Tab, Return, F-keys --

@@ -71,7 +71,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..stopkey import StopKey
-from .base import CaptureUnavailable, RawEvent, RawKind
+from .base import CaptureUnavailable, RawEvent, RawKind, pending_from
 
 __all__ = ["MacosCaptureBackend", "available", "unavailable_reason"]
 
@@ -297,6 +297,42 @@ _KEYCODES: dict[int, str] = {
     124: "Right",
     125: "Down",
     126: "Up",
+    # The keypad, Clear and the ISO section key. Absent before, so `_key` set
+    # `keysym` to "" for every one of them -- and `_typed` correctly refuses
+    # the `\r` keypad Enter reports as text, so *both* fields came out empty
+    # and the normalizer had nothing to name the press by. It emitted
+    # `KeyStroke(key="")`, which rendered `gui.tap_key("")`, refused at
+    # replay everywhere; under a held modifier it rendered
+    # `gui.send_keys("^({})")`, which raises outright.
+    #
+    # X11 keysym spellings, which is what the rest of this table uses and
+    # what `macquartz._key_name` resolves -- so a recorded keypad press now
+    # round-trips: `KP_Enter` here, `kp_enter` -> keycode 76 there.
+    #
+    # Measured on macOS 15.8.1 via `UCKeyTranslate` against the live layout,
+    # not copied from `Events.h`: each code produces exactly the character
+    # its name claims ('0'-'9', '.', '*', '+', '/', '-', '=', ETX for
+    # KP_Enter, '§' for section). The four JIS keys stay out, because the
+    # same probe shows a non-JIS layout gives them no character at all.
+    10: "section",
+    65: "KP_Decimal",
+    67: "KP_Multiply",
+    69: "KP_Add",
+    71: "Clear",
+    75: "KP_Divide",
+    76: "KP_Enter",
+    78: "KP_Subtract",
+    81: "KP_Equal",
+    82: "KP_0",
+    83: "KP_1",
+    84: "KP_2",
+    85: "KP_3",
+    86: "KP_4",
+    87: "KP_5",
+    88: "KP_6",
+    89: "KP_7",
+    91: "KP_8",
+    92: "KP_9",
 }
 """Virtual keycode -> X11 keysym name, for every key `macquartz` can press."""
 
@@ -852,6 +888,10 @@ class MacosCaptureBackend:
             if isinstance(item, Exception):
                 raise CaptureUnavailable(str(item)) from item
             yield item
+
+    def pending(self) -> list[RawEvent]:
+        """What capture has delivered and nothing has consumed yet, oldest first."""
+        return pending_from(self._queue)
 
     def drain(self) -> Iterator[RawEvent]:
         """Yield what the tap has already delivered, without waiting for more.

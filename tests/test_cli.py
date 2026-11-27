@@ -5,6 +5,7 @@ An unset flag that stays `None` is the mechanism by which the config file
 wins, and no end-to-end test would notice the difference.
 """
 
+import dataclasses
 import os
 import stat
 import sys
@@ -12,6 +13,7 @@ import sys
 import pytest
 
 from pyguitest_recorder.cli import (
+    _as_secret_as_asked,
     _generator_options,
     _stop_progress_message,
     _sync_options,
@@ -20,7 +22,15 @@ from pyguitest_recorder.cli import (
     main,
 )
 from pyguitest_recorder.config import Settings
-from pyguitest_recorder.model import Click, Recording, Target, WindowRef
+from pyguitest_recorder.model import (
+    Assertion,
+    Click,
+    ElementRef,
+    Recording,
+    Target,
+    WindowRef,
+    describe_assertion,
+)
 
 
 @pytest.fixture
@@ -1526,3 +1536,39 @@ class TestGeneratedScriptPermissions:
         script = tmp_path / "out.py"
         self._emit_to(script, recording)
         assert [p.name for p in tmp_path.iterdir()] == ["out.py"]
+
+
+class TestTheConsoleHonoursSensitive:
+    """`--sensitive` has to mean the same thing in the terminal and in the file.
+
+    `describe_assertion` reads the event's own flag, which is the normalizer's
+    answer about the field the text went into. `--sensitive` overrides that for
+    the whole run, and the generator applies it (`_described`); this is the
+    live console's half, which used to withhold the value from the script and
+    then echo it to the terminal as the check was recorded.
+    """
+
+    def _assertion(self):
+        return Assertion(
+            timestamp=0.0,
+            check="text",
+            expected="hunter2",
+            target=Target(x=1, y=1, element=ElementRef(role="text", name="Token")),
+        )
+
+    def test_without_the_flag_the_value_is_shown(self):
+        described = describe_assertion(
+            _as_secret_as_asked(Settings(), self._assertion())
+        )
+        assert "hunter2" in described
+
+    def test_with_the_flag_the_value_is_withheld(self):
+        described = describe_assertion(
+            _as_secret_as_asked(Settings(sensitive=True), self._assertion())
+        )
+        assert "hunter2" not in described
+        assert "matches the recorded value" in described
+
+    def test_an_already_sensitive_event_is_untouched(self):
+        event = dataclasses.replace(self._assertion(), sensitive=True)
+        assert _as_secret_as_asked(Settings(), event) is event

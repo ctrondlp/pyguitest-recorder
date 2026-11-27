@@ -26,7 +26,7 @@ from __future__ import annotations
 import ctypes
 from typing import Any
 
-__all__ = ["XkbTranslator"]
+__all__ = ["XkbTranslator", "keysym_text"]
 
 _XKB_KEY_UP = 0
 _XKB_KEY_DOWN = 1
@@ -94,6 +94,72 @@ def _declare(lib: Any) -> None:
     ]
     for unref in ("xkb_state_unref", "xkb_keymap_unref", "xkb_context_unref"):
         getattr(lib, unref).argtypes = [ctypes.c_void_p]
+
+
+_DEAD_KEYSYM_FIRST = 0xFE50
+_DEAD_KEYSYM_LAST = 0xFE7F
+"""X11's dead-key block, deliberately left without text -- see `keysym_text`."""
+
+# Tri-state: None before the first attempt, False once the library or the
+# symbol has been found absent, otherwise the bound function.
+_keysym_to_utf8: Any = None
+
+
+def keysym_text(keysym: int) -> str:
+    """The character an X keysym produces, through libxkbcommon's own table.
+
+    Bound separately from `_bind`, and deliberately not through it: this is
+    `xkb_keysym_to_utf8`, a stateless call needing no context, keymap or
+    state, and it is far older API than `xkb_state_key_get_utf8` -- so a
+    library too old for the translator (Fedora 19, see `_bind`) can still
+    answer this. Measured on exactly that box, which is the oldest in the
+    fleet: `xkb_state_key_get_utf8` is absent and `XkbTranslator.create()`
+    correctly returns None, while `xkb_keysym_to_utf8` is present and
+    `_printable(0x06c6)` answers 'ф'. Had this been bound through `_bind`
+    instead, that box would have fallen back to python-xlib and recorded a
+    Cyrillic layout as key names again -- which is the whole failure this
+    function exists to remove. Returns "" when the library is absent, the symbol is
+    missing, or the keysym names no character, so every caller can treat an
+    empty string as "not a character" and nothing has to know which.
+
+    Exists because `Xlib.XK.keysym_to_string` covers only Latin-1 plus eight
+    named control keys -- its own source says so, and says the other blocks
+    "will have to wait". Everything in the legacy blocks therefore came back
+    None: Latin-2/3/4/5, Cyrillic, Greek, Hebrew, Arabic and Thai. On the
+    X11 backend that meant no keystroke on a non-US layout produced text at
+    all, so typing Cyrillic recorded as a run of bare key *names* that
+    generated `tap_key("Cyrillic_pe")` calls -- which replay refuses off
+    X11, and which bypass redaction entirely, since only a `TextInput`
+    carries the sensitive flag. A password typed on such a layout was
+    spelled out, one key name at a time.
+
+    The dead-key block is excluded on purpose. X11 delivers `dead_acute`
+    then `e` and the *application* composes the result, so a recording that
+    keeps them as two key events replays correctly against that same
+    composition, where turning the dead key into text would both lose the
+    accent and claim a character the keypress did not produce.
+    """
+    global _keysym_to_utf8
+    if _DEAD_KEYSYM_FIRST <= keysym <= _DEAD_KEYSYM_LAST:
+        return ""
+    if _keysym_to_utf8 is None:
+        try:
+            lib = ctypes.CDLL("libxkbcommon.so.0")
+            func = lib.xkb_keysym_to_utf8
+            func.restype = ctypes.c_int
+            func.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
+            _keysym_to_utf8 = func
+        except (OSError, AttributeError):
+            _keysym_to_utf8 = False
+    if not _keysym_to_utf8:
+        return ""
+    buf = ctypes.create_string_buffer(8)
+    # Returns the byte count *including* the NUL, so 1 means "no character";
+    # anything less than 1 is an error or a buffer too small for this keysym.
+    written = _keysym_to_utf8(keysym, buf, len(buf))
+    if written <= 1:
+        return ""
+    return buf.value.decode("utf-8", "replace")
 
 
 class XkbTranslator:

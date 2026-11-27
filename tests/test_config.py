@@ -207,8 +207,22 @@ def test_motion_recorded_or_verbatim_without_record_motion_is_rejected(motion):
     # Without record_motion there is no route in the recording for either
     # value to render -- every move comes out as a plain teleport, silently,
     # which is not what setting motion asked for.
+    #
+    # Asked of a capturing run specifically. Construction no longer refuses
+    # it, because `--regenerate` renders a recording whose motion was captured
+    # long before these settings existed -- see `validate_motion_for_capture`.
     with pytest.raises(ConfigError, match="record_motion"):
-        Settings(motion=motion, record_motion=False)
+        Settings(motion=motion, record_motion=False).validate_motion_for_capture()
+
+
+@pytest.mark.parametrize("motion", ["recorded", "verbatim"])
+def test_motion_without_record_motion_constructs_for_a_regenerate(motion):
+    # The combination recipes.md recommends for a regenerate: rendering a
+    # recorded route from a session that already holds one. It used to be
+    # refused at construction, so the only spelling that worked was passing a
+    # capture flag to a run that captures nothing.
+    settings = Settings(motion=motion, record_motion=False)
+    assert settings.motion == motion
 
 
 @pytest.mark.parametrize("motion", ["recorded", "verbatim"])

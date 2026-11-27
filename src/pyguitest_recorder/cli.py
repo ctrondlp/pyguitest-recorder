@@ -30,7 +30,15 @@ from .analyzer import SyncOptions, infer_synchronization
 from .backends.base import CaptureUnavailable
 from .config import ConfigError, Settings, config_paths, load_settings
 from .generator import PROFILE, GeneratorOptions, generate, validate
-from .model import Event, Origin, Recording, describe_assertion
+from .model import (
+    Assertion,
+    Event,
+    MouseMove,
+    Origin,
+    Recording,
+    describe_assertion,
+    excluded,
+)
 from .platforms import is_windows, plain_name
 from .recorder import (
     ContextReport,
@@ -409,6 +417,15 @@ def main(argv: list[str] | None = None) -> int:
         settings, source = load_settings(args.config)
         settings = settings.merged(**_overrides(args))
         _validate_trim(settings, args.trim_from, args.trim_to, args.drop)
+        if not args.regenerate:
+            # Only a run that captures can be asked to capture motion; a
+            # regenerate is answered from the recording instead, in `_emit`.
+            settings.validate_motion_for_capture()
+        if not args.doctor:
+            # `session_file` only on the capture path: `_regenerate` passes
+            # `save_session=False`, so a regenerate never writes one, and
+            # checking it there refused a run whose script path was fine.
+            _validate_writable_outputs(settings, session_file=not args.regenerate)
     except ConfigError as exc:
         print(f"pyguitest-recorder: {exc}", file=sys.stderr)
         return 2
@@ -466,6 +483,70 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
     values = {name: getattr(args, name, None) for name in names}
     values["session_file"] = args.save_session
     return values
+
+
+def _writable_path_problem(value: str, flag: str) -> str | None:
+    """Why this path cannot be written, or None if it probably can.
+
+    Checked rather than assumed, and as close to the real write as a check can
+    get without performing it: the directory has to exist, be a directory, and
+    be writable, and an existing file at the path has to be writable too.
+    `_write_script` and `Recording.save` both write through a temporary file in
+    the same directory, so directory permission is the one that decides.
+
+    Advisory by nature -- the mode can change between here and the write, and
+    on Windows `os.access` reports little about ACLs -- so this exists to
+    catch the ordinary mistakes (a typo'd directory, a read-only mount, a
+    path under a root-owned tree) rather than to make the write infallible.
+    """
+    path = Path(value)
+    parent = path.parent if str(path.parent) else Path(".")
+    if not parent.exists():
+        return f"{flag} {value!r}: the directory {str(parent)!r} does not exist"
+    if not parent.is_dir():
+        return f"{flag} {value!r}: {str(parent)!r} is not a directory"
+    if not os.access(parent, os.W_OK):
+        return f"{flag} {value!r}: the directory {str(parent)!r} is not writable"
+    if path.exists():
+        if path.is_dir():
+            return f"{flag} {value!r} is a directory, not a file"
+        if not os.access(path, os.W_OK):
+            return f"{flag} {value!r} exists and is not writable"
+    return None
+
+
+def _validate_writable_outputs(
+    settings: Settings, *, session_file: bool = True
+) -> None:
+    """Refuse an unwritable output or session path before a recording starts.
+
+    Neither path is touched until `_emit`, at the very end -- which for a
+    recording means after the whole interaction. So a read-only mount, a
+    typo'd directory or a quota surfaced as a `PermissionError` traceback with
+    every captured event already discarded: nothing is written until the end,
+    and there was nothing left to retry with. `--save-session` is the one the
+    docs tell everyone to pass, which made it the likeliest to be aimed at a
+    share that could not take it.
+
+    Only two of the three write paths were covered before, and only by the
+    writers themselves catching `FileNotFoundError`/`NotADirectoryError` --
+    so a missing directory got a clean message while a read-only one did not.
+    Raised as `ConfigError` to join `_validate_trim`'s refusals: one line,
+    before anything is captured, for the same stated reason.
+
+    `session_file=False` on the regenerate path, because `_regenerate` passes
+    `save_session=False` and never writes one -- checking it there refused a
+    regenerate whose script destination was perfectly writable.
+    """
+    destinations = [(settings.output, "--output")]
+    if session_file:
+        destinations.append((settings.session_file, "--save-session"))
+    for value, flag in destinations:
+        if not value:
+            continue
+        problem = _writable_path_problem(value, flag)
+        if problem is not None:
+            raise ConfigError(problem)
 
 
 def _validate_trim(
@@ -544,6 +625,7 @@ def _generator_options(settings: Settings) -> GeneratorOptions:
         max_timeout=sync.max_timeout,
         factor=sync.factor,
         redact_sensitive=settings.redact_sensitive,
+        sensitive=settings.sensitive,
         format_output=settings.format_output,
         include_header=settings.include_header,
         header=settings.header,
@@ -621,6 +703,23 @@ def _interrupt_on_termination(recorder: Any = None) -> Iterator[None]:
                 signal.signal(number, handler)
 
 
+def _as_secret_as_asked(settings: Settings, assertion: Assertion) -> Assertion:
+    """`assertion`, marked sensitive if `--sensitive` says every run is.
+
+    `describe_assertion` reads the event's own flag and nothing else, which is
+    the normalizer's answer about the field the text went into. `--sensitive`
+    is the caller overriding that for the whole run, and it has to mean the
+    same thing in both places the description is printed: the generator
+    applies it (`PythonGenerator._described`) and this is the live console's
+    half. Without it, `--sensitive` withheld the value from the file and then
+    echoed it to the terminal as the check was recorded -- the terminal being
+    the one place a reader is certainly looking.
+    """
+    if settings.sensitive and not assertion.sensitive:
+        return dataclasses.replace(assertion, sensitive=True)
+    return assertion
+
+
 def _record(
     settings: Settings,
     trim_from: float | None = None,
@@ -634,9 +733,12 @@ def _record(
             _stop_progress_message(settings, got, needed), file=sys.stderr
         )
         if settings.announce_checks:
-            recorder.on_check = lambda assertion: print(
-                f"Check: {describe_assertion(assertion)}", file=sys.stderr
-            )
+
+            def announce(assertion: Assertion) -> None:
+                shown = describe_assertion(_as_secret_as_asked(settings, assertion))
+                print(f"Check: {shown}", file=sys.stderr)
+
+            recorder.on_check = announce
         # Nothing else can explain a stop key that appears to do nothing: the
         # presses are in the queue behind the backlog, so saying how far behind
         # the recorder is says why the key has not been answered yet.
@@ -668,7 +770,7 @@ def _record(
         file=sys.stderr,
     )
     try:
-        with _interrupt_on_termination(recorder):
+        with _interrupt_on_termination(recorder), _elapsed_reminders(settings):
             recording = recorder.run()
     finally:
         recorder.stop()
@@ -713,13 +815,107 @@ def _regenerate(
     )
 
 
+_ELAPSED_REMINDERS = (120.0, 300.0)
+"""When to remind the user a recording is still running, in seconds.
+
+Two reminders rather than a repeating ticker: the point is to interrupt the
+case where someone has forgotten the recording is on, and a line every minute
+would be scrolled past like any other. After the last one the interval below
+repeats, because a recording that has run for an hour is the case this exists
+for most.
+"""
+
+_ELAPSED_REPEAT = 300.0
+
+
+@contextlib.contextmanager
+def _elapsed_reminders(settings: Settings) -> Iterator[None]:
+    """Say, while it is still running, how long a recording has been going.
+
+    A recording left open keeps capturing everything, in plaintext, from every
+    window -- the measured case is eight minutes that swallowed an unrelated
+    editor window and the text typed into it. The record path printed its three
+    opening lines and then went silent, so nothing between "Recording." and the
+    end said how long it had been on, and the remedy (`--regenerate --to`)
+    could only be reached after the fact by someone who already knew.
+
+    A timer thread rather than a hook on the event loop, deliberately: the
+    recording this matters for is the one nobody is attending, and an
+    event-driven reminder says nothing during the silence that most deserves
+    it. Daemon, and cancelled on the way out, so it can never hold the process
+    open or print after the summary.
+    """
+    done = threading.Event()
+
+    def tick() -> None:
+        elapsed = 0.0
+        for target in _ELAPSED_REMINDERS:
+            if done.wait(target - elapsed):
+                return
+            elapsed = target
+            _say_elapsed(elapsed, settings)
+        while not done.wait(_ELAPSED_REPEAT):
+            elapsed += _ELAPSED_REPEAT
+            _say_elapsed(elapsed, settings)
+
+    thread = threading.Thread(
+        target=tick, name="pyguitest-recorder-elapsed", daemon=True
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+
+
+def _say_elapsed(elapsed: float, settings: Settings) -> None:
+    """One elapsed-time reminder, naming the way out."""
+    minutes = int(elapsed // 60)
+    print(
+        f"note: still recording -- {minutes} minutes so far, capturing every "
+        f"window. {_stop_hint(settings)} to stop; "
+        "`--regenerate <session> --to <seconds>` trims a tail that was "
+        "recorded by accident.",
+        file=sys.stderr,
+    )
+
+
+def _warn_motion_without_waypoints(recording: Recording, settings: Settings) -> None:
+    """Say when a motion rendering has no recorded route in *this* recording.
+
+    The regenerate-path counterpart to `validate_motion_for_capture`, and a
+    better question than the one it asks: `record_motion` describes what a
+    capture was told to do, while this reads what the recording actually
+    holds. A session recorded with motion renders waypoints however the flag
+    was spelled, and one recorded without them cannot, whatever
+    `record_motion` says now.
+
+    A note rather than a refusal, because the script is still correct -- every
+    move renders as a teleport, exactly as `motion = "teleport"` would. What
+    the reader needs to know is that the waypoints they asked for are not
+    there, which is the one thing the silent version did not tell them.
+    """
+    if settings.motion not in ("recorded", "verbatim"):
+        return
+    if any(isinstance(event, MouseMove) for event in recording.events):
+        return
+    print(
+        f"note: motion = {settings.motion!r} has no route to render in this "
+        "recording -- it holds no pointer motion, so every move renders as a "
+        "plain teleport. A recording made with --record-motion carries the "
+        "waypoints this setting draws from.",
+        file=sys.stderr,
+    )
+
+
 def _trimmed_events(
     events: list[Event],
     trim_from: float | None,
     trim_to: float | None,
     drop: frozenset[int] | None,
+    exclude: tuple[str, ...] = (),
 ) -> list[Event]:
-    """Keep only events inside [trim_from, trim_to) and not in `drop`.
+    """Keep only events inside [trim_from, trim_to), not in `drop`, not excluded.
 
     `drop` indexes the *original* list, before any of this runs -- so
     `--from 8 --drop 0` always means "the very first event", not "whatever
@@ -729,6 +925,15 @@ def _trimmed_events(
     An out-of-range index raises rather than being silently ignored: a
     recording that turned out to have fewer events than expected is worth
     noticing, not trimming around quietly.
+
+    `exclude` is `Settings.exclude_windows`, applied in this same pass rather
+    than in a filter of its own precisely so `drop` keeps indexing the
+    original list: a separate earlier pass would renumber the events the
+    indices refer to. `Recorder._add` applies it at capture, which leaves a
+    live run filtering twice over the same predicate -- idempotent, and worth
+    it to make the `--regenerate` path honour the flag at all, where it was
+    silently a no-op: a recording that caught a password manager's window
+    rendered it into the script however the flag was spelled.
     """
     if drop:
         invalid = sorted(i for i in drop if i < 0 or i >= len(events))
@@ -745,6 +950,8 @@ def _trimmed_events(
             continue
         if trim_to is not None and event.timestamp >= trim_to:
             continue
+        if excluded(event, exclude):
+            continue
         kept.append(event)
     return kept
 
@@ -754,6 +961,7 @@ def _trimmed_recording(
     trim_from: float | None,
     trim_to: float | None,
     drop: frozenset[int] | None,
+    exclude: tuple[str, ...] = (),
 ) -> Recording:
     """A copy of `recording` with the trim applied and its delays recomputed.
 
@@ -771,7 +979,9 @@ def _trimmed_recording(
     # copy mirrors `from_dict`, which builds fresh events.
     kept = [
         dataclasses.replace(event)
-        for event in _trimmed_events(recording.events, trim_from, trim_to, drop)
+        for event in _trimmed_events(
+            recording.events, trim_from, trim_to, drop, exclude
+        )
     ]
     trimmed = Recording(
         events=kept,
@@ -945,21 +1155,41 @@ def _emit(
     trimmed recording is what gets re-analyzed *and* what a saved copy holds
     -- the whole point being to fix the recording once rather than repeating
     the same --from/--drop on every future --regenerate.
+
+    `exclude_windows` is applied in the same pass and for the same reason. At
+    capture `Recorder._add` already drops those events, so this is what makes
+    the flag mean anything on a `--regenerate`, where it was silently a no-op.
+
+    It reaches the *script* only on that path: `_regenerate` passes
+    `save_session=False`, so a regenerate never rewrites a session file and an
+    already-captured recording still cannot be scrubbed in place. That is a
+    deliberate refusal to overwrite the input, not an oversight here.
     """
-    if trim_from is not None or trim_to is not None or drop:
+    trimming = trim_from is not None or trim_to is not None or bool(drop)
+    # `exclude_windows` joins the trim here rather than being left to capture
+    # time, so that it reaches `--regenerate` -- and so that a saved copy is
+    # scrubbed too, by the same "fix the recording once" argument below.
+    excluding = bool(settings.exclude_windows)
+    if trimming or excluding:
         before = len(recording.events)
-        recording = _trimmed_recording(recording, trim_from, trim_to, drop)
+        recording = _trimmed_recording(
+            recording, trim_from, trim_to, drop, settings.exclude_windows
+        )
         kept = len(recording.events)
-        print(f"Trimmed {before - kept} of {before} events", file=sys.stderr)
+        removed = before - kept
+        what = "Trimmed" if trimming else "Excluded"
+        print(f"{what} {removed} of {before} events", file=sys.stderr)
         if before and not kept:
             # The `_trimmed_events` docstring's stance is to notice, not trim
             # quietly: a window or a drop list that removed every event leaves a
             # script that does nothing, which is worth saying out loud.
+            cause = "the trim" if trimming else "--exclude-window"
             print(
-                "note: the trim removed every event; the generated script will "
+                f"note: {cause} removed every event; the generated script will "
                 "do nothing",
                 file=sys.stderr,
             )
+    _warn_motion_without_waypoints(recording, settings)
     analyzed = _analyze(recording, settings)
     source = generate(analyzed, _generator_options(settings))
     problems = validate(source)
@@ -1041,6 +1271,12 @@ def _analyze(recording: Recording, settings: Settings) -> Recording:
     )
 
 
+def _recorded_span(recording: Recording) -> float:
+    """Seconds from the recording's first event to its last, or 0 for none."""
+    stamps = [event.timestamp for event in recording.events]
+    return max(stamps) - min(stamps) if stamps else 0.0
+
+
 def _summarize(recording: Recording, problems: list[str]) -> None:
     """Print what was recorded and anything that needs the user's attention."""
     observed = sum(1 for e in recording.events if e.origin is Origin.OBSERVED)
@@ -1049,6 +1285,14 @@ def _summarize(recording: Recording, problems: list[str]) -> None:
         f"{len(recording.events)} events ({observed} observed, {inferred} inferred)",
         file=sys.stderr,
     )
+    # The span, not just the count, because the count does not say how much of
+    # the desktop went past. A recording left open keeps capturing everything
+    # -- eight minutes of it once swallowed an unrelated editor window and the
+    # text typed into it -- and afterwards nothing here said it had covered
+    # eight minutes rather than the twenty seconds the author meant to record.
+    span = _recorded_span(recording)
+    if span >= 1.0:
+        print(f"Recorded span: {span:.0f}s", file=sys.stderr)
     for note in recording.environment.notes:
         print(f"note: {note}", file=sys.stderr)
     for problem in problems:

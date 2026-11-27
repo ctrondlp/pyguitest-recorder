@@ -32,7 +32,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..stopkey import StopKey
-from .base import CaptureUnavailable, RawEvent
+from ._xkb import keysym_text
+from .base import CaptureUnavailable, RawEvent, pending_from
 
 __all__ = ["X11CaptureBackend", "available", "unavailable_reason"]
 
@@ -516,15 +517,8 @@ class X11CaptureBackend:
             yield item
 
     def pending(self) -> list[RawEvent]:
-        """What capture has delivered and nothing has consumed yet, oldest first.
-
-        A copy, taken under the queue's own lock, that leaves the queue exactly
-        as it was: the consumer is a different thread and goes on taking from it.
-        Errors and the end-of-stream marker are not events and are left out.
-        """
-        with self._queue.mutex:
-            queued = list(self._queue.queue)
-        return [item for item in queued if isinstance(item, RawEvent)]
+        """What capture has delivered and nothing has consumed yet, oldest first."""
+        return pending_from(self._queue)
 
     def drain(self) -> Iterator[RawEvent]:
         """Yield what the pump has already delivered, without waiting for more.
@@ -694,9 +688,39 @@ def _keysym_names(xlib: dict[str, Any]) -> dict[int, str]:
     sends media keys unless Fn is held recorded `gui.send_keys("^({0x1008ff12})")`
     for Ctrl+F1, which is XF86AudioMute and which `press_key` cannot resolve.
     Loading the groups first makes that `XF86_AudioMute`, which it can.
+
+    Every group python-xlib ships is loaded, not a chosen few, because the
+    same failure reaches every non-Latin-1 layout. Measured on a live X11
+    session switched to `ru`: Ctrl plus the ф key recorded
+    `gui.send_keys('^({0x6c6})')`, where 0x6c6 is `Cyrillic_ef` -- a name
+    `press_key` resolves and a hex string it cannot. The character itself
+    was already right, because `_printable` reads the text through
+    libxkbcommon rather than this table; it is the *name* half, which a
+    chord needs and plain typing does not, that was missing. The lists are
+    per-script, so Greek, Hebrew, Arabic, Thai, Katakana and the Latin-2/3/4
+    sets each needed their own entry.
     """
     XK = xlib["XK"]
-    for group in ("xf86", "xkb", "latin1", "miscellany"):
+    for group in (
+        "xf86",
+        "xkb",
+        "latin1",
+        "latin2",
+        "latin3",
+        "latin4",
+        "miscellany",
+        "cyrillic",
+        "greek",
+        "hebrew",
+        "arabic",
+        "thai",
+        "katakana",
+        "korean",
+        "technical",
+        "publishing",
+        "special",
+        "apl",
+    ):
         # Absent on an older python-xlib, and a missing group is one keysym
         # family without names rather than a reason to fail the recording.
         with contextlib.suppress(Exception):
@@ -799,11 +823,26 @@ def _printable(keysym: int) -> str:
         # `type_text("ÿ")`, which a scancode backend rightly refuses. Found
         # replaying a recorded text-editing session on a live desktop.
         return ""
-    try:
-        from Xlib import XK
-    except ImportError:  # pragma: no cover - reached only without python-xlib
-        return ""
-    text = str(XK.keysym_to_string(keysym) or "")
+    # libxkbcommon's own keysym table first, then python-xlib's. The order is
+    # the point: `Xlib.XK.keysym_to_string` answers for Latin-1 and eight
+    # named control keys and returns None for everything else -- its own
+    # source says the other blocks "will have to wait" -- so Latin-2/3/4/5,
+    # Cyrillic, Greek, Hebrew, Arabic and Thai all came back with no text,
+    # and a keystroke on any such layout was recorded as a bare key *name*.
+    # That generated `tap_key("Cyrillic_pe")`, which replay refuses off X11,
+    # and -- because only a `TextInput` carries the sensitive flag -- walked
+    # straight past redaction, spelling a password out key by key.
+    #
+    # `keysym_text` returns "" where libxkbcommon is absent or too old, so
+    # the fallback below is still what answers on a box without it, which is
+    # exactly the behaviour this backend had before.
+    text = keysym_text(keysym)
+    if not text:
+        try:
+            from Xlib import XK  # noqa: PLC0415
+        except ImportError:  # pragma: no cover - reached only without python-xlib
+            return ""
+        text = str(XK.keysym_to_string(keysym) or "")
     if len(text) != 1 or ord(text) < 32 or ord(text) == 127:
         return ""
     return text

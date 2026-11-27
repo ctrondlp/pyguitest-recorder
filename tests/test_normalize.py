@@ -14,6 +14,7 @@ from pyguitest_recorder.analyzer import Normalizer, NormalizerOptions
 from pyguitest_recorder.backends.base import RawEvent
 from pyguitest_recorder.model import (
     Click,
+    Comment,
     Drag,
     ElementRef,
     HotKey,
@@ -2097,3 +2098,52 @@ class TestTypingBehindLiveInputWithAnEmptyQueue:
 
         typed, _ = self._typed(key, boom, lag=0.05)
         assert typed.sensitive is False
+
+
+class TestAKeyWithNoNameAndNoText:
+    """The call `MacosCaptureBackend._key` leaves to the normalizer.
+
+    That backend sets `keysym` to "" for a virtual keycode its table does not
+    name -- the keypad, the ISO section key, the JIS keys -- "rather than
+    invented", and says what an unnamed key means is the normalizer's call.
+    Nothing made the call, so the key became `KeyStroke(key="")` and the
+    generator rendered an unrunnable script.
+    """
+
+    def _events(self, *raws):
+        normalizer = Normalizer()
+        out = []
+        for raw in raws:
+            out += normalizer.feed(raw)
+        return out
+
+    def test_it_becomes_a_comment_rather_than_an_unnameable_keystroke(self):
+        events = self._events(
+            RawEvent(kind="key_press", timestamp=1.0, keysym="", text="")
+        )
+        assert [type(event) for event in events] == [Comment]
+        assert "could not" in events[0].text
+        assert events[0].origin is Origin.OBSERVED
+
+    def test_a_modifier_held_over_it_emits_no_hotkey(self):
+        # The worse half of the old behaviour: a hotkey whose last key was ""
+        # rendered as `send_keys("^({})")`, which raises ValueError rather
+        # than merely failing to find a key.
+        events = self._events(
+            RawEvent(kind="key_press", timestamp=1.0, keysym="Control_L"),
+            RawEvent(kind="key_press", timestamp=1.2, keysym="", text=""),
+        )
+        assert not [event for event in events if isinstance(event, HotKey)]
+        assert [type(event) for event in events] == [Comment]
+
+    def test_a_keypad_digit_still_types_through_its_text(self):
+        # The condition is deliberately "no name *and* no text": a keypad
+        # digit arrives unnamed but carries its character, and that replays
+        # correctly as typing.
+        events = self._events(
+            RawEvent(kind="key_press", timestamp=1.0, keysym="", text="5"),
+            RawEvent(kind="key_press", timestamp=9.0, keysym="Return"),
+        )
+        typed = [event for event in events if isinstance(event, TextInput)]
+        assert [event.text for event in typed] == ["5"]
+        assert not [event for event in events if isinstance(event, Comment)]

@@ -1599,3 +1599,95 @@ class TestExcludeWindows:
         recording = recorder.run()
         assert recording.events != []
         assert not any("withheld" in n for n in recording.environment.notes)
+
+
+class TestCaptureScaleIsWiredFromTheSession:
+    """`_wire_capture_scale`: the Recorder is the only thing that can tell it.
+
+    The evdev backend reads `/dev/input` below the compositor and holds no
+    display connection, so it cannot learn a scale by itself -- while the
+    coordinates it emits are consumed in the compositor's logical space. The
+    Recorder holds both the capture backend and a pyguitest session, so it is
+    where the two meet, the way pyguitest's own
+    `_wire_atspi_window_geometry` hands one member a sibling's capability.
+    """
+
+    class _Backend:
+        def __init__(self):
+            self.scale = None
+            self.name = "wayland-evdev"
+
+        def set_scale(self, scale):
+            self.scale = scale
+
+    class _Screen:
+        def __init__(self, scale):
+            self.scale = scale
+
+    def _recorder(self, screens, backend=None):
+        recorder = object.__new__(Recorder)
+        recorder._backend = backend if backend is not None else self._Backend()
+
+        class _Session:
+            def screens(inner):
+                if isinstance(screens, Exception):
+                    raise screens
+                return screens
+
+        recorder._session = _Session()
+        return recorder
+
+    def test_a_scaled_desktop_is_wired_and_said_out_loud(self):
+        recorder = self._recorder([self._Screen(2.0)])
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert recorder._backend.scale == 2.0
+        assert any("scaled 2x" in note for note in notes)
+
+    def test_an_unscaled_desktop_is_wired_with_nothing_and_says_nothing(self):
+        # Every box in the fleet. A factor of 1 is not news.
+        recorder = self._recorder([self._Screen(1.0)])
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert recorder._backend.scale is None
+        assert notes == []
+
+    def test_a_session_that_cannot_report_screens_says_so(self):
+        # KDE was exactly this until pyguitest 0.30.0's `kscreen` member: the
+        # refusal was caught and the session assumed unscaled, which is how a
+        # 200% desktop recorded coordinates double the resolver's space.
+        recorder = self._recorder(RuntimeError("SCREEN_INFO is unsupported"))
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert recorder._backend.scale is None
+        assert any("no screen information" in note for note in notes)
+
+    def test_mixed_scales_are_refused_rather_than_averaged(self):
+        # Per-output scales need per-output arithmetic, which needs output
+        # positions -- and `Screen` deliberately does not carry them.
+        recorder = self._recorder([self._Screen(1.0), self._Screen(2.0)])
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert recorder._backend.scale is None
+        assert any("mixes scale factors" in note for note in notes)
+
+    def test_no_session_at_all_is_said_rather_than_skipped(self):
+        # Both context settings off, so nothing was opened that could answer
+        # -- but the coordinates still go into the script, and under
+        # `locators = "absolute"` they are the only thing a replay has.
+        recorder = self._recorder([])
+        recorder._session = None
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert recorder._backend.scale is None
+        assert any("no desktop session was opened" in note for note in notes)
+
+    def test_a_backend_with_no_scale_to_set_is_left_alone(self):
+        # x11/win32/macos capture: nothing to wire, and no note to make.
+        class _Other:
+            name = "xrecord"
+
+        recorder = self._recorder([self._Screen(2.0)], backend=_Other())
+        notes = []
+        recorder._wire_capture_scale(notes)
+        assert notes == []
