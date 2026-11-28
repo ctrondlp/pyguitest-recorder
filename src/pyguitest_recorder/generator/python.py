@@ -90,7 +90,7 @@ __all__ = [
     "ValidationError",
 ]
 
-PROFILE = "pyguitest-0.30"
+PROFILE = "pyguitest-0.31"
 """The API profile this generator targets, recorded in the output header.
 
 Bumped with the pyguitest whose surface the emitted calls were actually
@@ -227,7 +227,7 @@ nothing. And `Role.ALERT` / `Role.FILE_CHOOSER` are new as window roles
 there, which `_WINDOW_ROLES` below mirrors.
 """
 
-FLOOR = "0.30.0"
+FLOOR = "0.31.0"
 """The oldest pyguitest a generated script replays correctly on every platform.
 
 What `--require-version` writes into a script (`_require_version_line`), and
@@ -259,6 +259,19 @@ the character fell through to the literal path. 0.30.0 refuses it instead. A
 script generated here and replayed under 0.29.0 on macOS therefore does the
 wrong thing silently where this floor does it loudly, which is reason enough
 for the step on its own.
+
+0.31.0 is a pairing step and nothing more: its addition is
+`Session.keymap_safe`, a read about whether typed text can be trusted to
+arrive as written, which a generated script has no reason to make -- it types
+what was recorded and asserts on what the application did with it. Nothing
+here renders a call that release introduced, and no emitted construct behaves
+differently under it, with one exception that is not about what is emitted:
+0.31.0 withholds the four window operations only a window manager can carry
+out where none is running, having declared them and done nothing before. A
+replay on a bare X server with no manager now raises at a move, resize,
+maximize or close instead of passing while the window stays put -- louder,
+and not a reason the floor had to move, since every session with a manager is
+unaffected.
 """
 
 # AT-SPI roles pyguitest gives a dedicated accessor. Anything else is reached

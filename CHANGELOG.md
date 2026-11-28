@@ -3,6 +3,41 @@
 Notable changes, newest first. Dates are when the work landed, not when it
 was released.
 
+## [0.23.1] — 2026-11-28
+
+A patch, and a pairing step only: the profile and floor follow pyguitest
+0.31.0, because the header names the line the output is checked against and
+the floor must lie on it. Nothing this generator emits is new surface over
+there — 0.31.0's addition is `Session.keymap_safe`, a read a generated
+script has no reason to make.
+
+Worth saying plainly for anyone already installed: **recorder 0.23.0 does
+not break on pyguitest 0.31.0.** The dependency was `pyguitest>=0.30.0` with
+no ceiling, so the newer release satisfies it and every emitted call behaves
+as before. What the move fixes is this repository's own agreement with
+itself — `test_generator.py` asserts `PROFILE` names the installed
+pyguitest's minor line, so the suite, not the product, is what a stale
+profile breaks.
+
+### Changed
+
+- **The pyguitest floor is now 0.31.0, and `PROFILE` moves with it to
+  `pyguitest-0.31`**, with the pin in `pyproject.toml` and the version
+  numbers in `README.md`, `docs/getting-started.md` and
+  `docs/troubleshooting.md` following — `tests/test_docs.py` holds the
+  declared floor equal to `FLOOR`, and the sample `Profile:` lines equal to
+  `PROFILE`, so these move together or not at all.
+
+- **One behaviour of pyguitest 0.31.0 is worth knowing when replaying on a
+  bare X server**, though it changes nothing the generator writes: pyguitest
+  now withholds `WINDOW_PLACEMENT`, `WINDOW_RESIZE`, `WINDOW_MAXIMIZE` and
+  `WINDOW_CLOSE` where no window manager is running, having previously
+  declared them and silently done nothing. A replayed script that moves,
+  resizes, maximizes or closes a window on a display with no manager now
+  raises `CapabilityUnsupported` at that call instead of passing while
+  nothing happens. That is the better outcome and needs no change here, but
+  a CI job running a bare `Xvfb` with no manager is where it will show up.
+
 ## [0.23.0] — 2026-11-26
 
 From an ease-of-use and cross-platform review of both repositories. The
