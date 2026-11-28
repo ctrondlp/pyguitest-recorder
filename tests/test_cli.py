@@ -1574,6 +1574,19 @@ class TestTheConsoleHonoursSensitive:
         assert _as_secret_as_asked(Settings(), event) is event
 
 
+# The two tests below arrange a refusal by taking write permission away from
+# a directory. That only arranges anything for a user the mode applies to:
+# uid 0 bypasses it, `os.access(W_OK)` answers True on a 0o500 directory, and
+# the refusal under test never happens -- the check is right, and root really
+# can write there. The Linux runners are an unprivileged user, so this stayed
+# invisible until the nightly FreeBSD VM, which `vmactions` runs as root,
+# failed both of them while the other 1493 tests passed.
+_modes_are_enforced = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="POSIX modes, and uid 0 is not subject to them",
+)
+
+
 class TestTheOutputPathIsCheckedBeforeRecording:
     """`_writable_path_problem`: refuse a destination before, not after.
 
@@ -1603,7 +1616,7 @@ class TestTheOutputPathIsCheckedBeforeRecording:
         assert problem is not None
         assert "is a directory, not a file" in problem
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    @_modes_are_enforced
     def test_an_unwritable_directory_is_named(self, tmp_path):
         locked = tmp_path / "locked"
         locked.mkdir()
@@ -1629,7 +1642,7 @@ class TestTheOutputPathIsCheckedBeforeRecording:
         finally:
             target.chmod(0o644)
 
-    @pytest.mark.skipif(os.name != "posix", reason="symlinks")
+    @_modes_are_enforced
     def test_a_symlink_is_judged_by_where_it_points(self, tmp_path):
         # Both writers `resolve()` before they write, because `os.replace`
         # would otherwise replace the *link*. Checking the unresolved parent
